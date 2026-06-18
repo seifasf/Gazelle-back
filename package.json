@@ -1,0 +1,32 @@
+{
+  "name": "gazelle-erp-oms",
+  "version": "1.0.0",
+  "description": "Gazelle ERP/OMS backend — Shopify + Bosta integrated order and inventory management",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "worker": "node src/workers/agendaWorker.js",
+    "dev": "node --watch src/server.js",
+    "dev:worker": "node --watch src/workers/agendaWorker.js",
+    "seed": "node scripts/seed.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "agenda": "^5.0.0",
+    "bcrypt": "^5.1.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "graphql": "^16.10.0",
+    "graphql-request": "^7.1.2",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.9.3",
+    "pino": "^9.6.0",
+    "pino-http": "^10.3.0",
+    "zod": "^3.24.1"
+  }
+}
