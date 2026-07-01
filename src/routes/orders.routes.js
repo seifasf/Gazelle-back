@@ -7,6 +7,8 @@ const router = Router();
 
 router.use(authenticate, sanitizeFinancialResponse);
 
+router.get('/counts', requireRoles('admin', 'orders_manager', 'stock_manager'), ordersController.getStateCounts);
+router.post('/manual', requireRoles('admin', 'orders_manager'), ordersController.createManualOrder);
 router.get('/', requireRoles('admin', 'orders_manager', 'stock_manager'), ordersController.listOrders);
 router.get('/:id', requireRoles('admin', 'orders_manager', 'stock_manager'), ordersController.getOrder);
 router.get(

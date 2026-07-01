@@ -1,6 +1,6 @@
 import { processShopifyWebhookJob } from '../webhooks/shopify.handlers.js';
 import { processBostaStatusUpdate } from '../integrations/bosta/tracking.service.js';
-import { syncCatalogFromShopify } from '../integrations/shopify/sync.service.js';
+import { syncCatalog } from '../integrations/shopify/sync.service.js';
 import { createDelivery } from '../integrations/bosta/shipments.service.js';
 import { pollStuckOrders } from '../integrations/bosta/tracking.service.js';
 import InventoryLedger from '../models/InventoryLedger.js';
@@ -10,9 +10,11 @@ import Customer from '../models/Customer.js';
 import Settings from '../models/Settings.js';
 import WebhookReceipt from '../models/WebhookReceipt.js';
 import { inventoryAdjustQuantities } from '../integrations/shopify/mutations/inventoryAdjust.js';
+import { assertShopifyInventoryWriteAllowed } from '../integrations/shopify/writePolicy.js';
 import { config } from '../config/index.js';
 import orderService from '../services/order.service.js';
 import { JOB_NAMES } from '../constants/index.js';
+import { checkRestockNeeded, checkSlowMovers } from '../services/adminJobs.service.js';
 import logger from '../utils/logger.js';
 
 export function registerJobs(agenda) {
@@ -53,6 +55,8 @@ export function registerJobs(agenda) {
     const locationId = settings?.shopifyLocationId || config.SHOPIFY_LOCATION_ID;
     if (!locationId) throw new Error('Shopify location ID not configured');
 
+    await assertShopifyInventoryWriteAllowed();
+
     try {
       await inventoryAdjustQuantities({
         inventoryItemId: variant.shopifyInventoryItemId,
@@ -74,7 +78,7 @@ export function registerJobs(agenda) {
   });
 
   agenda.define(JOB_NAMES.SHOPIFY_CATALOG_SYNC, async () => {
-    await syncCatalogFromShopify();
+    await syncCatalog();
   });
 
   agenda.define(JOB_NAMES.BOSTA_CREATE_SHIPMENT, async (job) => {
@@ -82,22 +86,34 @@ export function registerJobs(agenda) {
     const order = await Order.findById(orderId).populate('customerId');
     if (!order) throw new Error('Order not found');
 
-    const result = await createDelivery(order, order.customerId);
-    const deliveryId = result._id || result.id || result.data?._id;
-    const trackingNumber = result.trackingNumber || result.tracking_number;
-
-    order.bostaDeliveryId = deliveryId;
-    order.bostaTrackingNumber = trackingNumber;
-    if (actorUserId) order.assignedStockManagerId = actorUserId;
+    order.bostaShipmentStatus = 'creating';
+    order.bostaShipmentError = null;
     await order.save();
 
-    await orderService.transitionOrderStatus(orderId, 'picked_up_by_bosta', {
-      source: 'system',
-      actorUserId,
-      note: 'Bosta shipment created',
-    });
+    try {
+      const result = await createDelivery(order, order.customerId);
+      const deliveryId = result._id || result.id || result.data?._id;
+      const trackingNumber = result.trackingNumber || result.tracking_number;
 
-    return result;
+      order.bostaDeliveryId = deliveryId;
+      order.bostaTrackingNumber = trackingNumber;
+      order.bostaShipmentStatus = 'created';
+      if (actorUserId) order.assignedStockManagerId = actorUserId;
+      await order.save();
+
+      await orderService.transitionOrderStatus(orderId, 'picked_up_by_bosta', {
+        source: 'system',
+        actorUserId,
+        note: 'Bosta shipment created',
+      });
+
+      return result;
+    } catch (error) {
+      order.bostaShipmentStatus = 'failed';
+      order.bostaShipmentError = error.message;
+      await order.save();
+      throw error;
+    }
   });
 
   agenda.define(JOB_NAMES.BOSTA_POLLING_FALLBACK, async () => {
@@ -106,12 +122,17 @@ export function registerJobs(agenda) {
     return pollStuckOrders(hours);
   });
 
+  agenda.define(JOB_NAMES.CHECK_RESTOCK_NEEDED, async () => checkRestockNeeded());
+  agenda.define(JOB_NAMES.CHECK_SLOW_MOVERS, async () => checkSlowMovers());
+
   logger.info('Agenda jobs registered');
 }
 
 export async function scheduleRecurringJobs(agenda) {
   await agenda.every('1 hour', JOB_NAMES.SHOPIFY_CATALOG_SYNC);
   await agenda.every('6 hours', JOB_NAMES.BOSTA_POLLING_FALLBACK);
+  await agenda.every('24 hours', JOB_NAMES.CHECK_RESTOCK_NEEDED);
+  await agenda.every('24 hours', JOB_NAMES.CHECK_SLOW_MOVERS);
   logger.info('Agenda recurring jobs scheduled');
 }
 

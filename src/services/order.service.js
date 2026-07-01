@@ -11,10 +11,19 @@ import {
   buildPreDeliveryReleaseEntries,
   buildPostDeliveryReturnEntries,
   buildManualAdjustmentEntry,
+  buildStockIntakeEntries,
 } from './inventory.service.js';
-import { TERMINAL_ORDER_STATUSES } from '../constants/index.js';
+import { TERMINAL_ORDER_STATUSES, ORDER_STATUSES } from '../constants/index.js';
 import { getAgenda } from '../config/agenda.js';
 import { JOB_NAMES } from '../constants/index.js';
+import {
+  notifyOrderVerified,
+  notifyFailedDelivery,
+  notifyReturnToOrigin,
+  notifyNewOrder,
+  checkVariantsLowStock,
+} from './notification.service.js';
+import { recordDeliveryJournal } from './accounting.service.js';
 
 async function recordStatusChange(
   { orderId, fromStatus, toStatus, source, actorUserId, note },
@@ -78,7 +87,7 @@ async function enqueueShopifySync(ledgerDocs) {
   }
 }
 
-export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCogsSnapshot }) {
+export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCogsSnapshot, shippingMethod }) {
   const order = await Order.findById(orderId).populate('items.variantId');
   if (!order) {
     const err = new Error('Order not found');
@@ -101,12 +110,17 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
     updates.assignedOrdersManagerId = actorUserId;
   }
 
-  return withTransaction(async (session) => {
+  const verified = await withTransaction(async (session) => {
     const fresh = await Order.findById(orderId).session(session);
     fresh.verificationLog.push({ outcome, note, actorUserId });
     if (totalCogsSnapshot != null) fresh.totalCogsSnapshot = totalCogsSnapshot;
     if (!fresh.assignedOrdersManagerId) fresh.assignedOrdersManagerId = actorUserId;
+    if (shippingMethod) fresh.shippingMethod = shippingMethod;
     await fresh.save({ session });
+
+    if (fresh.orderSource === 'manual') {
+      await reserveStockForOrder(fresh._id, fresh.items, session);
+    }
 
     await transitionOrder(
       fresh,
@@ -116,6 +130,9 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
     );
     return Order.findById(orderId).session(session);
   });
+
+  await notifyOrderVerified(verified);
+  return verified;
 }
 
 export async function cancelOrder(orderId, actorUserId, { reason, note, source = 'user_action' }) {
@@ -164,7 +181,10 @@ async function executeDelivered(order, { source, actorUserId, note }, session) {
   await applyLedgerEntries(ledgerEntries, session);
   await transitionOrder(order, 'delivered', { source, actorUserId, note }, session);
   await Customer.updateOne({ _id: order.customerId }, { $inc: { lifetimeDelivered: 1 } }, { session });
-  return Order.findById(order._id).session(session);
+  const delivered = await Order.findById(order._id).session(session);
+  // Best-effort accounting — must not block delivery.
+  await recordDeliveryJournal(delivered, actorUserId);
+  return delivered;
 }
 
 export async function markDelivered(orderId, source, actorUserId, note, existingSession) {
@@ -179,7 +199,10 @@ export async function markDelivered(orderId, source, actorUserId, note, existing
   };
 
   if (existingSession) return run(existingSession);
-  return withTransaction(run);
+  const delivered = await withTransaction(run);
+  // Delivery decrements warehouse stock — flag anything that dropped low.
+  await checkVariantsLowStock((delivered?.items || []).map((i) => i.variantId));
+  return delivered;
 }
 
 export async function confirmReturnedToStock(orderId, actorUserId, note) {
@@ -220,7 +243,7 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
 }
 
 export async function transitionOrderStatus(orderId, toStatus, meta) {
-  return withTransaction(async (session) => {
+  const updated = await withTransaction(async (session) => {
     const order = await Order.findById(orderId).session(session);
     if (!order) {
       const err = new Error('Order not found');
@@ -235,6 +258,12 @@ export async function transitionOrderStatus(orderId, toStatus, meta) {
     await transitionOrder(order, toStatus, meta, session);
     return Order.findById(orderId).session(session);
   });
+
+  if (toStatus === 'failed_delivery') await notifyFailedDelivery(updated);
+  else if (toStatus === 'returning_to_origin') await notifyReturnToOrigin(updated);
+  else if (toStatus === 'delivered') await checkVariantsLowStock((updated?.items || []).map((i) => i.variantId));
+
+  return updated;
 }
 
 export async function reserveStockForOrder(orderId, items, session) {
@@ -242,32 +271,177 @@ export async function reserveStockForOrder(orderId, items, session) {
   return applyLedgerEntries(entries, session);
 }
 
-export async function manualStockAdjustment({ variantId, quantityDelta, reasonCode, actorUserId }) {
+export async function manualStockAdjustment({ variantId, quantityDelta, reasonCode, actorUserId, syncToShopify = false }) {
   return withTransaction(async (session) => {
-    const entry = buildManualAdjustmentEntry({ variantId, quantityDelta, reasonCode, actorUserId });
-    const [ledgerDoc] = await applyLedgerEntries([entry], session);
+    const entries = syncToShopify && quantityDelta > 0
+      ? buildStockIntakeEntries({ variantId, quantityDelta, reasonCode, actorUserId, syncToShopify: true })
+      : [buildManualAdjustmentEntry({ variantId, quantityDelta, reasonCode, actorUserId })];
+    const ledgerDocs = await applyLedgerEntries(entries, session);
     const variant = await Variant.findById(variantId).session(session);
-    return { variant, ledger: ledgerDoc };
+    await enqueueShopifySync(ledgerDocs);
+    return { variant, ledger: ledgerDocs[0], shopifySyncQueued: ledgerDocs.some((d) => d.shopifySyncStatus === 'pending') };
+  }).then(async (result) => {
+    await checkVariantsLowStock([variantId]);
+    return result;
   });
+}
+
+export async function stockIntake({ variantId, quantity, reasonCode, note, actorUserId, syncToShopify = true }) {
+  if (quantity <= 0) {
+    const err = new Error('Stock intake quantity must be positive');
+    err.statusCode = 400;
+    throw err;
+  }
+  return manualStockAdjustment({
+    variantId,
+    quantityDelta: quantity,
+    reasonCode: reasonCode || 'restock',
+    actorUserId,
+    syncToShopify,
+  });
+}
+
+export async function createManualOrder({
+  manualSource,
+  shippingMethod,
+  customer,
+  shippingAddress,
+  items,
+  totalSellingPrice,
+  note,
+  actorUserId,
+  isCreatorOrder = false,
+}) {
+  const ref = `MAN-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const manualOrder = await withTransaction(async (session) => {
+    let customerDoc = await Customer.findOne({ phone: customer.phone }).session(session);
+    if (!customerDoc) {
+      [customerDoc] = await Customer.create(
+        [{
+          fullName: customer.fullName,
+          phone: customer.phone,
+          email: customer.email,
+          riskFlag: customer.riskFlag || 'none',
+        }],
+        { session }
+      );
+    }
+
+    const orderItems = [];
+    for (const item of items) {
+      const variant = await Variant.findById(item.variantId).session(session);
+      if (!variant) {
+        const err = new Error(`Variant not found: ${item.variantId}`);
+        err.statusCode = 404;
+        throw err;
+      }
+      orderItems.push({
+        variantId: variant._id,
+        sku: variant.sku,
+        quantity: item.quantity,
+        unitSellingPrice: item.unitSellingPrice ?? variant.sellingPrice,
+        unitCogs: variant.cogs,
+      });
+    }
+
+    const total = totalSellingPrice ?? orderItems.reduce(
+      (sum, i) => sum + i.unitSellingPrice * i.quantity,
+      0
+    );
+
+    const [order] = await Order.create(
+      [{
+        shopifyOrderId: ref,
+        orderSource: 'manual',
+        manualSource,
+        shippingMethod: shippingMethod || 'bosta',
+        customerId: customerDoc._id,
+        shippingAddress: {
+          ...shippingAddress,
+          phone: shippingAddress.phone || customer.phone,
+          fullName: shippingAddress.fullName || customer.fullName,
+        },
+        internalStatus: 'pending_verification',
+        isCreatorOrder: Boolean(isCreatorOrder),
+        totalSellingPrice: total,
+        totalCogsSnapshot: orderItems.reduce((s, i) => s + (i.unitCogs || 0) * i.quantity, 0),
+        items: orderItems,
+        placedAt: new Date(),
+        assignedOrdersManagerId: actorUserId,
+        verificationLog: note ? [{ outcome: 'confirmed', note, actorUserId }] : [],
+      }],
+      { session }
+    );
+
+    await recordStatusChange(
+      {
+        orderId: order._id,
+        fromStatus: null,
+        toStatus: 'pending_verification',
+        source: 'user_action',
+        actorUserId,
+        note: `Manual order from ${manualSource}`,
+      },
+      session
+    );
+
+    await Customer.updateOne({ _id: customerDoc._id }, { $inc: { lifetimeOrders: 1 } }, { session });
+
+    return Order.findById(order._id).session(session).populate('customerId');
+  });
+
+  await notifyNewOrder(manualOrder, { source: 'manual' });
+  return manualOrder;
+}
+
+export async function getOrderStateCounts() {
+  const pipeline = [{ $group: { _id: '$internalStatus', count: { $sum: 1 } } }];
+  const rows = await Order.aggregate(pipeline);
+  const counts = Object.fromEntries(ORDER_STATUSES.map((s) => [s, 0]));
+  for (const row of rows) {
+    counts[row._id] = row.count;
+  }
+  counts.total = rows.reduce((sum, r) => sum + r.count, 0);
+  return counts;
+}
+
+export async function listOrders({ status, search, orderSource, shippingMethod, limit = 50, skip = 0, sort = { placedAt: -1 } }) {
+  const filter = {};
+  if (status) {
+    const statuses = typeof status === 'string' && status.includes(',')
+      ? status.split(',').map((s) => s.trim())
+      : status;
+    filter.internalStatus = Array.isArray(statuses) ? { $in: statuses } : statuses;
+  }
+  if (orderSource) filter.orderSource = orderSource;
+  if (shippingMethod) filter.shippingMethod = shippingMethod;
+  if (search) {
+    const regex = { $regex: search, $options: 'i' };
+    filter.$or = [
+      { shopifyOrderId: regex },
+      { 'shippingAddress.fullName': regex },
+      { 'shippingAddress.phone': regex },
+      { 'shippingAddress.city': regex },
+    ];
+  }
+  const [orders, total] = await Promise.all([
+    Order.find(filter)
+      .sort(sort)
+      .skip(skip)
+      .limit(limit)
+      .populate('customerId', 'fullName phone riskFlag'),
+    Order.countDocuments(filter),
+  ]);
+  return { orders, total };
 }
 
 export async function getOrderById(orderId) {
   return Order.findById(orderId)
     .populate('customerId')
     .populate('assignedOrdersManagerId', 'name email')
-    .populate('assignedStockManagerId', 'name email');
-}
-
-export async function listOrders({ status, limit = 50, skip = 0, sort = { placedAt: 1 } }) {
-  const filter = {};
-  if (status) {
-    filter.internalStatus = Array.isArray(status) ? { $in: status } : status;
-  }
-  const [orders, total] = await Promise.all([
-    Order.find(filter).sort(sort).skip(skip).limit(limit).populate('customerId', 'fullName phone riskFlag'),
-    Order.countDocuments(filter),
-  ]);
-  return { orders, total };
+    .populate('assignedStockManagerId', 'name email')
+    .populate('items.variantId', 'title color size imageUrl sku realStock onHoldStock');
 }
 
 export async function getOrderStatusHistory(orderId) {
@@ -291,6 +465,9 @@ export default {
   transitionOrderStatus,
   reserveStockForOrder,
   manualStockAdjustment,
+  stockIntake,
+  createManualOrder,
+  getOrderStateCounts,
   getOrderById,
   listOrders,
   getOrderStatusHistory,

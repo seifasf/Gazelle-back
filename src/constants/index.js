@@ -23,7 +23,7 @@ export const LEDGER_TYPES = [
   'online_stock_increment_api',
 ];
 
-export const STATUS_SOURCES = ['shopify_webhook', 'bosta_webhook', 'user_action', 'system'];
+export const STATUS_SOURCES = ['shopify_webhook', 'shopify_import', 'bosta_webhook', 'user_action', 'system'];
 
 export const RISK_FLAGS = ['none', 'watch', 'high_risk', 'vip'];
 
@@ -44,6 +44,19 @@ export const VERIFICATION_OUTCOMES = [
 
 export const SHOPIFY_SYNC_STATUSES = ['pending', 'synced', 'failed'];
 
+export const ORDER_SOURCES = ['shopify', 'manual'];
+
+export const MANUAL_ORDER_SOURCES = [
+  'instagram',
+  'facebook',
+  'whatsapp',
+  'phone',
+  'website',
+  'other',
+];
+
+export const SHIPPING_METHODS = ['bosta', 'local_shipping'];
+
 export const JOB_NAMES = {
   PROCESS_SHOPIFY_WEBHOOK: 'process-shopify-webhook',
   PROCESS_BOSTA_WEBHOOK: 'process-bosta-webhook',
@@ -51,4 +64,32 @@ export const JOB_NAMES = {
   SHOPIFY_CATALOG_SYNC: 'shopify-catalog-sync',
   BOSTA_CREATE_SHIPMENT: 'bosta-create-shipment',
   BOSTA_POLLING_FALLBACK: 'bosta-polling-fallback',
+  CHECK_RESTOCK_NEEDED: 'check-restock-needed',
+  CHECK_SLOW_MOVERS: 'check-slow-movers',
 };
+
+export const PO_STATUSES = [
+  'draft',
+  'sent',
+  'confirmed',
+  'in_production',
+  'shipped',
+  'received',
+  'cancelled',
+];
+
+export const OPEN_PO_STATUSES = ['draft', 'sent', 'confirmed', 'in_production', 'shipped'];
+
+export const GL_CATEGORIES = ['asset', 'revenue', 'cogs', 'expense', 'liability', 'equity'];
+
+export const JOURNAL_SOURCES = ['manual', 'auto_order', 'auto_delivery'];
+
+export const LEAVE_TYPES = ['annual', 'sick', 'unpaid', 'emergency'];
+
+export const LEAVE_STATUSES = ['pending', 'approved', 'rejected'];
+
+export const ATTENDANCE_STATUSES = ['present', 'absent', 'late', 'half_day'];
+
+export const SALARY_TYPES = ['monthly', 'hourly'];
+
+export const HR_DEPARTMENTS = ['operations', 'warehouse', 'admin', 'sales', 'other'];

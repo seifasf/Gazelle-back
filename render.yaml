@@ -1,0 +1,39 @@
+# Render Blueprint — Gazelle OMS API
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: gazelle-api
+    runtime: node
+    region: frankfurt
+    plan: free
+    rootDir: .
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: APP_URL
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: SHOPIFY_SHOP_DOMAIN
+        sync: false
+      - key: SHOPIFY_ACCESS_TOKEN
+        sync: false
+      - key: SHOPIFY_WEBHOOK_SECRET
+        sync: false
+      - key: SHOPIFY_API_VERSION
+        value: "2025-01"
+      - key: SHOPIFY_LOCATION_ID
+        sync: false
+      - key: BOSTA_API_KEY
+        sync: false
+      - key: BOSTA_API_BASE_URL
+        value: https://app.bosta.co/api/v2

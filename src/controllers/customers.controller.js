@@ -18,6 +18,15 @@ export async function getCustomer(req, res, next) {
   }
 }
 
+export async function getCustomerOrders(req, res, next) {
+  try {
+    const result = await customerService.getCustomerShopifyOrders(req.params.id);
+    res.json({ data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function updateRiskFlag(req, res, next) {
   try {
     const customer = await customerService.updateCustomerRiskFlag(req.params.id, req.body.riskFlag);
@@ -27,4 +36,4 @@ export async function updateRiskFlag(req, res, next) {
   }
 }
 
-export default { listCustomers, getCustomer, updateRiskFlag };
+export default { listCustomers, getCustomer, getCustomerOrders, updateRiskFlag };

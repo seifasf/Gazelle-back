@@ -1,6 +1,7 @@
 import Variant from '../models/Variant.js';
 import InventoryLedger from '../models/InventoryLedger.js';
 import DiscrepancyAlert from '../models/DiscrepancyAlert.js';
+import { notifyDiscrepancy } from './notification.service.js';
 
 export async function checkVariantInvariant(variantId) {
   const variant = await Variant.findById(variantId);
@@ -74,13 +75,15 @@ export async function reportOnlineStockDrift(variantId, shopifyOnlineStock) {
   if (!variant) return null;
 
   if (variant.onlineStock !== shopifyOnlineStock) {
-    return createDiscrepancyAlert({
+    const alert = await createDiscrepancyAlert({
       type: 'online_stock_drift',
       variantId,
       expected: variant.onlineStock,
       actual: shopifyOnlineStock,
       message: `Shopify online_stock drift for SKU ${variant.sku}`,
     });
+    await notifyDiscrepancy(variant, { expected: variant.onlineStock, actual: shopifyOnlineStock });
+    return alert;
   }
   return null;
 }

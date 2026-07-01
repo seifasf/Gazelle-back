@@ -167,6 +167,26 @@ export function buildManualAdjustmentEntry({ variantId, quantityDelta, reasonCod
   };
 }
 
+/**
+ * Admin stock intake: positive real stock + optional Shopify online sync.
+ */
+export function buildStockIntakeEntries({ variantId, quantityDelta, reasonCode, actorUserId, syncToShopify }) {
+  const entries = [
+    buildManualAdjustmentEntry({ variantId, quantityDelta, reasonCode, actorUserId }),
+  ];
+  if (syncToShopify && quantityDelta > 0) {
+    entries.push({
+      variantId,
+      ledgerType: 'online_stock_increment_api',
+      quantityDelta,
+      reasonCode: reasonCode || 'stock_intake',
+      actorUserId,
+      shopifySyncStatus: 'pending',
+    });
+  }
+  return entries;
+}
+
 export default {
   applyLedgerEntries,
   buildHoldReserveEntries,
@@ -174,4 +194,5 @@ export default {
   buildPreDeliveryReleaseEntries,
   buildPostDeliveryReturnEntries,
   buildManualAdjustmentEntry,
+  buildStockIntakeEntries,
 };

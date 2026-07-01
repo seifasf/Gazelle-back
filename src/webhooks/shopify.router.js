@@ -9,7 +9,7 @@ router.post('/:topic', async (req, res) => {
   const hmac = req.get('X-Shopify-Hmac-Sha256');
   const rawBody = req.rawBody || JSON.stringify(req.body);
 
-  if (!verifyShopifyHmac(rawBody, hmac)) {
+  if (!(await verifyShopifyHmac(rawBody, hmac))) {
     return res.status(401).json({ error: 'Invalid HMAC' });
   }
 
