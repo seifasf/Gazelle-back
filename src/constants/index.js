@@ -80,6 +80,17 @@ export const PO_STATUSES = [
 
 export const OPEN_PO_STATUSES = ['draft', 'sent', 'confirmed', 'in_production', 'shipped'];
 
+/** Min received POs before showing factory avg lead time (estimated used until then). */
+export const FACTORY_AVG_LEAD_TIME_MIN_SAMPLES = 3;
+
+export const DEFAULT_FACTORIES = [
+  { name: 'Didi', leadTimeDays: 10 },
+  { name: 'Salah', leadTimeDays: 20 },
+  { name: 'Negma', leadTimeDays: 10 },
+  { name: 'Otex', leadTimeDays: 7 },
+  { name: 'Taema', leadTimeDays: 7 },
+];
+
 export const GL_CATEGORIES = ['asset', 'revenue', 'cogs', 'expense', 'liability', 'equity'];
 
 export const JOURNAL_SOURCES = ['manual', 'auto_order', 'auto_delivery'];

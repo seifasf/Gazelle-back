@@ -47,8 +47,14 @@ export async function connect(req, res, next) {
     if (locationId != null) update.shopifyLocationId = locationId;
     if (apiVersion) update.shopifyApiVersion = apiVersion;
 
-    // When switching to client-credentials, invalidate any stale cached token so
-    // the next call fetches a fresh one with the new credentials.
+    // Static token mode — drop Dev Dashboard client credentials.
+    if (accessToken && !clientId && !clientSecret) {
+      update.shopifyClientId = null;
+      update.shopifyClientSecret = null;
+      update.shopifyTokenExpiresAt = null;
+    }
+
+    // Client-credentials mode — invalidate any stale cached token.
     if (clientId || clientSecret) {
       update.shopifyAccessToken = accessToken || null;
       update.shopifyTokenExpiresAt = null;

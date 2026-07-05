@@ -2,8 +2,64 @@ import ExcelJS from 'exceljs';
 import Factory from '../models/Factory.js';
 import PurchaseOrder from '../models/PurchaseOrder.js';
 import Variant from '../models/Variant.js';
-import { OPEN_PO_STATUSES } from '../constants/index.js';
+import { OPEN_PO_STATUSES, FACTORY_AVG_LEAD_TIME_MIN_SAMPLES } from '../constants/index.js';
 import { stockIntake } from './order.service.js';
+
+function addDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+async function factoryLeadTimeStats() {
+  const rows = await PurchaseOrder.aggregate([
+    { $match: { status: 'received', receivedAt: { $ne: null } } },
+    {
+      $project: {
+        factoryId: 1,
+        startAt: { $ifNull: ['$sentAt', '$createdAt'] },
+        receivedAt: 1,
+      },
+    },
+    {
+      $project: {
+        factoryId: 1,
+        leadDays: {
+          $divide: [{ $subtract: ['$receivedAt', '$startAt'] }, 1000 * 60 * 60 * 24],
+        },
+      },
+    },
+    {
+      $group: {
+        _id: '$factoryId',
+        avgLeadTimeDays: { $avg: '$leadDays' },
+        completedPoCount: { $sum: 1 },
+      },
+    },
+  ]);
+
+  return new Map(
+    rows.map((row) => [
+      String(row._id),
+      {
+        completedPoCount: row.completedPoCount,
+        avgLeadTimeDays:
+          row.completedPoCount >= FACTORY_AVG_LEAD_TIME_MIN_SAMPLES
+            ? Math.round(row.avgLeadTimeDays * 10) / 10
+            : null,
+      },
+    ])
+  );
+}
+
+function attachFactoryStats(factory, statsMap) {
+  const stats = statsMap.get(String(factory._id)) || { completedPoCount: 0, avgLeadTimeDays: null };
+  return {
+    ...factory,
+    completedPoCount: stats.completedPoCount,
+    avgLeadTimeDays: stats.avgLeadTimeDays,
+  };
+}
 
 async function nextPoNumber() {
   const prefix = `PO-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`;
@@ -21,7 +77,11 @@ function computeTotalCost(items) {
 
 export async function listFactories({ activeOnly = true } = {}) {
   const filter = activeOnly ? { isActive: true } : {};
-  return Factory.find(filter).sort({ name: 1 });
+  const [factories, statsMap] = await Promise.all([
+    Factory.find(filter).sort({ name: 1 }).lean(),
+    factoryLeadTimeStats(),
+  ]);
+  return factories.map((f) => attachFactoryStats(f, statsMap));
 }
 
 export async function createFactory(data) {
@@ -101,12 +161,16 @@ export async function createPurchaseOrder({ factoryId, items, expectedDeliveryDa
   }
   const enrichedItems = await enrichItems(items);
   const poNumber = await nextPoNumber();
+  const expected =
+    expectedDeliveryDate ||
+    (factory.leadTimeDays != null ? addDays(new Date(), factory.leadTimeDays) : undefined);
+
   return PurchaseOrder.create({
     poNumber,
     factoryId,
     items: enrichedItems,
     totalCost: computeTotalCost(enrichedItems),
-    expectedDeliveryDate,
+    expectedDeliveryDate: expected,
     notes,
     createdBy,
     status: 'draft',
@@ -157,6 +221,8 @@ export async function receivePurchaseOrder(id, actorUserId) {
     err.statusCode = 400;
     throw err;
   }
+
+  if (!po.sentAt) po.sentAt = po.createdAt;
 
   for (const item of po.items) {
     await stockIntake({

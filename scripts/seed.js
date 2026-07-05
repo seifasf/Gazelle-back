@@ -9,6 +9,8 @@ import { connectDatabase, disconnectDatabase } from '../src/config/database.js';
 import User from '../src/models/User.js';
 import Settings from '../src/models/Settings.js';
 import BostaStatusMapping from '../src/models/BostaStatusMapping.js';
+import Factory from '../src/models/Factory.js';
+import { DEFAULT_FACTORIES } from '../src/constants/index.js';
 import bcrypt from 'bcrypt';
 
 const DEFAULT_BOSTA_MAPPINGS = [
@@ -55,6 +57,15 @@ async function seed() {
     );
   }
   console.log(`Seeded ${DEFAULT_BOSTA_MAPPINGS.length} Bosta status mappings`);
+
+  for (const factory of DEFAULT_FACTORIES) {
+    await Factory.findOneAndUpdate(
+      { name: factory.name },
+      { ...factory, currency: 'EGP', isActive: true },
+      { upsert: true, new: true }
+    );
+  }
+  console.log(`Seeded ${DEFAULT_FACTORIES.length} factories`);
 
   await disconnectDatabase();
   console.log('Seed complete');

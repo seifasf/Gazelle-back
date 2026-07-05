@@ -3,6 +3,7 @@ import Variant from '../../models/Variant.js';
 import Order from '../../models/Order.js';
 import Customer from '../../models/Customer.js';
 import Settings from '../../models/Settings.js';
+import { config } from '../../config/index.js';
 import { fetchShopInfo } from './queries/shop.js';
 import { fetchLocations } from './queries/locations.js';
 import { syncCatalogFromShopify, syncCatalog } from './sync.service.js';
@@ -20,16 +21,24 @@ export async function testShopifyConnection() {
 
   const shop = await fetchShopInfo();
   const locations = await fetchLocations();
+  const settings = await Settings.findOne({ key: 'global' });
 
-  await Settings.findOneAndUpdate(
-    { key: 'global' },
-    {
-      shopifyShopName: shop.name,
-      shopifyShopDomain: shop.myshopifyDomain,
-      shopifyConnectionHealthy: true,
-    },
-    { upsert: true }
-  );
+  let locationId = settings?.shopifyLocationId || config.SHOPIFY_LOCATION_ID;
+  if (!locationId && locations.length) {
+    const primary = locations.find((l) => l.isActive) || locations[0];
+    locationId = primary.id;
+  }
+
+  const settingsUpdate = {
+    shopifyShopName: shop.name,
+    shopifyShopDomain: shop.myshopifyDomain,
+    shopifyConnectionHealthy: true,
+  };
+  if (locationId && !settings?.shopifyLocationId && !config.SHOPIFY_LOCATION_ID) {
+    settingsUpdate.shopifyLocationId = locationId;
+  }
+
+  await Settings.findOneAndUpdate({ key: 'global' }, settingsUpdate, { upsert: true });
 
   return {
     shop: {
@@ -52,11 +61,13 @@ export async function getShopifyStatus() {
     Customer.countDocuments(),
   ]);
 
-  const authMode = settings?.shopifyClientId
-    ? 'client_credentials'
-    : settings?.shopifyAccessToken
-      ? 'static_token'
-      : 'none';
+  const authMode = config.SHOPIFY_ACCESS_TOKEN
+    ? 'static_token'
+    : settings?.shopifyClientId
+      ? 'client_credentials'
+      : settings?.shopifyAccessToken
+        ? 'static_token'
+        : 'none';
 
   const inferredMode =
     settings?.shopifyCatalogMode ||
