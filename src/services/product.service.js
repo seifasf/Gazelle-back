@@ -3,13 +3,18 @@ import Product from '../models/Product.js';
 import CogsBatch from '../models/CogsBatch.js';
 import InventoryLedger from '../models/InventoryLedger.js';
 
-export async function listVariants({ search, lowStockOnly, limit = 50, skip = 0 }) {
+export async function listVariants({ search, lowStockOnly, limit = 50, skip = 0, activeOnly = true }) {
   const filter = {};
   if (search) {
     filter.$or = [
       { sku: { $regex: search, $options: 'i' } },
       { title: { $regex: search, $options: 'i' } },
     ];
+  }
+
+  if (activeOnly) {
+    const activeProductIds = await Product.find({ status: 'active' }).distinct('_id');
+    filter.productId = { $in: activeProductIds };
   }
 
   let variants = await Variant.find(filter)
@@ -229,9 +234,10 @@ export async function listCatalog({
 }
 
 export async function listProducts({ limit = 50, skip = 0 }) {
+  const filter = { status: 'active' };
   const [products, total] = await Promise.all([
-    Product.find().sort({ title: 1 }).skip(skip).limit(limit),
-    Product.countDocuments(),
+    Product.find(filter).sort({ title: 1 }).skip(skip).limit(limit),
+    Product.countDocuments(filter),
   ]);
   return { products, total };
 }

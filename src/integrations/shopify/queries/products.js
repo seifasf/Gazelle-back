@@ -2,7 +2,7 @@ import { shopifyGraphQL } from '../client.js';
 
 const PRODUCTS_QUERY = `
   query Products($cursor: String) {
-    products(first: 8, after: $cursor) {
+    products(first: 50, after: $cursor, query: "status:active") {
       pageInfo { hasNextPage endCursor }
       edges {
         node {
