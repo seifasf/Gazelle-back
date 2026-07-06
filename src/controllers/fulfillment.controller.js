@@ -1,4 +1,5 @@
 import * as fulfillmentService from '../services/fulfillment.service.js';
+import Order from '../models/Order.js';
 
 export async function getPickList(req, res, next) {
   try {
@@ -27,4 +28,37 @@ export async function getAwb(req, res, next) {
   }
 }
 
-export default { getPickList, pickAndPack, getAwb };
+export async function getShipmentStatus(req, res, next) {
+  try {
+    const status = await fulfillmentService.getShipmentStatus(req.params.id);
+    res.json({ data: status });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function checkStock(req, res, next) {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) {
+      const err = new Error('Order not found');
+      err.statusCode = 404;
+      throw err;
+    }
+    const warnings = await fulfillmentService.checkStockAvailability(order);
+    res.json({ data: { warnings } });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getOrderSheet(req, res, next) {
+  try {
+    const sheet = await fulfillmentService.buildOrderSheet(req.params.id);
+    res.json({ data: sheet });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export default { getPickList, pickAndPack, getAwb, getOrderSheet };

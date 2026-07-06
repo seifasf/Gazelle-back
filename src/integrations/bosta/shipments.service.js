@@ -1,16 +1,49 @@
 import { bostaRequest } from './client.js';
 import { config } from '../../config/index.js';
+import Settings from '../../models/Settings.js';
 
-/**
- * Create a Bosta delivery for a verified order.
- * Payload shape may need adjustment against live Bosta API docs.
- */
+function splitName(fullName) {
+  const parts = (fullName || 'Customer').trim().split(/\s+/);
+  return {
+    firstName: parts[0] || 'Customer',
+    lastName: parts.slice(1).join(' ') || '.',
+  };
+}
+
+async function resolveBostaCityId(cityName) {
+  if (!cityName) return null;
+  const settings = await Settings.findOne({ key: 'global' });
+  const cities = settings?.bostaCities || [];
+  const normalized = cityName.trim().toLowerCase();
+  const match = cities.find(
+    (c) =>
+      c.name?.toLowerCase() === normalized ||
+      c.nameAr?.toLowerCase() === normalized ||
+      c.code?.toLowerCase() === normalized
+  );
+  return match?.id || match?.code || null;
+}
+
 export async function createDelivery(order, customer) {
   const shipping = order.shippingAddress;
   const codAmount = order.totalSellingPrice;
+  const { firstName, lastName } = splitName(shipping.fullName || customer.fullName);
+  const cityId = await resolveBostaCityId(shipping.city);
+
+  const address = {
+    firstLine: shipping.line1,
+    secondLine: shipping.line2 || '',
+    zone: shipping.zone || '',
+  };
+
+  if (cityId) {
+    address.cityId = cityId;
+  } else {
+    address.city = shipping.city;
+  }
 
   const payload = {
-    type: 10, // COD send — confirm with Bosta docs
+    type: 10,
     specs: {
       packageDetails: {
         itemsCount: order.items.reduce((s, i) => s + i.quantity, 0),
@@ -18,14 +51,10 @@ export async function createDelivery(order, customer) {
       },
     },
     receiver: {
-      firstName: shipping.fullName || customer.fullName,
+      firstName,
+      lastName,
       phone: shipping.phone || customer.phone,
-      address: {
-        firstLine: shipping.line1,
-        secondLine: shipping.line2 || '',
-        city: shipping.city,
-        zone: shipping.zone || '',
-      },
+      address,
     },
     businessReference: order._id.toString(),
     webhookUrl: `${config.APP_URL}/webhooks/bosta`,

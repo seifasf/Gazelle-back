@@ -1,4 +1,5 @@
 import WebhookReceipt from '../models/WebhookReceipt.js';
+import Settings from '../models/Settings.js';
 import { getAgenda } from '../config/agenda.js';
 import { JOB_NAMES } from '../constants/index.js';
 import logger from '../utils/logger.js';
@@ -11,6 +12,12 @@ export async function enqueueShopifyWebhook({ topic, externalId, payload }) {
       topic,
       payload,
     });
+
+    await Settings.findOneAndUpdate(
+      { key: 'global' },
+      { shopifyLastWebhookAt: new Date() },
+      { upsert: true }
+    );
 
     const agenda = getAgenda();
     await agenda.now(JOB_NAMES.PROCESS_SHOPIFY_WEBHOOK, {
@@ -35,6 +42,12 @@ export async function enqueueBostaWebhook({ externalId, payload }) {
       externalId,
       payload,
     });
+
+    await Settings.findOneAndUpdate(
+      { key: 'global' },
+      { bostaLastWebhookAt: new Date() },
+      { upsert: true }
+    );
 
     const agenda = getAgenda();
     await agenda.now(JOB_NAMES.PROCESS_BOSTA_WEBHOOK, {

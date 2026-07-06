@@ -1,5 +1,11 @@
 import mongoose from 'mongoose';
-import { ORDER_STATUSES, VERIFICATION_OUTCOMES } from '../constants/index.js';
+import {
+  ORDER_STATUSES,
+  VERIFICATION_OUTCOMES,
+  ORDER_SOURCES,
+  MANUAL_ORDER_SOURCES,
+  SHIPPING_METHODS,
+} from '../constants/index.js';
 
 const orderItemSchema = new mongoose.Schema(
   {
@@ -37,9 +43,12 @@ const verificationLogSchema = new mongoose.Schema(
 
 const orderSchema = new mongoose.Schema(
   {
-    shopifyOrderId: { type: String, required: true, unique: true },
+    shopifyOrderId: { type: String, required: true, unique: true, index: true },
+    orderSource: { type: String, enum: ORDER_SOURCES, default: 'shopify', index: true },
+    manualSource: { type: String, enum: MANUAL_ORDER_SOURCES },
     customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true },
     shippingAddress: { type: shippingAddressSchema, required: true },
+    shippingMethod: { type: String, enum: SHIPPING_METHODS, default: 'bosta', index: true },
     internalStatus: {
       type: String,
       enum: ORDER_STATUSES,
@@ -48,11 +57,20 @@ const orderSchema = new mongoose.Schema(
     },
     bostaDeliveryId: { type: String, index: true },
     bostaTrackingNumber: String,
+    bostaShipmentStatus: {
+      type: String,
+      enum: ['none', 'queued', 'creating', 'created', 'failed'],
+      default: 'none',
+    },
+    bostaShipmentError: String,
+    localShippingNote: String,
+    localShippingMarkedAt: Date,
     assignedOrdersManagerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     assignedStockManagerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     totalSellingPrice: { type: Number, required: true, min: 0 },
     totalCogsSnapshot: { type: Number, min: 0 },
     cancellationReason: String,
+    isCreatorOrder: { type: Boolean, default: false },
     items: { type: [orderItemSchema], required: true, validate: [(v) => v.length > 0, 'Order must have items'] },
     verificationLog: [verificationLogSchema],
     placedAt: { type: Date, required: true },

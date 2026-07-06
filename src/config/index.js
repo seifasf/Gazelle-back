@@ -7,16 +7,22 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().default(4000),
   MONGODB_URI: z.string().min(1),
+  MONGODB_MAX_POOL_SIZE: z.coerce.number().default(20),
+  MONGODB_MIN_POOL_SIZE: z.coerce.number().default(2),
   JWT_SECRET: z.string().min(16),
   JWT_EXPIRES_IN: z.string().default('7d'),
   SHOPIFY_SHOP_DOMAIN: z.string().optional(),
   SHOPIFY_ACCESS_TOKEN: z.string().optional(),
+  SHOPIFY_CLIENT_ID: z.string().optional(),
+  SHOPIFY_CLIENT_SECRET: z.string().optional(),
   SHOPIFY_WEBHOOK_SECRET: z.string().optional(),
   SHOPIFY_API_VERSION: z.string().default('2025-01'),
   SHOPIFY_LOCATION_ID: z.string().optional(),
   BOSTA_API_KEY: z.string().optional(),
   BOSTA_API_BASE_URL: z.string().default('https://app.bosta.co/api/v2'),
   APP_URL: z.string().default('http://localhost:4000'),
+  /** Comma-separated allowed origins for CORS (e.g. https://gazelle.onrender.com). Empty = allow all. */
+  CORS_ORIGIN: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);

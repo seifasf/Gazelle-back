@@ -9,7 +9,11 @@
     "worker": "node src/workers/agendaWorker.js",
     "dev": "node --watch src/server.js",
     "dev:worker": "node --watch src/workers/agendaWorker.js",
-    "seed": "node scripts/seed.js"
+    "seed": "node scripts/seed.js",
+    "purge-test-data": "node scripts/purge-test-data.js",
+    "sync-shopify": "node scripts/sync-shopify-catalog.js",
+    "sync-data": "node scripts/sync-live-data.js",
+    "verify:redesign": "node scripts/verify-redesign.js"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -19,6 +23,7 @@
     "bcrypt": "^5.1.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
+    "exceljs": "^4.4.0",
     "express": "^4.21.2",
     "graphql": "^16.10.0",
     "graphql-request": "^7.1.2",
@@ -27,6 +32,7 @@
     "mongoose": "^8.9.3",
     "pino": "^9.6.0",
     "pino-http": "^10.3.0",
+    "qrcode": "^1.5.4",
     "zod": "^3.24.1"
   }
 }

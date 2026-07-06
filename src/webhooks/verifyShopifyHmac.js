@@ -1,14 +1,18 @@
 import crypto from 'crypto';
 import { config } from '../config/index.js';
+import { getShopifyCredentials } from '../integrations/shopify/credentials.js';
 
-export function verifyShopifyHmac(rawBody, hmacHeader) {
-  if (!config.SHOPIFY_WEBHOOK_SECRET) {
+export async function verifyShopifyHmac(rawBody, hmacHeader) {
+  const creds = await getShopifyCredentials();
+  const secret = creds.webhookSecret || config.SHOPIFY_WEBHOOK_SECRET;
+
+  if (!secret) {
     return config.NODE_ENV !== 'production';
   }
   if (!hmacHeader) return false;
 
   const digest = crypto
-    .createHmac('sha256', config.SHOPIFY_WEBHOOK_SECRET)
+    .createHmac('sha256', secret)
     .update(rawBody, 'utf8')
     .digest('base64');
 

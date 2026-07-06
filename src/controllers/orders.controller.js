@@ -3,25 +3,43 @@ import * as exchangeService from '../services/exchange.service.js';
 
 export async function listOrders(req, res, next) {
   try {
-    const { status, limit, skip } = req.query;
-    const statusFilter =
-      req.user.role === 'orders_manager'
-        ? status || [
-            'pending_verification',
-            'verified_ready_for_shipping',
-            'failed_delivery',
-            'returning_to_origin',
-          ]
-        : req.user.role === 'stock_manager'
-          ? status || ['verified_ready_for_shipping', 'picked_up_by_bosta']
-          : status;
+    const { status, limit, skip, search, orderSource, shippingMethod } = req.query;
+    let statusFilter = status;
+
+    if (!statusFilter && req.user.role === 'stock_manager') {
+      statusFilter = 'verified_ready_for_shipping,picked_up_by_bosta,in_transit,returning_to_origin';
+    }
 
     const result = await orderService.listOrders({
       status: statusFilter,
+      search,
+      orderSource,
+      shippingMethod,
       limit: Number(limit) || 50,
       skip: Number(skip) || 0,
     });
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getStateCounts(req, res, next) {
+  try {
+    const counts = await orderService.getOrderStateCounts();
+    res.json({ data: counts });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function createManualOrder(req, res, next) {
+  try {
+    const order = await orderService.createManualOrder({
+      ...req.body,
+      actorUserId: req.user._id,
+    });
+    res.status(201).json({ data: order });
   } catch (err) {
     next(err);
   }
@@ -128,6 +146,8 @@ export async function transitionStatus(req, res, next) {
 
 export default {
   listOrders,
+  getStateCounts,
+  createManualOrder,
   getOrder,
   verifyOrder,
   cancelOrder,

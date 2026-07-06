@@ -1,6 +1,6 @@
 import { connectDatabase } from '../config/database.js';
 import { createAgenda } from '../config/agenda.js';
-import { registerJobs, scheduleRecurringJobs } from '../jobs/index.js';
+import { registerJobs } from '../jobs/index.js';
 import logger from '../utils/logger.js';
 
 async function startWorker() {
@@ -8,8 +8,10 @@ async function startWorker() {
   const agenda = createAgenda();
   registerJobs(agenda);
   await agenda.start();
-  await scheduleRecurringJobs(agenda);
-  logger.info('Agenda worker started');
+  // Recurring schedules (catalog sync, Bosta polling) run on the API service.
+  // A separate `npm run worker` process only drains the job queue — do not
+  // call scheduleRecurringJobs there or jobs will be duplicated.
+  logger.info('Agenda worker started (job processor only)');
 
   const shutdown = async () => {
     logger.info('Shutting down worker...');

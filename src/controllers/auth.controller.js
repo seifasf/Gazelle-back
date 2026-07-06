@@ -11,7 +11,14 @@ export async function login(req, res, next) {
 }
 
 export async function me(req, res) {
-  res.json({ user: req.user });
+  res.json({
+    user: {
+      id: req.user._id,
+      name: req.user.name,
+      email: req.user.email,
+      role: req.user.role,
+    },
+  });
 }
 
 export default { login, me };
