@@ -45,6 +45,15 @@ export function createApp() {
   app.use(express.json());
   app.use('/api/v1', apiRoutes);
 
+  app.get('/', (_req, res) => {
+    res.json({
+      name: 'Gazelle OMS API',
+      status: 'ok',
+      health: '/api/v1/health',
+      docs: 'Use the Gazelle web app at https://gazelle-system.vercel.app',
+    });
+  });
+
   app.use(notFoundHandler);
   app.use(errorHandler);
 
