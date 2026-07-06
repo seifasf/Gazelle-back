@@ -189,12 +189,32 @@ async function seedTestData() {
 }
 
 async function run() {
+  let ids = {};
   const shouldSeed = process.env.SEED_FOR_TESTS === '1';
   if (shouldSeed) {
     console.log('Seeding test data...');
-    await seedTestData();
+    ids = await seedTestData();
   } else {
     console.log('Skipping test data seed (set SEED_FOR_TESTS=1 to enable)\n');
+    const { connectDatabase, disconnectDatabase } = await import('../src/config/database.js');
+    const Product = (await import('../src/models/Product.js')).default;
+    const Variant = (await import('../src/models/Variant.js')).default;
+    const Customer = (await import('../src/models/Customer.js')).default;
+    const Order = (await import('../src/models/Order.js')).default;
+    await connectDatabase();
+    const variant = await Variant.findOne({ sku: 'TEST-SKU-001' });
+    const variant2 = await Variant.findOne({ sku: 'TEST-SKU-002' });
+    const customer = await Customer.findOne({ phone: '+201000000001' });
+    const orderA = await Order.findOne({ shopifyOrderId: 'test-order-001' });
+    const orderB = await Order.findOne({ shopifyOrderId: 'test-order-002' });
+    const orderC = await Order.findOne({ shopifyOrderId: 'test-order-003' });
+    const orderD = await Order.findOne({ shopifyOrderId: 'test-order-004' });
+    if (!variant || !customer) {
+      console.error('Test fixtures missing. Run: SEED_FOR_TESTS=1 node scripts/test-apis.js');
+      process.exit(1);
+    }
+    ids = { variant, variant2, customer, orderA, orderB, orderC, orderD };
+    await disconnectDatabase();
   }
   console.log('Running API tests against', BASE, '\n');
 

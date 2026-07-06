@@ -1,4 +1,7 @@
-# Render Blueprint — Gazelle OMS API
+# Render env checklist (set in dashboard for gazelle-back-qre2):
+# APP_URL=https://gazelle-back-qre2.onrender.com
+# CORS_ORIGIN=https://gazelle-system.vercel.app
+# MONGODB_URI, JWT_SECRET, SHOPIFY_*, BOSTA_API_KEY — see README
 # Docs: https://render.com/docs/blueprint-spec
 services:
   - type: web
