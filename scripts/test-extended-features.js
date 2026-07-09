@@ -58,10 +58,10 @@ async function run() {
   const factories = await expect('list factories', 'GET', '/manufacturing/factories', { token: admin });
   const factoryList = factories.data?.data || [];
   record('factories seeded (5+)', factoryList.length >= 5, `${factoryList.length} factories`);
-  const didi = factoryList.find((f) => f.name === 'Didi');
-  if (didi) {
-    record('Didi lead time = 10', didi.leadTimeDays === 10, `${didi.leadTimeDays}`);
-    record('avg lead time null until 3 POs', didi.avgLeadTimeDays == null, didi.completedPoCount != null ? `${didi.completedPoCount} POs` : '');
+  const joki = factoryList.find((f) => f.name === 'Joki');
+  if (joki) {
+    record('Joki lead time = 10', joki.leadTimeDays === 10, `${joki.leadTimeDays}`);
+    record('avg lead time null until 3 POs', joki.avgLeadTimeDays == null, joki.completedPoCount != null ? `${joki.completedPoCount} POs` : '');
   }
 
   await expect('list purchase orders', 'GET', '/manufacturing/purchase-orders', { token: admin });
@@ -69,12 +69,12 @@ async function run() {
   const catalog = await call('GET', '/inventory/catalog?limit=1', { token: admin });
   const variant = catalog.data?.catalog?.[0]?.variants?.[0];
   let poId;
-  if (didi && variant?._id) {
+  if (joki && variant?._id) {
     const created = await expect('create PO', 'POST', '/manufacturing/purchase-orders', {
       token: admin,
       status: [200, 201],
       body: {
-        factoryId: didi._id,
+        factoryId: joki._id,
         items: [{ variantId: variant._id, quantity: 1, unitCost: 100, currency: 'EGP' }],
         notes: 'Extended test PO',
       },

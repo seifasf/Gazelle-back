@@ -125,13 +125,6 @@ async function purge() {
     })
   ).deletedCount;
 
-  await Settings.findOneAndUpdate(
-    { key: 'global' },
-    {
-      $unset: { shopifyLocationId: '' },
-    }
-  );
-
   console.log('Purge complete:', counts);
   console.log('Remaining:', {
     products: await Product.countDocuments(),

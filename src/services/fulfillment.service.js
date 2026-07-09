@@ -57,6 +57,16 @@ export async function pickAndPackOrder(orderId, actorUserId) {
 
   const stockWarnings = await checkStockAvailability(order);
 
+  if (order.shippingMethod === 'pickup') {
+    order.assignedStockManagerId = actorUserId;
+    await orderService.transitionOrderStatus(orderId, 'delivered', {
+      source: 'user_action',
+      actorUserId,
+      note: 'Customer pickup',
+    });
+    return { queued: false, pickup: true, orderId, stockWarnings };
+  }
+
   if (order.shippingMethod === 'local_shipping') {
     order.localShippingMarkedAt = new Date();
     order.localShippingNote = order.localShippingNote || 'Marked ready for local delivery';

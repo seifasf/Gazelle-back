@@ -26,7 +26,7 @@ async function resolveBostaCityId(cityName) {
 
 export async function createDelivery(order, customer) {
   const shipping = order.shippingAddress;
-  const codAmount = order.totalSellingPrice;
+  const codAmount = (order.totalSellingPrice || 0) + (order.shippingFee || 0);
   const { firstName, lastName } = splitName(shipping.fullName || customer.fullName);
   const cityId = await resolveBostaCityId(shipping.city);
 

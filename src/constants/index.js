@@ -55,7 +55,7 @@ export const MANUAL_ORDER_SOURCES = [
   'other',
 ];
 
-export const SHIPPING_METHODS = ['bosta', 'local_shipping'];
+export const SHIPPING_METHODS = ['bosta', 'local_shipping', 'pickup'];
 
 export const JOB_NAMES = {
   PROCESS_SHOPIFY_WEBHOOK: 'process-shopify-webhook',
@@ -84,7 +84,7 @@ export const OPEN_PO_STATUSES = ['draft', 'sent', 'confirmed', 'in_production', 
 export const FACTORY_AVG_LEAD_TIME_MIN_SAMPLES = 3;
 
 export const DEFAULT_FACTORIES = [
-  { name: 'Didi', leadTimeDays: 10 },
+  { name: 'Joki', leadTimeDays: 10 },
   { name: 'Salah', leadTimeDays: 20 },
   { name: 'Negma', leadTimeDays: 10 },
   { name: 'Otex', leadTimeDays: 7 },

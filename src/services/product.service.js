@@ -89,7 +89,7 @@ function escapeRegex(value) {
 export async function findVariantBySku(sku) {
   const escaped = escapeRegex(sku);
   const variant = await Variant.findOne({ sku: { $regex: new RegExp(`^${escaped}$`, 'i') } })
-    .populate('productId', 'title imageUrl vendor productType shopifyProductId');
+    .populate('productId', 'title imageUrl vendor productType shopifyProductId defaultFactoryId');
   return variant;
 }
 

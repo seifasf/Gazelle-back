@@ -3,15 +3,25 @@ import WebhookReceipt from '../models/WebhookReceipt.js';
 import Order from '../models/Order.js';
 import { getShopifyStatus } from '../integrations/shopify/setup.service.js';
 import { isBostaConfigured } from '../integrations/bosta/client.js';
+import { config } from '../config/index.js';
 
 export async function getIntegrationHealth() {
   const settings = await Settings.findOne({ key: 'global' });
   const shopify = await getShopifyStatus();
 
-  const [shopifyWebhookLast, bostaWebhookLast, failedShipments, pendingVerify, readyToShip, inTransit] =
+  const [
+    shopifyWebhookLast,
+    bostaWebhookLast,
+    paymobWebhookLast,
+    failedShipments,
+    pendingVerify,
+    readyToShip,
+    inTransit,
+  ] =
     await Promise.all([
       WebhookReceipt.findOne({ source: 'shopify' }).sort({ createdAt: -1 }).select('createdAt topic'),
       WebhookReceipt.findOne({ source: 'bosta' }).sort({ createdAt: -1 }).select('createdAt'),
+      WebhookReceipt.findOne({ source: 'paymob' }).sort({ createdAt: -1 }).select('createdAt'),
       Order.countDocuments({ bostaShipmentStatus: 'failed' }),
       Order.countDocuments({ internalStatus: 'pending_verification' }),
       Order.countDocuments({ internalStatus: 'verified_ready_for_shipping' }),
@@ -32,6 +42,11 @@ export async function getIntegrationHealth() {
       lastSyncAt: settings?.bostaLastSyncAt,
       lastWebhookAt: bostaWebhookLast?.createdAt || settings?.bostaLastWebhookAt,
       pollingThresholdHours: settings?.bostaPollingThresholdHours ?? 48,
+    },
+    paymob: {
+      configured: Boolean(config.PAYMOB_HMAC_SECRET),
+      healthy: Boolean(paymobWebhookLast?.createdAt),
+      lastWebhookAt: paymobWebhookLast?.createdAt || null,
     },
     queues: {
       pendingVerification: pendingVerify,

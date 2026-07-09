@@ -47,8 +47,28 @@ const orderSchema = new mongoose.Schema(
     orderSource: { type: String, enum: ORDER_SOURCES, default: 'shopify', index: true },
     manualSource: { type: String, enum: MANUAL_ORDER_SOURCES },
     customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true },
-    shippingAddress: { type: shippingAddressSchema, required: true },
+    shippingAddress: {
+      type: shippingAddressSchema,
+      // Pickup orders do not require shipping details.
+      required() {
+        return this.shippingMethod !== 'pickup';
+      },
+    },
     shippingMethod: { type: String, enum: SHIPPING_METHODS, default: 'bosta', index: true },
+    // "cod" means the customer pays Cash on Delivery (typically Bosta COD).
+    // "online" means the customer already paid via an online provider (Paymob, etc.).
+    paymentMethod: { type: String, enum: ['cod', 'online'], default: 'cod', index: true },
+    // Stored for accounting + analytics; for now manual orders can leave it empty/0.
+    shippingFee: { type: Number, default: 0, min: 0 },
+    // Online-payment tracking (optional until Paymob webhook is connected).
+    onlinePaymentStatus: { type: String, enum: ['none', 'pending', 'paid', 'failed'], default: 'none' },
+    onlinePaymentProvider: String,
+    onlinePaymentReference: String,
+    onlinePaymentAmount: { type: Number, min: 0, default: 0 },
+    onlinePaidAt: Date,
+    // Bosta COD collection (best-effort; persisted when Bosta sends status webhooks).
+    bostaCollectedAmount: { type: Number, min: 0, default: 0 },
+    bostaCollectedAt: Date,
     internalStatus: {
       type: String,
       enum: ORDER_STATUSES,

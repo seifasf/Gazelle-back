@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 
 const webhookReceiptSchema = new mongoose.Schema(
   {
-    source: { type: String, enum: ['shopify', 'bosta'], required: true },
+    source: { type: String, enum: ['shopify', 'bosta', 'paymob'], required: true },
     externalId: { type: String, required: true },
     topic: String,
     payload: mongoose.Schema.Types.Mixed,

@@ -33,7 +33,7 @@ export function registerJobs(agenda) {
     const state = payload.state || payload.status;
 
     try {
-      await processBostaStatusUpdate({ deliveryId, state, note: 'Bosta webhook' });
+      await processBostaStatusUpdate({ deliveryId, state, payload, note: 'Bosta webhook' });
       receipt.processedAt = new Date();
       await receipt.save();
     } catch (error) {

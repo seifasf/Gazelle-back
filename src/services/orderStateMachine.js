@@ -6,7 +6,8 @@ import { ORDER_STATUSES, TERMINAL_ORDER_STATUSES } from '../constants/index.js';
  */
 export const ORDER_TRANSITIONS = {
   pending_verification: ['verified_ready_for_shipping', 'cancelled'],
-  verified_ready_for_shipping: ['picked_up_by_bosta', 'cancelled'],
+  // Pickup orders can be marked as delivered directly (no courier step).
+  verified_ready_for_shipping: ['picked_up_by_bosta', 'delivered', 'cancelled'],
   picked_up_by_bosta: ['in_transit'],
   in_transit: ['delivered', 'failed_delivery'],
   failed_delivery: ['in_transit', 'returning_to_origin'],

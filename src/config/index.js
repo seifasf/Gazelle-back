@@ -20,6 +20,7 @@ const envSchema = z.object({
   SHOPIFY_LOCATION_ID: z.string().optional(),
   BOSTA_API_KEY: z.string().optional(),
   BOSTA_API_BASE_URL: z.string().default('https://app.bosta.co/api/v2'),
+  PAYMOB_HMAC_SECRET: z.string().optional(),
   APP_URL: z.string().default('http://localhost:4000'),
   /** Comma-separated allowed origins for CORS (e.g. https://gazelle.onrender.com). Empty = allow all. */
   CORS_ORIGIN: z.string().optional(),

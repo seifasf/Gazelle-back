@@ -10,6 +10,7 @@ const productSchema = new mongoose.Schema(
     imageUrl: String,
     tags: [String],
     category: { type: String, maxlength: 100 },
+    defaultFactoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Factory', index: true },
     status: { type: String, enum: ['active', 'archived', 'draft'], default: 'active' },
     lastSyncedAt: { type: Date },
   },

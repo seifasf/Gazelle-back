@@ -304,6 +304,8 @@ export async function stockIntake({ variantId, quantity, reasonCode, note, actor
 export async function createManualOrder({
   manualSource,
   shippingMethod,
+  paymentMethod,
+  shippingFee,
   customer,
   shippingAddress,
   items,
@@ -350,18 +352,26 @@ export async function createManualOrder({
       0
     );
 
+    const finalShippingAddress =
+      shippingMethod === 'pickup'
+        ? undefined
+        : {
+            ...(shippingAddress || {}),
+            phone: shippingAddress?.phone || customer.phone,
+            fullName: shippingAddress?.fullName || customer.fullName,
+          };
+
     const [order] = await Order.create(
       [{
         shopifyOrderId: ref,
         orderSource: 'manual',
         manualSource,
         shippingMethod: shippingMethod || 'bosta',
+        paymentMethod: paymentMethod || 'cod',
+        shippingFee: shippingFee ?? 0,
+        onlinePaymentReference: paymentMethod === 'online' ? ref : undefined,
         customerId: customerDoc._id,
-        shippingAddress: {
-          ...shippingAddress,
-          phone: shippingAddress.phone || customer.phone,
-          fullName: shippingAddress.fullName || customer.fullName,
-        },
+        shippingAddress: finalShippingAddress,
         internalStatus: 'pending_verification',
         isCreatorOrder: Boolean(isCreatorOrder),
         totalSellingPrice: total,

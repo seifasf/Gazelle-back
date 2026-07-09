@@ -6,6 +6,7 @@ import { config } from './config/index.js';
 import apiRoutes from './routes/index.js';
 import shopifyWebhookRouter from './webhooks/shopify.router.js';
 import bostaWebhookRouter from './webhooks/bosta.router.js';
+import paymobWebhookRouter from './webhooks/paymob.router.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import logger from './utils/logger.js';
 
@@ -41,6 +42,9 @@ export function createApp() {
   );
 
   app.use('/webhooks/bosta', express.json(), bostaWebhookRouter);
+
+  // Paymob online-payment webhooks.
+  app.use('/webhooks/paymob', express.json(), paymobWebhookRouter);
 
   app.use(express.json());
   app.use('/api/v1', apiRoutes);

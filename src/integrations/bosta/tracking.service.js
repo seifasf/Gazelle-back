@@ -4,6 +4,48 @@ import { getDelivery } from './shipments.service.js';
 import orderService from '../../services/order.service.js';
 import logger from '../../utils/logger.js';
 
+function asFiniteNumber(v) {
+  if (v == null) return null;
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  // Sometimes amounts come nested: { amount: "123" }
+  if (typeof v === 'object') {
+    const inner = v.amount ?? v.value ?? v.total;
+    return asFiniteNumber(inner);
+  }
+  return null;
+}
+
+function extractBostaCollectedAmount(payload) {
+  if (!payload) return null;
+
+  // Best-effort: Bosta may echo COD via `cod` in payloads.
+  const candidates = [
+    payload.cod,
+    payload.codAmount,
+    payload.cod_amount,
+    payload.collectedAmount,
+    payload.collected_amount,
+    payload.amount,
+    payload.totalAmount,
+    payload.total_amount,
+  ];
+
+  for (const c of candidates) {
+    const n = asFiniteNumber(c);
+    if (n != null) return n;
+  }
+
+  // Nested payment objects.
+  const payment = payload.payment || payload.payments || payload.codPayment;
+  if (payment) return extractBostaCollectedAmount(payment);
+
+  return null;
+}
+
 export async function mapBostaStateToInternal(bostaState) {
   const mapping = await BostaStatusMapping.findOne({
     bostaState: { $regex: new RegExp(`^${bostaState}$`, 'i') },
@@ -12,7 +54,7 @@ export async function mapBostaStateToInternal(bostaState) {
   return mapping?.internalStatus || null;
 }
 
-export async function processBostaStatusUpdate({ deliveryId, state, note }) {
+export async function processBostaStatusUpdate({ deliveryId, state, payload, note }) {
   const order = await Order.findOne({ bostaDeliveryId: deliveryId });
   if (!order) {
     logger.warn({ deliveryId }, 'Bosta webhook for unknown delivery');
@@ -23,6 +65,16 @@ export async function processBostaStatusUpdate({ deliveryId, state, note }) {
   if (!internalStatus) {
     logger.warn({ state, deliveryId }, 'Unmapped Bosta state');
     return order;
+  }
+
+  // Persist the best-effort collected COD amount once the delivery is delivered.
+  if (internalStatus === 'delivered') {
+    const collected = extractBostaCollectedAmount(payload);
+    if (collected != null && collected >= 0 && (!order.bostaCollectedAmount || order.bostaCollectedAmount === 0)) {
+      order.bostaCollectedAmount = collected;
+      order.bostaCollectedAt = new Date();
+      await order.save();
+    }
   }
 
   if (order.internalStatus === internalStatus) {
@@ -54,6 +106,7 @@ export async function pollStuckOrders(thresholdHours = 48) {
         await processBostaStatusUpdate({
           deliveryId: order.bostaDeliveryId,
           state,
+          payload: delivery,
           note: 'Polling fallback',
         });
         results.push({ orderId: order._id, state });
