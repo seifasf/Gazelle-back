@@ -8,6 +8,7 @@ import Settings from './models/Settings.js';
 import { syncCatalog } from './integrations/shopify/sync.service.js';
 import { ensureOrdersLoaded } from './integrations/shopify/setup.service.js';
 import { ensureChartOfAccounts } from './services/chartOfAccounts.seed.js';
+import { ensureBrandExpenses } from './services/brandExpenses.seed.js';
 import logger from './utils/logger.js';
 
 async function ensureCatalogLoaded() {
@@ -29,6 +30,7 @@ async function ensureCatalogLoaded() {
     // After the catalog is present, import orders + customers on first boot.
     await ensureOrdersLoaded();
     await ensureChartOfAccounts();
+    await ensureBrandExpenses();
   } catch (err) {
     logger.warn({ err }, 'Startup catalog sync failed — existing data will be served if available');
   }

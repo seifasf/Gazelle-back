@@ -73,18 +73,36 @@ export async function getProfitAndLoss({ from, to } = {}) {
   for (const entry of entries) {
     for (const line of entry.lines) {
       const cat = line.accountId?.category;
-      if (!cat || !byCategory[cat]) continue;
-      byCategory[cat] += (line.credit || 0) - (line.debit || 0);
+      if (!cat || !(cat in byCategory)) continue;
+      // Expense/COGS are debit-normal; revenue is credit-normal.
+      if (cat === 'revenue') {
+        byCategory[cat] += (line.credit || 0) - (line.debit || 0);
+      } else {
+        byCategory[cat] += (line.debit || 0) - (line.credit || 0);
+      }
     }
   }
 
+  const { getBrandExpensesForRange } = await import('./brandExpense.service.js');
+  const brand = await getBrandExpensesForRange({ from, to });
+
+  const journalExpenses = byCategory.expense;
+  const brandExpenses = brand.total;
+  const expenses = journalExpenses + brandExpenses;
   const grossProfit = byCategory.revenue - byCategory.cogs;
-  const netIncome = grossProfit - byCategory.expense;
+  const netIncome = grossProfit - expenses;
 
   return {
     revenue: byCategory.revenue,
     cogs: byCategory.cogs,
-    expenses: byCategory.expense,
+    journalExpenses,
+    brandExpenses: {
+      fixed: brand.fixedTotal,
+      variable: brand.variableTotal,
+      total: brandExpenses,
+      months: brand.months,
+    },
+    expenses,
     grossProfit,
     netIncome,
   };

@@ -65,6 +65,43 @@ export async function profitAndLoss(req, res, next) {
   }
 }
 
+export async function listBrandExpenses(req, res, next) {
+  try {
+    const { listBrandExpenses: list } = await import('../services/brandExpense.service.js');
+    const expenses = await list({ kind: req.query.kind });
+    res.json({ data: expenses });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getMonthExpenses(req, res, next) {
+  try {
+    const { getMonthExpenseBreakdown } = await import('../services/brandExpense.service.js');
+    const yearMonth = req.query.month || req.params.month;
+    if (!yearMonth) {
+      const err = new Error('month (YYYY-MM) is required');
+      err.statusCode = 400;
+      throw err;
+    }
+    const data = await getMonthExpenseBreakdown(yearMonth);
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function saveMonthExpenses(req, res, next) {
+  try {
+    const { saveMonthExpenses: save } = await import('../services/brandExpense.service.js');
+    const yearMonth = req.body.month || req.params.month;
+    const data = await save(yearMonth, req.body.items || [], req.user._id);
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function balanceSheet(req, res, next) {
   try {
     const report = await accountingService.getBalanceSheet();
@@ -97,4 +134,7 @@ export default {
   profitAndLoss,
   balanceSheet,
   topProducts,
+  listBrandExpenses,
+  getMonthExpenses,
+  saveMonthExpenses,
 };

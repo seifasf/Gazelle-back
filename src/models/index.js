@@ -17,3 +17,5 @@ export { default as JournalEntry } from './JournalEntry.js';
 export { default as Employee } from './Employee.js';
 export { default as Attendance } from './Attendance.js';
 export { default as LeaveRequest } from './LeaveRequest.js';
+export { default as BrandExpense } from './BrandExpense.js';
+export { default as MonthlyExpense } from './MonthlyExpense.js';

@@ -24,6 +24,8 @@ const envSchema = z.object({
   APP_URL: z.string().default('http://localhost:4000'),
   /** Comma-separated allowed origins for CORS (e.g. https://gazelle.onrender.com). Empty = allow all. */
   CORS_ORIGIN: z.string().optional(),
+  /** Used to convert USD brand expenses (e.g. website) into EGP totals. */
+  USD_TO_EGP: z.coerce.number().positive().default(50),
 });
 
 const parsed = envSchema.safeParse(process.env);
