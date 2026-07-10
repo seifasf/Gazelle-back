@@ -96,7 +96,7 @@ export async function pickAndPackOrder(orderId, actorUserId) {
 export async function getPickList() {
   return Order.find({ internalStatus: 'verified_ready_for_shipping' })
     .sort({ placedAt: 1 })
-    .populate('customerId', 'fullName phone riskFlag');
+    .populate('customerId', 'fullName phone riskFlag lifetimeCancelled');
 }
 
 export async function getShipmentStatus(orderId) {

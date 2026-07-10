@@ -118,7 +118,33 @@ export async function updateCustomerRiskFlag(customerId, riskFlag) {
   return Customer.findByIdAndUpdate(customerId, { riskFlag }, { new: true });
 }
 
-export async function listCustomers({ search, limit = 50, skip = 0 }) {
+/** Threshold: more than 2 cancellations → show cancel-risk flag. */
+export const FREQUENT_CANCEL_THRESHOLD = 2;
+
+/**
+ * Increment cancel count and auto-flag customers who cancel more than twice.
+ * Does not downgrade vip / high_risk.
+ */
+export async function recordCustomerCancellation(customerId, session) {
+  const customer = await Customer.findByIdAndUpdate(
+    customerId,
+    { $inc: { lifetimeCancelled: 1, lifetimeRejectedOrReturned: 1 } },
+    { new: true, session }
+  );
+  if (!customer) return null;
+
+  if (
+    customer.lifetimeCancelled > FREQUENT_CANCEL_THRESHOLD &&
+    (!customer.riskFlag || customer.riskFlag === 'none')
+  ) {
+    customer.riskFlag = 'watch';
+    await customer.save({ session });
+  }
+
+  return customer;
+}
+
+export async function listCustomers({ search, riskFlag, limit = 50, skip = 0 }) {
   const filter = {};
   if (search) {
     filter.$or = [
@@ -127,11 +153,20 @@ export async function listCustomers({ search, limit = 50, skip = 0 }) {
       { email: { $regex: search, $options: 'i' } },
     ];
   }
+  if (riskFlag && riskFlag !== 'all') filter.riskFlag = riskFlag;
   const [customers, total] = await Promise.all([
-    Customer.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Customer.find(filter).sort({ createdAt: -1 }).skip(Number(skip) || 0).limit(Number(limit) || 50),
     Customer.countDocuments(filter),
   ]);
   return { customers, total };
 }
 
-export default { findOrCreateCustomer, getCustomerById, getCustomerShopifyOrders, updateCustomerRiskFlag, listCustomers };
+export default {
+  findOrCreateCustomer,
+  getCustomerById,
+  getCustomerShopifyOrders,
+  updateCustomerRiskFlag,
+  recordCustomerCancellation,
+  listCustomers,
+  FREQUENT_CANCEL_THRESHOLD,
+};

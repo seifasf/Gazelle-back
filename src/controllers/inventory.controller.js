@@ -98,6 +98,9 @@ export async function listCatalog(req, res, next) {
         search: req.query.search,
         productType: req.query.productType,
         vendor: req.query.vendor,
+        color: req.query.color,
+        size: req.query.size,
+        stockStatus: req.query.stockStatus,
         lowRealStock: req.query.lowRealStock === 'true',
         status: req.query.status || 'active',
         limit,
@@ -115,6 +118,17 @@ export async function listCatalog(req, res, next) {
   }
 }
 
+export async function catalogFilters(req, res, next) {
+  try {
+    const data = await productService.getCatalogFilterOptions({
+      status: req.query.status || 'active',
+    });
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export default {
   listVariants,
   getVariant,
@@ -124,4 +138,5 @@ export default {
   getLedger,
   listDiscrepancies,
   listCatalog,
+  catalogFilters,
 };

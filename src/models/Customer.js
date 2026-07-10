@@ -23,6 +23,8 @@ const customerSchema = new mongoose.Schema(
     lifetimeOrders: { type: Number, default: 0, min: 0 },
     lifetimeDelivered: { type: Number, default: 0, min: 0 },
     lifetimeRejectedOrReturned: { type: Number, default: 0, min: 0 },
+    /** Customer-initiated / OMS cancellations (not returns). */
+    lifetimeCancelled: { type: Number, default: 0, min: 0 },
     addresses: [addressSchema],
   },
   { timestamps: { createdAt: true, updatedAt: true } }

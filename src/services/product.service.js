@@ -97,6 +97,9 @@ export async function listCatalog({
   search,
   productType,
   vendor,
+  color,
+  size,
+  stockStatus,
   lowRealStock,
   status = 'active',
   limit = 24,
@@ -104,19 +107,33 @@ export async function listCatalog({
 }) {
   if (search === 'undefined' || search === 'null') search = undefined;
   if (search) search = search.trim();
+  if (color === 'undefined' || color === 'null') color = undefined;
+  if (size === 'undefined' || size === 'null') size = undefined;
+  if (stockStatus === 'undefined' || stockStatus === 'null') stockStatus = undefined;
+  if (lowRealStock === true || lowRealStock === 'true') {
+    stockStatus = stockStatus || 'low';
+  }
 
   const productFilter = {};
-  // Stock view shows only live (active) Shopify products by default; pass
-  // status='all' to include drafts/archived.
   if (status && status !== 'all') productFilter.status = status;
-  if (productType) productFilter.productType = { $regex: productType, $options: 'i' };
-  if (vendor) productFilter.vendor = { $regex: vendor, $options: 'i' };
+  if (productType) productFilter.productType = { $regex: `^${escapeRegex(productType)}$`, $options: 'i' };
+  if (vendor) productFilter.vendor = { $regex: `^${escapeRegex(vendor)}$`, $options: 'i' };
 
-  let variantProductIds = [];
+  const variantMatch = {};
+  if (color) variantMatch.color = { $regex: `^${escapeRegex(color)}$`, $options: 'i' };
+  if (size) variantMatch.size = { $regex: `^${escapeRegex(size)}$`, $options: 'i' };
+  if (stockStatus === 'in_stock') variantMatch.realStock = { $gt: 0 };
+  if (stockStatus === 'out_of_stock') variantMatch.realStock = { $lte: 0 };
+  if (stockStatus === 'on_hold') variantMatch.onHoldStock = { $gt: 0 };
+  if (stockStatus === 'low') {
+    variantMatch.$expr = { $lte: ['$realStock', '$lowStockThreshold'] };
+  }
+
+  let searchProductIds = [];
   if (search) {
     const escapedSearch = escapeRegex(search);
     const regex = { $regex: escapedSearch, $options: 'i' };
-    variantProductIds = await Variant.distinct('productId', {
+    searchProductIds = await Variant.distinct('productId', {
       $or: [
         { sku: regex },
         { barcode: regex },
@@ -132,18 +149,16 @@ export async function listCatalog({
       { handle: regex },
       { tags: regex },
     ];
-    if (variantProductIds.length) {
-      productFilter.$or.push({ _id: { $in: variantProductIds } });
+    if (searchProductIds.length) {
+      productFilter.$or.push({ _id: { $in: searchProductIds } });
     }
   }
 
-  let productIdsFilter = null;
-  if (lowRealStock) {
-    const lowIds = await Variant.distinct('productId', {
-      $expr: { $lte: ['$realStock', '$lowStockThreshold'] },
-    });
-    productIdsFilter = lowIds;
-    productFilter._id = { $in: lowIds };
+  const hasVariantFilters = Object.keys(variantMatch).length > 0;
+  let variantProductIds = null;
+  if (hasVariantFilters) {
+    variantProductIds = await Variant.distinct('productId', variantMatch);
+    productFilter._id = { $in: variantProductIds };
   }
 
   const [totalProducts, products] = await Promise.all([
@@ -152,24 +167,9 @@ export async function listCatalog({
   ]);
 
   const productIds = products.map((p) => p._id);
-  let totalVariantsPromise;
-  if (productIdsFilter) {
-    totalVariantsPromise = Variant.countDocuments({ productId: { $in: productIdsFilter } });
-  } else if (search) {
-    // The UI paginates by products, so keep search totals cheap: count variants
-    // that directly matched the search plus variants on the current product page.
-    const pageProductIds = productIds.map((id) => id.toString());
-    const directProductIds = variantProductIds.map((id) => id.toString());
-    const countedProductIds = [...new Set([...pageProductIds, ...directProductIds])];
-    totalVariantsPromise = countedProductIds.length
-      ? Variant.countDocuments({ productId: { $in: countedProductIds } })
-      : Promise.resolve(0);
-  } else {
-    // Count only variants belonging to products that match the current filter
-    // (active-only by default) so totals line up with what's shown.
-    const filterProductIds = await Product.find(productFilter).distinct('_id');
-    totalVariantsPromise = Variant.countDocuments({ productId: { $in: filterProductIds } });
-  }
+  const allMatchingProductIds = hasVariantFilters
+    ? variantProductIds
+    : await Product.find(productFilter).distinct('_id');
 
   const [variants, totalVariants] = await Promise.all([
     productIds.length
@@ -177,7 +177,9 @@ export async function listCatalog({
           .sort({ color: 1, size: 1 })
           .lean()
       : Promise.resolve([]),
-    totalVariantsPromise,
+    allMatchingProductIds.length
+      ? Variant.countDocuments({ productId: { $in: allMatchingProductIds } })
+      : Promise.resolve(0),
   ]);
 
   const variantsByProduct = new Map();
@@ -188,7 +190,19 @@ export async function listCatalog({
   }
 
   const catalog = products.map((product) => {
-    const productVariants = variantsByProduct.get(product._id.toString()) || [];
+    let productVariants = variantsByProduct.get(product._id.toString()) || [];
+    if (hasVariantFilters) {
+      productVariants = productVariants.filter((variant) => {
+        if (color && !(variant.color || '').toLowerCase().includes(String(color).toLowerCase())) return false;
+        if (size && String(variant.size || '').toLowerCase() !== String(size).toLowerCase()) return false;
+        if (stockStatus === 'in_stock' && !(variant.realStock > 0)) return false;
+        if (stockStatus === 'out_of_stock' && variant.realStock > 0) return false;
+        if (stockStatus === 'on_hold' && !(variant.onHoldStock > 0)) return false;
+        if (stockStatus === 'low' && !(variant.realStock <= variant.lowStockThreshold)) return false;
+        return true;
+      });
+    }
+
     let imageUrl = product.imageUrl;
     const mappedVariants = productVariants.map((variant) => {
       if (!imageUrl && variant.imageUrl) imageUrl = variant.imageUrl;
@@ -233,6 +247,31 @@ export async function listCatalog({
   return { catalog, totalProducts, totalVariants, page: Math.floor(skip / limit) + 1, pageSize: limit };
 }
 
+export async function getCatalogFilterOptions({ status = 'active' } = {}) {
+  const productFilter = status && status !== 'all' ? { status } : {};
+  const productIds = await Product.find(productFilter).distinct('_id');
+
+  const [vendors, productTypes, colors, sizes] = await Promise.all([
+    Product.distinct('vendor', { ...productFilter, vendor: { $nin: [null, ''] } }),
+    Product.distinct('productType', { ...productFilter, productType: { $nin: [null, ''] } }),
+    productIds.length
+      ? Variant.distinct('color', { productId: { $in: productIds }, color: { $nin: [null, ''] } })
+      : Promise.resolve([]),
+    productIds.length
+      ? Variant.distinct('size', { productId: { $in: productIds }, size: { $nin: [null, ''] } })
+      : Promise.resolve([]),
+  ]);
+
+  const sortAlpha = (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+
+  return {
+    vendors: vendors.filter(Boolean).sort(sortAlpha),
+    productTypes: productTypes.filter(Boolean).sort(sortAlpha),
+    colors: colors.filter(Boolean).sort(sortAlpha),
+    sizes: sizes.filter(Boolean).sort(sortAlpha),
+  };
+}
+
 export async function listProducts({ limit = 50, skip = 0 }) {
   const filter = { status: 'active' };
   const [products, total] = await Promise.all([
@@ -251,4 +290,5 @@ export default {
   getVariantLedger,
   listProducts,
   listCatalog,
+  getCatalogFilterOptions,
 };

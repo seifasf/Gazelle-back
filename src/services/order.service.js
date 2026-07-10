@@ -24,6 +24,7 @@ import {
   checkVariantsLowStock,
 } from './notification.service.js';
 import { recordDeliveryJournal } from './accounting.service.js';
+import { recordCustomerCancellation } from './customer.service.js';
 
 async function recordStatusChange(
   { orderId, fromStatus, toStatus, source, actorUserId, note },
@@ -169,7 +170,7 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
       session
     );
 
-    await Customer.updateOne({ _id: order.customerId }, { $inc: { lifetimeRejectedOrReturned: 1 } }, { session });
+    await recordCustomerCancellation(order.customerId, session);
 
     await enqueueShopifySync(ledgerDocs);
     return Order.findById(orderId).session(session);
@@ -440,7 +441,7 @@ export async function listOrders({ status, search, orderSource, shippingMethod, 
       .sort(sort)
       .skip(skip)
       .limit(limit)
-      .populate('customerId', 'fullName phone riskFlag'),
+      .populate('customerId', 'fullName phone riskFlag lifetimeCancelled'),
     Order.countDocuments(filter),
   ]);
   return { orders, total };
