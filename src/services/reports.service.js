@@ -154,14 +154,47 @@ async function paymobReceivedForRange({ from, to }) {
       },
     },
   ]);
-  return { amount: row?.amount ?? 0, count: row?.count ?? 0 };
+  if ((row?.count || 0) > 0) {
+    return { amount: row.amount ?? 0, count: row.count ?? 0, source: 'paymob_webhook' };
+  }
+
+  // Fallback until Paymob webhook ledger is wired: Shopify-marked online paid orders.
+  const [onlineRow] = await Order.aggregate([
+    {
+      $match: {
+        paymentMethod: 'online',
+        onlinePaymentStatus: 'paid',
+        onlinePaidAt: { $gte: from, $lte: to },
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        amount: {
+          $sum: {
+            $ifNull: [
+              '$onlinePaymentAmount',
+              { $add: [{ $ifNull: ['$totalSellingPrice', 0] }, { $ifNull: ['$shippingFee', 0] }] },
+            ],
+          },
+        },
+        count: { $sum: 1 },
+      },
+    },
+  ]);
+  return {
+    amount: onlineRow?.amount ?? 0,
+    count: onlineRow?.count ?? 0,
+    source: 'shopify_online_fallback',
+  };
 }
 
 async function codCollectedForRange({ from, to }) {
-  const [row] = await Order.aggregate([
+  // Prefer explicit Bosta COD collection timestamps when present.
+  const [bostaRow] = await Order.aggregate([
     {
       $match: {
-        paymentMethod: 'cod',
+        $or: [{ paymentMethod: 'cod' }, { paymentMethod: { $exists: false } }, { paymentMethod: null }],
         bostaCollectedAt: { $gte: from, $lte: to },
         bostaCollectedAmount: { $gt: 0 },
       },
@@ -174,22 +207,56 @@ async function codCollectedForRange({ from, to }) {
       },
     },
   ]);
-  return { amount: row?.amount ?? 0, count: row?.count ?? 0 };
+
+  if ((bostaRow?.count || 0) > 0) {
+    return { amount: bostaRow.amount ?? 0, count: bostaRow.count ?? 0, source: 'bosta' };
+  }
+
+  // Fallback: COD orders marked delivered in-range (no Bosta collection webhook yet).
+  const [deliveredRow] = await Order.aggregate([
+    {
+      $match: {
+        $or: [{ paymentMethod: 'cod' }, { paymentMethod: { $exists: false } }, { paymentMethod: null }],
+        deliveredAt: { $gte: from, $lte: to },
+        internalStatus: 'delivered',
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        amount: {
+          $sum: {
+            $add: [{ $ifNull: ['$totalSellingPrice', 0] }, { $ifNull: ['$shippingFee', 0] }],
+          },
+        },
+        count: { $sum: 1 },
+      },
+    },
+  ]);
+
+  return {
+    amount: deliveredRow?.amount ?? 0,
+    count: deliveredRow?.count ?? 0,
+    source: 'delivered_fallback',
+  };
 }
 
 async function codLeftToCollect() {
   const [row] = await Order.aggregate([
     {
       $match: {
-        paymentMethod: 'cod',
+        // Treat missing paymentMethod as COD (legacy Shopify imports).
+        $or: [{ paymentMethod: 'cod' }, { paymentMethod: { $exists: false } }, { paymentMethod: null }],
         internalStatus: { $nin: ['cancelled', 'returned_to_stock'] },
       },
     },
     {
       $addFields: {
-        shippingFeeSafe: { $ifNull: ['$shippingFee', 0] },
+        // Do not reference other fields added in this same stage (Mongo may not resolve them).
         collected: { $ifNull: ['$bostaCollectedAmount', 0] },
-        due: { $add: ['$totalSellingPrice', '$shippingFeeSafe'] },
+        due: {
+          $add: [{ $ifNull: ['$totalSellingPrice', 0] }, { $ifNull: ['$shippingFee', 0] }],
+        },
       },
     },
     { $match: { $expr: { $lt: ['$collected', '$due'] } } },
@@ -686,8 +753,10 @@ export async function getDashboardStats(query = {}) {
 
   const revenueExclShipping = payment?.totals?.revenueExclShipping ?? 0;
   const ordersPlaced = payment?.totalCount ?? 0;
+  // Bosta returns are account-wide (often WooCommerce RTOs) and usually not linked to
+  // Gazelle Shopify orders — don't present that as an order return-rate %.
   const returnRate =
-    returnsAnalytics?.source === 'bosta'
+    returnsAnalytics?.source === 'bosta' && !(returnsAnalytics.linkedCount > 0)
       ? null
       : ordersPlaced > 0
         ? pct(returnsAnalytics.count, ordersPlaced)

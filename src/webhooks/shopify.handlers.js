@@ -40,6 +40,48 @@ function mapImportedOrderStatus(payload) {
   return 'pending_verification';
 }
 
+/**
+ * Infer Gazelle payment method from Shopify gateways / financial status.
+ * Cash-on-delivery gateways (Bosta COD, manual COD, etc.) → cod; otherwise online.
+ */
+export function mapShopifyPaymentMethod(payload = {}) {
+  const gateways = [
+    ...(Array.isArray(payload.payment_gateway_names) ? payload.payment_gateway_names : []),
+    payload.gateway,
+    payload.payment_gateway,
+  ]
+    .filter(Boolean)
+    .map((g) => String(g).toLowerCase());
+
+  const joined = gateways.join(' ');
+  const codHints = ['cod', 'cash on delivery', 'cash_on_delivery', 'bosta', 'manual'];
+  if (codHints.some((h) => joined.includes(h))) return 'cod';
+
+  // Paid online before fulfillment.
+  if (payload.financial_status === 'paid' || payload.financial_status === 'partially_paid') {
+    if (!joined || joined.includes('shopify_payments') || joined.includes('paymob') || joined.includes('stripe') || joined.includes('paypal')) {
+      return 'online';
+    }
+    // Unknown gateway but marked paid → online
+    if (!codHints.some((h) => joined.includes(h))) return 'online';
+  }
+
+  // Default Egypt storefront path is COD when unpaid / pending.
+  if (payload.financial_status === 'pending' || payload.financial_status === 'authorized') {
+    return 'cod';
+  }
+
+  return 'cod';
+}
+
+function mapShopifyShippingFee(payload = {}) {
+  const fromSet = parseFloat(payload.total_shipping_price_set?.shop_money?.amount);
+  if (Number.isFinite(fromSet)) return fromSet;
+  const lines = payload.shipping_lines || [];
+  const sum = lines.reduce((s, l) => s + (parseFloat(l.price) || 0), 0);
+  return Number.isFinite(sum) ? sum : 0;
+}
+
 export async function handleOrdersCreate(payload, { reserveStock = true, statusOverride, source = 'shopify_webhook' } = {}) {
   const shopifyOrderId = String(payload.id);
   const existing = await Order.findOne({ shopifyOrderId });
@@ -97,6 +139,11 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
     internalStatus === 'delivered'
       ? new Date(payload.updated_at || payload.closed_at || payload.created_at || Date.now())
       : undefined;
+  const paymentMethod = mapShopifyPaymentMethod(payload);
+  const shippingFee = mapShopifyShippingFee(payload);
+  const onlinePaid =
+    paymentMethod === 'online' &&
+    (payload.financial_status === 'paid' || payload.financial_status === 'partially_paid');
 
   const order = await withTransaction(async (session) => {
     const [created] = await Order.create(
@@ -105,8 +152,22 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
           shopifyOrderId,
           customerId: customer._id,
           shippingAddress,
+          shippingMethod: 'bosta',
+          paymentMethod,
+          shippingFee,
+          ...(onlinePaid
+            ? {
+                onlinePaymentStatus: 'paid',
+                onlinePaymentProvider: 'shopify',
+                onlinePaymentAmount: parseFloat(payload.total_price) || 0,
+                onlinePaidAt: new Date(payload.processed_at || payload.created_at || Date.now()),
+              }
+            : {}),
           internalStatus,
-          totalSellingPrice: parseFloat(payload.total_price) || 0,
+          totalSellingPrice: Math.max(
+            0,
+            (parseFloat(payload.total_price) || 0) - shippingFee
+          ),
           items,
           placedAt: new Date(payload.created_at || Date.now()),
           ...(deliveredAt ? { deliveredAt } : {}),
