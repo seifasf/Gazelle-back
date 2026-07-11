@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticate } from '../middleware/auth.js';
+import { adminOnly, requireRoles } from '../middleware/rbac.js';
 import { fetchBostaCities, getBostaCitiesFromDb } from '../integrations/bosta/cities.service.js';
 import { isBostaConfigured } from '../integrations/bosta/client.js';
 
@@ -7,7 +8,8 @@ const router = Router();
 
 router.use(authenticate);
 
-router.get('/bosta-cities', async (req, res, next) => {
+/** Cities needed by orders managers for manual orders / address edits. */
+router.get('/bosta-cities', requireRoles('admin', 'orders_manager', 'stock_manager'), async (req, res, next) => {
   try {
     if (!isBostaConfigured()) {
       return res.json({ data: [], configured: false });
@@ -28,7 +30,7 @@ router.get('/bosta-cities', async (req, res, next) => {
   }
 });
 
-router.post('/bosta-cities/sync', async (req, res, next) => {
+router.post('/bosta-cities/sync', adminOnly, async (req, res, next) => {
   try {
     const cities = await fetchBostaCities({ force: true });
     res.json({ data: cities, count: cities.length, synced: true });

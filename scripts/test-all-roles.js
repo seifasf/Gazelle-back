@@ -105,6 +105,11 @@ async function run() {
   await expect('products (with cogs)', 'GET', '/products', { token: admin });
   await expect('order state counts', 'GET', '/orders/counts', { token: admin });
   await expect('notifications', 'GET', '/notifications', { token: admin });
+  await expect('accounting accounts', 'GET', '/accounting/accounts', { token: admin });
+  await expect('hr employees', 'GET', '/hr/employees', { token: admin });
+  await expect('manufacturing factories', 'GET', '/manufacturing/factories', { token: admin });
+  await expect('pl report', 'GET', '/accounting/reports/pl', { token: admin });
+  await expect('cities list', 'GET', '/reference/bosta-cities', { token: admin });
 
   /* ---------------- STOCK MANAGER ---------------- */
   section = 'STOCK_MANAGER';
@@ -126,6 +131,18 @@ async function run() {
   await expect('BLOCK users', 'GET', '/users', { token: sm, status: 403 });
   await expect('BLOCK stock-intake', 'POST', '/inventory/stock-intake', { token: sm, body: { variantId, quantity: 1 }, status: 403 });
   await expect('BLOCK customers', 'GET', '/customers', { token: sm, status: 403 });
+  await expect('BLOCK accounting', 'GET', '/accounting/accounts', { token: sm, status: 403 });
+  await expect('BLOCK cities sync', 'POST', '/reference/bosta-cities/sync', { token: sm, status: 403 });
+  // Stock manager must not list verification queue even if they request it.
+  const smPending = await call('GET', '/orders?status=pending_verification&limit=5', { token: sm });
+  const smPendingStatuses = (smPending.data?.orders || smPending.data?.data || [])
+    .map((o) => o.internalStatus)
+    .filter(Boolean);
+  record(
+    'SM cannot list pending_verification',
+    smPending.status === 200 && smPendingStatuses.every((s) => s !== 'pending_verification'),
+    smPendingStatuses.slice(0, 5).join(',') || `status ${smPending.status}`
+  );
 
   /* ---------------- ORDERS MANAGER ---------------- */
   section = 'ORDERS_MANAGER';
@@ -140,6 +157,10 @@ async function run() {
   await expect('BLOCK reports', 'GET', '/reports/dashboard', { token: om, status: 403 });
   await expect('BLOCK settings', 'GET', '/settings', { token: om, status: 403 });
   await expect('BLOCK pick-list', 'GET', '/fulfillment/pick-list', { token: om, status: 403 });
+  await expect('BLOCK accounting', 'GET', '/accounting/accounts', { token: om, status: 403 });
+  await expect('BLOCK hr', 'GET', '/hr/employees', { token: om, status: 403 });
+  await expect('BLOCK manufacturing', 'GET', '/manufacturing/factories', { token: om, status: 403 });
+  await expect('variants for exchange', 'GET', '/inventory/variants?limit=5', { token: om });
 
   /* ---------------- FULL ORDER LIFECYCLE + NOTIFICATIONS ---------------- */
   section = 'LIFECYCLE';
@@ -192,6 +213,10 @@ async function run() {
 
       // OM cannot pick-pack (stock action); SM can.
       await expect('BLOCK OM pick-pack', 'POST', `/fulfillment/${orderId}/pick-pack`, { token: om, status: 403 });
+      await expect('OM can read shipment-status', 'GET', `/fulfillment/${orderId}/shipment-status`, {
+        token: om,
+        status: [200, 404],
+      });
       await expect('SM pick-pack (local shipping)', 'POST', `/fulfillment/${orderId}/pick-pack`, { token: sm, status: [200, 201] });
 
       // Notification mark-read flow.

@@ -1,14 +1,33 @@
 import * as orderService from '../services/order.service.js';
 import * as exchangeService from '../services/exchange.service.js';
 
+const STOCK_MANAGER_ORDER_STATUSES = new Set([
+  'verified_ready_for_shipping',
+  'picked_up_by_bosta',
+  'in_transit',
+  'returning_to_origin',
+  'returned_to_stock',
+]);
+
+function clampStatusFilterForRole(role, status) {
+  if (role !== 'stock_manager') return status;
+
+  if (!status) {
+    return [...STOCK_MANAGER_ORDER_STATUSES].join(',');
+  }
+
+  const allowed = String(status)
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => STOCK_MANAGER_ORDER_STATUSES.has(s));
+
+  return allowed.length ? allowed.join(',') : [...STOCK_MANAGER_ORDER_STATUSES].join(',');
+}
+
 export async function listOrders(req, res, next) {
   try {
     const { status, limit, skip, search, orderSource, shippingMethod } = req.query;
-    let statusFilter = status;
-
-    if (!statusFilter && req.user.role === 'stock_manager') {
-      statusFilter = 'verified_ready_for_shipping,picked_up_by_bosta,in_transit,returning_to_origin';
-    }
+    const statusFilter = clampStatusFilterForRole(req.user.role, status);
 
     const result = await orderService.listOrders({
       status: statusFilter,
