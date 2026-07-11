@@ -40,7 +40,7 @@ export async function addCogsBatch(req, res, next) {
 export async function cogsHealth(req, res, next) {
   try {
     const report = await accountingService.getCogsHealth({
-      limit: Number(req.query.limit) || 200,
+      limit: Number(req.query.limit) || 2000,
     });
     res.json({ data: report });
   } catch (err) {

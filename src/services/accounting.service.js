@@ -702,13 +702,14 @@ export async function recordDeliveryJournal(order, actorUserId) {
 }
 
 export async function getCogsHealth({ limit = 2000 } = {}) {
-  // Prefer missing COGS first so the admin page is actionable (not newest Shopify syncs).
+  // Active Shopify products only (draft/archived are purged from OMS on sync).
   const variants = await Variant.find()
-    .populate('productId', 'title status')
+    .populate({ path: 'productId', select: 'title status', match: { status: 'active' } })
     .select('sku title cogs sellingPrice realStock onlineStock onHoldStock productId updatedAt')
     .lean();
 
   const rows = variants
+    .filter((v) => v.productId) // drop variants whose product is draft/archived/missing
     .map((v) => {
       const cogs = v.cogs || 0;
       const price = v.sellingPrice || 0;
@@ -751,6 +752,9 @@ export async function getCogsHealth({ limit = 2000 } = {}) {
   const summary = {
     total: rows.length,
     missingCogs: rows.filter((r) => r.health === 'missing').length,
+    missingProducts: new Set(
+      rows.filter((r) => r.health === 'missing').map((r) => String(r.productId?._id || r.productId))
+    ).size,
     lossMaking: rows.filter((r) => r.health === 'loss').length,
     thinMargin: rows.filter((r) => r.health === 'thin').length,
     strong: rows.filter((r) => r.health === 'strong').length,
@@ -760,7 +764,7 @@ export async function getCogsHealth({ limit = 2000 } = {}) {
   if (summary.missingCogs > 0) {
     insights.push({
       tone: 'danger',
-      title: `${summary.missingCogs} SKUs have no COGS`,
+      title: `${summary.missingProducts} active products missing COGS (${summary.missingCogs} SKUs)`,
       detail: 'P&L and profitability are unreliable until these are filled.',
     });
   }
