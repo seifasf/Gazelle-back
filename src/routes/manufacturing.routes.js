@@ -12,6 +12,9 @@ router.post('/factories', manufacturingController.createFactory);
 router.patch('/factories/:id', manufacturingController.updateFactory);
 router.delete('/factories/:id', manufacturingController.deleteFactory);
 
+router.get('/orderable-products', manufacturingController.listOrderableProducts);
+router.patch('/products/:productId/factory', manufacturingController.assignProductFactory);
+
 router.get('/purchase-orders', manufacturingController.listPurchaseOrders);
 router.post('/purchase-orders', manufacturingController.createPurchaseOrder);
 router.get('/purchase-orders/:id', manufacturingController.getPurchaseOrder);

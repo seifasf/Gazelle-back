@@ -1,6 +1,7 @@
 import ExcelJS from 'exceljs';
 import Factory from '../models/Factory.js';
 import PurchaseOrder from '../models/PurchaseOrder.js';
+import Product from '../models/Product.js';
 import Variant from '../models/Variant.js';
 import { OPEN_PO_STATUSES, FACTORY_AVG_LEAD_TIME_MIN_SAMPLES } from '../constants/index.js';
 import { stockIntake } from './order.service.js';
@@ -105,6 +106,118 @@ export async function deleteFactory(id) {
   return Factory.findByIdAndDelete(id);
 }
 
+/** Active products for factory ordering — includes factory + size variants. */
+export async function listOrderableProducts({ q, factoryId, includeUnlinked = true, limit = 40 } = {}) {
+  const filter = { status: 'active' };
+  if (factoryId && includeUnlinked) {
+    filter.$or = [
+      { defaultFactoryId: factoryId },
+      { defaultFactoryId: null },
+      { defaultFactoryId: { $exists: false } },
+    ];
+  } else if (factoryId) {
+    filter.defaultFactoryId = factoryId;
+  }
+  if (q && String(q).trim()) {
+    const term = String(q).trim();
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const skuProductIds = await Variant.find({ sku: { $regex: escaped, $options: 'i' } })
+      .distinct('productId');
+    const textOr = [
+      { title: { $regex: escaped, $options: 'i' } },
+      { handle: { $regex: escaped, $options: 'i' } },
+      { _id: { $in: skuProductIds } },
+    ];
+    if (filter.$or) {
+      filter.$and = [{ $or: filter.$or }, { $or: textOr }];
+      delete filter.$or;
+    } else {
+      filter.$or = textOr;
+    }
+  }
+
+  const products = await Product.find(filter)
+    .populate('defaultFactoryId', 'name leadTimeDays currency isActive')
+    .sort({ title: 1 })
+    .limit(Math.min(Number(limit) || 40, 100))
+    .lean();
+
+  const productIds = products.map((p) => p._id);
+  const variants = productIds.length
+    ? await Variant.find({ productId: { $in: productIds } })
+        .select('sku title color size cogs sellingPrice realStock onlineStock onHoldStock productId')
+        .sort({ color: 1, size: 1 })
+        .lean()
+    : [];
+
+  const byProduct = new Map();
+  for (const v of variants) {
+    const key = String(v.productId);
+    if (!byProduct.has(key)) byProduct.set(key, []);
+    byProduct.get(key).push(v);
+  }
+
+  return products.map((p) => {
+    const factory = p.defaultFactoryId && typeof p.defaultFactoryId === 'object'
+      ? p.defaultFactoryId
+      : null;
+    const productVariants = byProduct.get(String(p._id)) || [];
+    return {
+      _id: p._id,
+      title: p.title,
+      imageUrl: p.imageUrl,
+      status: p.status,
+      factoryId: factory?._id || p.defaultFactoryId || null,
+      factoryName: factory?.name || null,
+      factoryLeadTimeDays: factory?.leadTimeDays ?? null,
+      variants: productVariants.map((v) => ({
+        _id: v._id,
+        sku: v.sku,
+        title: v.title,
+        color: v.color,
+        size: v.size,
+        cogs: v.cogs || 0,
+        sellingPrice: v.sellingPrice || 0,
+        realStock: v.realStock || 0,
+      })),
+    };
+  });
+}
+
+export async function assignProductFactory(productId, factoryId) {
+  const factory = await Factory.findById(factoryId);
+  if (!factory || !factory.isActive) {
+    const err = new Error('Factory not found or inactive');
+    err.statusCode = 400;
+    throw err;
+  }
+  const product = await Product.findByIdAndUpdate(
+    productId,
+    { defaultFactoryId: factoryId },
+    { new: true }
+  ).populate('defaultFactoryId', 'name leadTimeDays currency');
+  if (!product) {
+    const err = new Error('Product not found');
+    err.statusCode = 404;
+    throw err;
+  }
+  return product;
+}
+
+async function linkProductsToFactory(variantIds, factoryId) {
+  if (!variantIds?.length || !factoryId) return 0;
+  const productIds = await Variant.find({ _id: { $in: variantIds } }).distinct('productId');
+  if (!productIds.length) return 0;
+  const result = await Product.updateMany(
+    {
+      _id: { $in: productIds },
+      $or: [{ defaultFactoryId: null }, { defaultFactoryId: { $exists: false } }],
+    },
+    { $set: { defaultFactoryId: factoryId } }
+  );
+  return result.modifiedCount || 0;
+}
+
 export async function listPurchaseOrders({ status, factoryId, limit = 50, skip = 0 } = {}) {
   const filter = {};
   if (status) filter.status = status;
@@ -152,8 +265,44 @@ async function enrichItems(items) {
   return enriched;
 }
 
-export async function createPurchaseOrder({ factoryId, items, expectedDeliveryDate, notes, createdBy }) {
-  const factory = await Factory.findById(factoryId);
+export async function createPurchaseOrder({
+  factoryId,
+  items,
+  expectedDeliveryDate,
+  notes,
+  createdBy,
+  linkFactory = true,
+}) {
+  let resolvedFactoryId = factoryId;
+
+  // If factory omitted, resolve from products linked to the line items.
+  if (!resolvedFactoryId && items?.length) {
+    const variantIds = items.map((i) => i.variantId);
+    const variants = await Variant.find({ _id: { $in: variantIds } })
+      .select('productId')
+      .lean();
+    const productIds = [...new Set(variants.map((v) => String(v.productId)))];
+    const products = await Product.find({ _id: { $in: productIds } })
+      .select('defaultFactoryId title')
+      .lean();
+    const linked = products
+      .map((p) => p.defaultFactoryId && String(p.defaultFactoryId))
+      .filter(Boolean);
+    const unique = [...new Set(linked)];
+    if (unique.length === 1) {
+      resolvedFactoryId = unique[0];
+    } else if (unique.length === 0) {
+      const err = new Error('Pick a factory — these products are not linked to one yet');
+      err.statusCode = 400;
+      throw err;
+    } else {
+      const err = new Error('Line items belong to different factories — split into separate orders');
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+
+  const factory = await Factory.findById(resolvedFactoryId);
   if (!factory || !factory.isActive) {
     const err = new Error('Factory not found or inactive');
     err.statusCode = 400;
@@ -165,9 +314,9 @@ export async function createPurchaseOrder({ factoryId, items, expectedDeliveryDa
     expectedDeliveryDate ||
     (factory.leadTimeDays != null ? addDays(new Date(), factory.leadTimeDays) : undefined);
 
-  return PurchaseOrder.create({
+  const po = await PurchaseOrder.create({
     poNumber,
-    factoryId,
+    factoryId: factory._id,
     items: enrichedItems,
     totalCost: computeTotalCost(enrichedItems),
     expectedDeliveryDate: expected,
@@ -175,6 +324,16 @@ export async function createPurchaseOrder({ factoryId, items, expectedDeliveryDa
     createdBy,
     status: 'draft',
   });
+
+  // Connect products ↔ factory when still unassigned.
+  if (linkFactory !== false) {
+    await linkProductsToFactory(
+      enrichedItems.map((i) => i.variantId),
+      factory._id
+    );
+  }
+
+  return getPurchaseOrder(po._id);
 }
 
 export async function updatePurchaseOrder(id, { status, expectedDeliveryDate, notes, items }) {
@@ -297,6 +456,8 @@ export default {
   createFactory,
   updateFactory,
   deleteFactory,
+  listOrderableProducts,
+  assignProductFactory,
   listPurchaseOrders,
   getPurchaseOrder,
   createPurchaseOrder,

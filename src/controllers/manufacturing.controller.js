@@ -38,6 +38,32 @@ export async function deleteFactory(req, res, next) {
   }
 }
 
+export async function listOrderableProducts(req, res, next) {
+  try {
+    const products = await manufacturingService.listOrderableProducts({
+      q: req.query.q,
+      factoryId: req.query.factoryId,
+      includeUnlinked: req.query.includeUnlinked !== 'false',
+      limit: Number(req.query.limit) || 40,
+    });
+    res.json({ data: products });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function assignProductFactory(req, res, next) {
+  try {
+    const product = await manufacturingService.assignProductFactory(
+      req.params.productId,
+      req.body.factoryId
+    );
+    res.json({ data: product });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function listPurchaseOrders(req, res, next) {
   try {
     const limit = Number(req.query.limit) || 50;
@@ -110,6 +136,8 @@ export default {
   createFactory,
   updateFactory,
   deleteFactory,
+  listOrderableProducts,
+  assignProductFactory,
   listPurchaseOrders,
   getPurchaseOrder,
   createPurchaseOrder,
