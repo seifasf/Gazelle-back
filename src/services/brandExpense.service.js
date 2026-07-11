@@ -90,6 +90,56 @@ export async function getMonthExpenseBreakdown(yearMonth) {
 
   const fixedTotal = lines.filter((l) => l.kind === 'fixed').reduce((s, l) => s + l.amountEgp, 0);
   const variableTotal = lines.filter((l) => l.kind === 'variable').reduce((s, l) => s + l.amountEgp, 0);
+  const total = fixedTotal + variableTotal;
+
+  // Operational context: delivered revenue in this calendar month (Egypt-ish UTC month bounds).
+  let revenue = 0;
+  let deliveredCount = 0;
+  try {
+    const Order = (await import('../models/Order.js')).default;
+    const [y, m] = yearMonth.split('-').map(Number);
+    const from = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0));
+    const to = new Date(Date.UTC(y, m, 0, 23, 59, 59, 999));
+    const orders = await Order.find({
+      internalStatus: 'delivered',
+      deliveredAt: { $gte: from, $lte: to },
+    }).select('totalSellingPrice');
+    deliveredCount = orders.length;
+    revenue = orders.reduce((s, o) => s + (o.totalSellingPrice || 0), 0);
+  } catch {
+    // non-fatal
+  }
+
+  const expenseRatio = revenue > 0 ? Math.round((total / revenue) * 1000) / 10 : null;
+  const insights = [];
+  const missingVariable = lines.filter((l) => l.kind === 'variable' && !l.hasEntry).length;
+  if (missingVariable > 0) {
+    insights.push({
+      tone: 'warning',
+      title: `${missingVariable} variable costs not entered`,
+      detail: `Fill actuals for ${yearMonth} so P&L net income is complete.`,
+    });
+  }
+  if (expenseRatio != null && expenseRatio > 40) {
+    insights.push({
+      tone: 'danger',
+      title: `Brand OpEx is ${expenseRatio}% of delivered revenue`,
+      detail: 'Cut variable spend or grow delivered volume before adding fixed costs.',
+    });
+  } else if (expenseRatio != null && expenseRatio <= 25 && revenue > 0) {
+    insights.push({
+      tone: 'success',
+      title: `Lean OpEx (${expenseRatio}% of revenue)`,
+      detail: 'Fixed + variable costs are under control relative to deliveries.',
+    });
+  }
+  if (fixedTotal > 0 && revenue > 0 && fixedTotal > revenue * 0.35) {
+    insights.push({
+      tone: 'warning',
+      title: 'Fixed costs are high vs monthly revenue',
+      detail: 'Avoid new fixed commitments until delivered sales cover overhead comfortably.',
+    });
+  }
 
   return {
     yearMonth,
@@ -97,7 +147,9 @@ export async function getMonthExpenseBreakdown(yearMonth) {
     lines,
     fixedTotal,
     variableTotal,
-    total: fixedTotal + variableTotal,
+    total,
+    context: { revenue, deliveredCount, expenseRatio },
+    insights,
   };
 }
 

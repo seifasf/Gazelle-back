@@ -17,6 +17,7 @@ router.post('/journal', accountingController.createJournal);
 router.get('/reports/pl', accountingController.profitAndLoss);
 router.get('/reports/balance-sheet', accountingController.balanceSheet);
 router.get('/reports/top-products', accountingController.topProducts);
+router.get('/reports/cogs-health', accountingController.cogsHealth);
 
 router.get('/expenses', accountingController.listBrandExpenses);
 router.get('/expenses/month', accountingController.getMonthExpenses);

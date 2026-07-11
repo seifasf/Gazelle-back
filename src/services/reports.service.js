@@ -804,7 +804,11 @@ export async function getProfitabilityReport({ from, to, groupBy = 'product' }) 
   if (from || to) {
     match.deliveredAt = {};
     if (from) match.deliveredAt.$gte = new Date(from);
-    if (to) match.deliveredAt.$lte = new Date(to);
+    if (to) {
+      const end = new Date(to);
+      if (String(to).length <= 10) end.setHours(23, 59, 59, 999);
+      match.deliveredAt.$lte = end;
+    }
   }
 
   const orders = await Order.find(match).select('items totalSellingPrice totalCogsSnapshot deliveredAt');
@@ -821,25 +825,124 @@ export async function getProfitabilityReport({ from, to, groupBy = 'product' }) 
         cogs,
         margin: revenue - cogs,
         quantity: item.quantity,
+        missingCogs: !item.unitCogs,
         deliveredAt: order.deliveredAt,
       });
     }
   }
 
+  let products;
   if (groupBy === 'product') {
     const grouped = {};
     for (const row of rows) {
       const key = row.sku;
-      if (!grouped[key]) grouped[key] = { sku: key, revenue: 0, cogs: 0, margin: 0, quantity: 0 };
+      if (!grouped[key]) {
+        grouped[key] = {
+          sku: key,
+          revenue: 0,
+          cogs: 0,
+          margin: 0,
+          quantity: 0,
+          missingCogs: false,
+        };
+      }
       grouped[key].revenue += row.revenue;
       grouped[key].cogs += row.cogs;
       grouped[key].margin += row.margin;
       grouped[key].quantity += row.quantity;
+      if (row.missingCogs) grouped[key].missingCogs = true;
     }
-    return Object.values(grouped);
+    products = Object.values(grouped).map((p) => ({
+      ...p,
+      marginPct: p.revenue > 0 ? (p.margin / p.revenue) * 100 : 0,
+      decision:
+        p.missingCogs
+          ? 'Set COGS'
+          : p.margin < 0
+            ? 'Fix price/cost'
+            : p.marginPct >= 40
+              ? 'Scale'
+              : p.marginPct < 20
+                ? 'Improve margin'
+                : 'Hold',
+    }));
+  } else {
+    products = rows.map((p) => ({
+      ...p,
+      marginPct: p.revenue > 0 ? (p.margin / p.revenue) * 100 : 0,
+    }));
   }
 
-  return rows;
+  products.sort((a, b) => b.margin - a.margin);
+
+  const totals = products.reduce(
+    (acc, p) => {
+      acc.revenue += p.revenue;
+      acc.cogs += p.cogs;
+      acc.margin += p.margin;
+      acc.quantity += p.quantity;
+      if (p.missingCogs) acc.missingCogsSkus += 1;
+      return acc;
+    },
+    { revenue: 0, cogs: 0, margin: 0, quantity: 0, missingCogsSkus: 0 }
+  );
+  totals.marginPct = totals.revenue > 0 ? (totals.margin / totals.revenue) * 100 : 0;
+
+  const insights = [];
+  if (!products.length) {
+    insights.push({
+      tone: 'warning',
+      title: 'No delivered sales in range',
+      detail: 'Widen dates or check fulfillment — profitability only counts delivered orders.',
+    });
+  } else {
+    const best = products[0];
+    const worst = products[products.length - 1];
+    if (best) {
+      insights.push({
+        tone: 'success',
+        title: `Best margin: ${best.sku}`,
+        detail: `${best.marginPct.toFixed(0)}% · ${Math.round(best.margin).toLocaleString('en-EG')} EGP — prioritize restock.`,
+      });
+    }
+    if (worst && worst.margin < best?.margin) {
+      insights.push({
+        tone: worst.margin < 0 ? 'danger' : 'warning',
+        title: `Weakest: ${worst.sku}`,
+        detail: `${worst.marginPct.toFixed(0)}% margin — ${worst.decision}.`,
+      });
+    }
+    if (totals.missingCogsSkus > 0) {
+      insights.push({
+        tone: 'warning',
+        title: `${totals.missingCogsSkus} SKUs missing COGS`,
+        detail: 'Open COGS page and fill costs so margin decisions are trustworthy.',
+      });
+    }
+    if (totals.marginPct >= 40) {
+      insights.push({
+        tone: 'success',
+        title: `Portfolio margin ${totals.marginPct.toFixed(0)}%`,
+        detail: 'Strong contribution — reinvest in winners, not across all SKUs equally.',
+      });
+    } else if (totals.marginPct < 25 && totals.revenue > 0) {
+      insights.push({
+        tone: 'danger',
+        title: `Portfolio margin only ${totals.marginPct.toFixed(0)}%`,
+        detail: 'Pause low-margin ads and renegotiate factory costs on bottom SKUs.',
+      });
+    }
+  }
+
+  return {
+    from: from || null,
+    to: to || null,
+    totals,
+    insights,
+    products,
+    // backward compatible array consumers
+    data: products,
+  };
 }
 
 export async function getAuditLog({ from, to, limit = 100, skip = 0 }) {

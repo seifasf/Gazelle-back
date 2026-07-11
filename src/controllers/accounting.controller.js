@@ -125,6 +125,17 @@ export async function topProducts(req, res, next) {
   }
 }
 
+export async function cogsHealth(req, res, next) {
+  try {
+    const report = await accountingService.getCogsHealth({
+      limit: Number(req.query.limit) || 200,
+    });
+    res.json({ data: report });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export default {
   listAccounts,
   createAccount,
@@ -134,6 +145,7 @@ export default {
   profitAndLoss,
   balanceSheet,
   topProducts,
+  cogsHealth,
   listBrandExpenses,
   getMonthExpenses,
   saveMonthExpenses,
