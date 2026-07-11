@@ -18,6 +18,8 @@ const customerSchema = new mongoose.Schema(
     fullName: { type: String, required: true, maxlength: 120 },
     phone: { type: String, required: true, index: true },
     email: { type: String, lowercase: true, trim: true },
+    /** Optional; used for returns / audience analytics. */
+    gender: { type: String, enum: ['male', 'female', 'unknown'], default: 'unknown', index: true },
     shopifyCustomerId: { type: String, index: { unique: true, sparse: true } },
     riskFlag: { type: String, enum: RISK_FLAGS, default: 'none' },
     lifetimeOrders: { type: Number, default: 0, min: 0 },

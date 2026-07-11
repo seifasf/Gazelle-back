@@ -446,6 +446,124 @@ async function employeeKpisForRange({ from, to, limit = 10 }) {
   return rows;
 }
 
+function pct(part, whole) {
+  if (!whole) return 0;
+  return Math.round((part / whole) * 1000) / 10;
+}
+
+function mixFromCounts(counts) {
+  const total = Object.values(counts).reduce((s, n) => s + n, 0);
+  const shares = {};
+  for (const [key, count] of Object.entries(counts)) {
+    shares[key] = { count, percent: pct(count, total) };
+  }
+  return { total, ...shares };
+}
+
+/** Chat / social manual channels vs Shopify online store. */
+const CHAT_MANUAL_SOURCES = new Set(['whatsapp', 'phone', 'instagram', 'facebook', 'other']);
+
+async function orderMixForRange({ from, to }) {
+  const orders = await Order.find({ placedAt: { $gte: from, $lte: to } })
+    .select('paymentMethod orderSource manualSource totalSellingPrice')
+    .lean();
+
+  const payment = { cod: 0, online: 0 };
+  const channel = { chat: 0, online_store: 0, other: 0 };
+  let revenueCod = 0;
+  let revenueOnline = 0;
+
+  for (const o of orders) {
+    const pay = o.paymentMethod === 'online' ? 'online' : 'cod';
+    payment[pay] += 1;
+    if (pay === 'online') revenueOnline += o.totalSellingPrice || 0;
+    else revenueCod += o.totalSellingPrice || 0;
+
+    if (o.orderSource === 'shopify') {
+      channel.online_store += 1;
+    } else if (o.orderSource === 'manual' && CHAT_MANUAL_SOURCES.has(o.manualSource || 'other')) {
+      channel.chat += 1;
+    } else if (o.orderSource === 'manual' && o.manualSource === 'website') {
+      channel.online_store += 1;
+    } else {
+      channel.other += 1;
+    }
+  }
+
+  const paymentMix = mixFromCounts(payment);
+  const channelMix = mixFromCounts(channel);
+
+  return {
+    payment: {
+      ...paymentMix,
+      revenueCod,
+      revenueOnline,
+      codPercent: paymentMix.cod?.percent ?? 0,
+      onlinePercent: paymentMix.online?.percent ?? 0,
+    },
+    channel: {
+      ...channelMix,
+      chatPercent: channelMix.chat?.percent ?? 0,
+      onlineStorePercent: channelMix.online_store?.percent ?? 0,
+    },
+  };
+}
+
+async function returnsAnalyticsForRange({ from, to }) {
+  const { resolveGender } = await import('../utils/gender.js');
+
+  const history = await OrderStatusHistory.find({
+    toStatus: 'returned_to_stock',
+    createdAt: { $gte: from, $lte: to },
+  })
+    .select('orderId createdAt')
+    .lean();
+
+  const orderIds = [...new Set(history.map((h) => String(h.orderId)))];
+  const orders = await Order.find({ _id: { $in: orderIds } })
+    .populate('customerId', 'fullName gender')
+    .select('paymentMethod orderSource manualSource totalSellingPrice customerId shippingAddress')
+    .lean();
+
+  const byId = Object.fromEntries(orders.map((o) => [String(o._id), o]));
+
+  const payment = { cod: 0, online: 0 };
+  const gender = { male: 0, female: 0, unknown: 0 };
+  let amount = 0;
+
+  for (const h of history) {
+    const order = byId[String(h.orderId)];
+    if (!order) continue;
+    amount += order.totalSellingPrice || 0;
+    const pay = order.paymentMethod === 'online' ? 'online' : 'cod';
+    payment[pay] += 1;
+
+    const name = order.customerId?.fullName || order.shippingAddress?.fullName || '';
+    const g = resolveGender(order.customerId?.gender, name);
+    gender[g] = (gender[g] || 0) + 1;
+  }
+
+  const paymentMix = mixFromCounts(payment);
+  const genderMix = mixFromCounts(gender);
+  const total = history.length;
+
+  return {
+    count: total,
+    amount,
+    payment: {
+      ...paymentMix,
+      cashPercent: paymentMix.cod?.percent ?? 0,
+      onlinePercent: paymentMix.online?.percent ?? 0,
+    },
+    gender: {
+      ...genderMix,
+      malePercent: genderMix.male?.percent ?? 0,
+      femalePercent: genderMix.female?.percent ?? 0,
+      unknownPercent: genderMix.unknown?.percent ?? 0,
+    },
+  };
+}
+
 export async function getDashboardStats(query = {}) {
   const preset = query?.preset || 'day';
   const range = rangeForPreset({
@@ -467,6 +585,8 @@ export async function getDashboardStats(query = {}) {
     dailyBreakdown,
     topProducts,
     employeeKpis,
+    orderMix,
+    returnsAnalytics,
   ] = await Promise.all([
     Order.aggregate([{ $group: { _id: '$internalStatus', count: { $sum: 1 } } }]),
     Order.countDocuments({ internalStatus: 'delivered' }),
@@ -479,6 +599,8 @@ export async function getDashboardStats(query = {}) {
     dailyBreakdownForRange(range),
     topProductsForRange(range),
     employeeKpisForRange(range),
+    orderMixForRange(range),
+    returnsAnalyticsForRange(range),
   ]);
 
   const statusMap = Object.fromEntries(ordersByStatus.map((s) => [s._id, s.count]));
@@ -486,6 +608,8 @@ export async function getDashboardStats(query = {}) {
     totalClosed > 0 ? Math.round((deliveredCount / totalClosed) * 100) : null;
 
   const revenueExclShipping = payment?.totals?.revenueExclShipping ?? 0;
+  const ordersPlaced = payment?.totalCount ?? 0;
+  const returnRate = ordersPlaced > 0 ? pct(returnsAnalytics.count, ordersPlaced) : 0;
 
   return {
     ordersByStatus: statusMap,
@@ -505,8 +629,11 @@ export async function getDashboardStats(query = {}) {
     codCollected,
     leftToCollect,
     returns,
+    returnsAnalytics,
+    orderMix,
+    returnRate,
     dailyBreakdown,
-    ordersPlaced: payment?.totalCount ?? 0,
+    ordersPlaced,
     // Backward-compatible aliases
     revenueToday: revenueExclShipping,
     revenueCustom: revenueExclShipping,
