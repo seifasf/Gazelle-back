@@ -304,10 +304,9 @@ export async function getProfitAndLoss({ from, to } = {}) {
   const brandExpenses = brand.total;
   const expenses = journalExpenses + brandExpenses;
 
-  // Prefer operational (delivered orders) for decision P&L when journals are empty/partial.
-  const useOperational = operational.revenue > 0 || byCategory.revenue === 0;
-  const revenue = useOperational ? operational.revenue : byCategory.revenue;
-  const cogs = useOperational ? operational.cogs : byCategory.cogs;
+  // Decision P&L always uses delivered orders (journals are often incomplete).
+  const revenue = operational.revenue;
+  const cogs = operational.cogs;
   const grossProfit = revenue - cogs;
   const netIncome = grossProfit - expenses;
 
@@ -336,7 +335,7 @@ export async function getProfitAndLoss({ from, to } = {}) {
   return {
     from: from || null,
     to: to || null,
-    source: useOperational ? 'orders' : 'journal',
+    source: 'orders',
     revenue,
     cogs,
     journalExpenses,
@@ -345,6 +344,7 @@ export async function getProfitAndLoss({ from, to } = {}) {
       variable: brand.variableTotal,
       total: brandExpenses,
       months: brand.months,
+      prorated: brand.prorated,
     },
     expenses,
     grossProfit,
@@ -371,8 +371,22 @@ export async function getProfitAndLoss({ from, to } = {}) {
 }
 
 export async function getBalanceSheet() {
-  const entries = await JournalEntry.find().populate('lines.accountId', 'code name category type');
+  await backfillMissingDeliveryJournals({ limit: 400 });
+
+  const [accounts, entries] = await Promise.all([
+    GLAccount.find({ isActive: true }).sort({ code: 1 }).lean(),
+    JournalEntry.find().populate('lines.accountId', 'code name category type'),
+  ]);
+
   const balances = {};
+  for (const acc of accounts) {
+    balances[String(acc._id)] = {
+      account: acc,
+      debit: 0,
+      credit: 0,
+      balance: 0,
+    };
+  }
 
   for (const entry of entries) {
     for (const line of entry.lines) {
@@ -380,7 +394,7 @@ export async function getBalanceSheet() {
       if (!acc) continue;
       const id = String(acc._id);
       if (!balances[id]) {
-        balances[id] = { account: acc, debit: 0, credit: 0, balance: 0 };
+        balances[id] = { account: acc.toObject?.() || acc, debit: 0, credit: 0, balance: 0 };
       }
       balances[id].debit += line.debit || 0;
       balances[id].credit += line.credit || 0;
@@ -389,7 +403,6 @@ export async function getBalanceSheet() {
 
   const rows = Object.values(balances).map((row) => {
     const cat = row.account.category;
-  // Assets & expenses: debit-normal; liabilities, equity, revenue: credit-normal
     const balance =
       cat === 'asset' || cat === 'expense' || cat === 'cogs'
         ? row.debit - row.credit
@@ -397,13 +410,62 @@ export async function getBalanceSheet() {
     return { ...row, balance };
   });
 
-  const grouped = { asset: [], liability: [], equity: [] };
+  const grouped = {
+    asset: [],
+    liability: [],
+    equity: [],
+    revenue: [],
+    cogs: [],
+    expense: [],
+  };
   for (const row of rows) {
     const cat = row.account.category;
     if (grouped[cat]) grouped[cat].push(row);
   }
 
-  return grouped;
+  for (const key of Object.keys(grouped)) {
+    grouped[key].sort((a, b) => String(a.account.code).localeCompare(String(b.account.code)));
+  }
+
+  const totals = {
+    asset: grouped.asset.reduce((s, r) => s + r.balance, 0),
+    liability: grouped.liability.reduce((s, r) => s + r.balance, 0),
+    equity: grouped.equity.reduce((s, r) => s + r.balance, 0),
+    revenue: grouped.revenue.reduce((s, r) => s + r.balance, 0),
+    cogs: grouped.cogs.reduce((s, r) => s + r.balance, 0),
+    expense: grouped.expense.reduce((s, r) => s + r.balance, 0),
+  };
+
+  return { ...grouped, totals, journalCount: entries.length };
+}
+
+/** Create missing auto-delivery journals so CoA balances reflect delivered sales. */
+export async function backfillMissingDeliveryJournals({ limit = 300 } = {}) {
+  const delivered = await Order.find({ internalStatus: 'delivered' })
+    .sort({ deliveredAt: -1 })
+    .limit(limit)
+    .select('items totalSellingPrice totalCogsSnapshot deliveredAt shopifyOrderId orderSource');
+
+  if (!delivered.length) return { created: 0, scanned: 0 };
+
+  const existing = await JournalEntry.find({
+    source: 'auto_delivery',
+    orderId: { $in: delivered.map((o) => o._id) },
+  })
+    .select('orderId')
+    .lean();
+  const posted = new Set(existing.map((e) => String(e.orderId)));
+
+  let created = 0;
+  for (const order of delivered) {
+    if (posted.has(String(order._id))) continue;
+    const entry = await recordDeliveryJournal(order, null);
+    if (entry) created += 1;
+  }
+  if (created > 0) {
+    logger.info({ created, scanned: delivered.length }, 'Backfilled delivery journals');
+  }
+  return { created, scanned: delivered.length };
 }
 
 export async function getTopProducts({ from, to, limit = 50, days = 30 } = {}) {
@@ -722,4 +784,5 @@ export default {
   getTopProducts,
   getCogsHealth,
   recordDeliveryJournal,
+  backfillMissingDeliveryJournals,
 };

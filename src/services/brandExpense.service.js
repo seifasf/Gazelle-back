@@ -203,6 +203,8 @@ export async function saveMonthExpenses(yearMonth, items, userId) {
 
 /**
  * Sum brand expenses across months overlapping [from, to].
+ * Fixed monthly costs are prorated by days in range / days in month
+ * so a 7-day window does not charge a full month of rent/salaries.
  */
 export async function getBrandExpensesForRange({ from, to } = {}) {
   const months = listYearMonthsInRange(from, to);
@@ -210,19 +212,41 @@ export async function getBrandExpensesForRange({ from, to } = {}) {
   let fixedTotal = 0;
   let variableTotal = 0;
 
+  const rangeStart = from ? new Date(from) : null;
+  let rangeEnd = to ? new Date(to) : null;
+  if (rangeEnd && String(to).length <= 10) {
+    rangeEnd.setHours(23, 59, 59, 999);
+  }
+
   for (const yearMonth of months) {
     const month = await getMonthExpenseBreakdown(yearMonth);
     breakdowns.push(month);
-    fixedTotal += month.fixedTotal;
-    variableTotal += month.variableTotal;
+
+    const [y, m] = yearMonth.split('-').map(Number);
+    const daysInMonth = new Date(y, m, 0).getDate();
+    const monthStart = new Date(y, m - 1, 1);
+    const monthEnd = new Date(y, m, 0, 23, 59, 59, 999);
+
+    const overlapStart = rangeStart && rangeStart > monthStart ? rangeStart : monthStart;
+    const overlapEnd = rangeEnd && rangeEnd < monthEnd ? rangeEnd : monthEnd;
+
+    // Inclusive calendar-day overlap
+    const startUtc = Date.UTC(overlapStart.getFullYear(), overlapStart.getMonth(), overlapStart.getDate());
+    const endUtc = Date.UTC(overlapEnd.getFullYear(), overlapEnd.getMonth(), overlapEnd.getDate());
+    const inclusiveDays = Math.max(1, Math.round((endUtc - startUtc) / 86400000) + 1);
+    const fraction = Math.min(1, inclusiveDays / daysInMonth);
+
+    fixedTotal += month.fixedTotal * fraction;
+    variableTotal += month.variableTotal * fraction;
   }
 
   return {
     months,
     breakdowns,
-    fixedTotal,
-    variableTotal,
-    total: fixedTotal + variableTotal,
+    fixedTotal: Math.round(fixedTotal * 100) / 100,
+    variableTotal: Math.round(variableTotal * 100) / 100,
+    total: Math.round((fixedTotal + variableTotal) * 100) / 100,
+    prorated: Boolean(from || to),
     usdToEgp: usdToEgpRate(),
   };
 }
