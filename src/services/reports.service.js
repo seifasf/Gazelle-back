@@ -5,62 +5,143 @@ import InventoryLedger from '../models/InventoryLedger.js';
 import Employee from '../models/Employee.js';
 import * as kpiService from './kpi.service.js';
 
+/** Business calendar for Gazelle (Egypt). */
+const BUSINESS_TZ = 'Africa/Cairo';
+
 function parseDate(value) {
   if (!value) return null;
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-function startOfDay(d) {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
+/** Format a Date as YYYY-MM-DD in the business timezone. */
+function formatYmdInTz(date, timeZone = BUSINESS_TZ) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+}
+
+/**
+ * Convert a calendar YYYY-MM-DD in BUSINESS_TZ to a UTC Date at start/end of that day.
+ */
+function zonedDayBound(ymd, end = false, timeZone = BUSINESS_TZ) {
+  const m = String(ymd).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const hour = end ? 23 : 0;
+  const minute = end ? 59 : 0;
+  const second = end ? 59 : 0;
+  const ms = end ? 999 : 0;
+
+  // Guess UTC instant, then correct using the zone offset at that instant.
+  let utc = Date.UTC(y, mo - 1, d, hour, minute, second, ms);
+  const asTz = new Date(utc).toLocaleString('en-US', { timeZone });
+  const asUtc = new Date(utc).toLocaleString('en-US', { timeZone: 'UTC' });
+  const shift = new Date(asUtc).getTime() - new Date(asTz).getTime();
+  utc += shift;
+
+  // Re-check after shift (DST edges).
+  const ymdCheck = formatYmdInTz(new Date(utc), timeZone);
+  if (ymdCheck !== `${m[1]}-${m[2]}-${m[3]}`) {
+    utc += (ymdCheck < `${m[1]}-${m[2]}-${m[3]}` ? 1 : -1) * 60 * 60 * 1000;
+  }
+  return new Date(utc);
+}
+
+function startOfBusinessDay(ymdOrDate) {
+  if (typeof ymdOrDate === 'string' && /^\d{4}-\d{2}-\d{2}/.test(ymdOrDate)) {
+    return zonedDayBound(ymdOrDate.slice(0, 10), false);
+  }
+  const ymd = formatYmdInTz(ymdOrDate instanceof Date ? ymdOrDate : nowDate());
+  return zonedDayBound(ymd, false);
+}
+
+function endOfBusinessDay(ymdOrDate) {
+  if (typeof ymdOrDate === 'string' && /^\d{4}-\d{2}-\d{2}/.test(ymdOrDate)) {
+    return zonedDayBound(ymdOrDate.slice(0, 10), true);
+  }
+  const ymd = formatYmdInTz(ymdOrDate instanceof Date ? ymdOrDate : nowDate());
+  return zonedDayBound(ymd, true);
 }
 
 function nowDate() {
   return new Date();
 }
 
-function endOfDay(d) {
-  const x = new Date(d);
-  x.setHours(23, 59, 59, 999);
-  return x;
+function listYmdInclusive(fromYmd, toYmd) {
+  const out = [];
+  const m = String(fromYmd).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const n = String(toYmd).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m || !n) return out;
+
+  let y = Number(m[1]);
+  let mo = Number(m[2]);
+  let d = Number(m[3]);
+  const endKey = Number(n[1]) * 10000 + Number(n[2]) * 100 + Number(n[3]);
+
+  for (let i = 0; i < 400; i += 1) {
+    const key = y * 10000 + mo * 100 + d;
+    out.push(`${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`);
+    if (key >= endKey) break;
+    d += 1;
+    const dim = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+    if (d > dim) {
+      d = 1;
+      mo += 1;
+      if (mo > 12) {
+        mo = 1;
+        y += 1;
+      }
+    }
+  }
+  return out;
 }
 
 function rangeForPreset({ preset, date, from, to }) {
-  const fromDate = parseDate(from);
-  const toDate = parseDate(to);
-  const dayDate = parseDate(date);
+  const todayYmd = formatYmdInTz(nowDate());
 
   if (preset === 'day' || preset === 'today') {
-    const day = dayDate || startOfDay(nowDate());
-    return { from: startOfDay(day), to: endOfDay(day) };
+    const ymd = (date && String(date).slice(0, 10)) || todayYmd;
+    return { from: startOfBusinessDay(ymd), to: endOfBusinessDay(ymd), fromYmd: ymd, toYmd: ymd };
   }
 
   if (preset === 'custom') {
-    return {
-      from: fromDate ? startOfDay(fromDate) : startOfDay(new Date(nowDate().getTime() - 6 * 24 * 60 * 60 * 1000)),
-      to: toDate ? endOfDay(toDate) : endOfDay(nowDate()),
-    };
+    const fromYmd = from ? String(from).slice(0, 10) : formatYmdInTz(new Date(Date.now() - 6 * 24 * 60 * 60 * 1000));
+    const toYmd = to ? String(to).slice(0, 10) : todayYmd;
+    return { from: startOfBusinessDay(fromYmd), to: endOfBusinessDay(toYmd), fromYmd, toYmd };
   }
 
-  // Legacy presets (week/month) — map to custom windows for backward compatibility.
   if (preset === 'week') {
-    const toD = nowDate();
-    const start = new Date(toD);
-    start.setDate(start.getDate() - 6);
-    return { from: startOfDay(start), to: toD };
+    const toYmd = todayYmd;
+    const fromDate = new Date(nowDate().getTime() - 6 * 24 * 60 * 60 * 1000);
+    const fromYmd = formatYmdInTz(fromDate);
+    return { from: startOfBusinessDay(fromYmd), to: endOfBusinessDay(toYmd), fromYmd, toYmd };
   }
 
   if (preset === 'month') {
-    const toD = nowDate();
-    const start = new Date(toD);
-    start.setDate(start.getDate() - 29);
-    return { from: startOfDay(start), to: toD };
+    const toYmd = todayYmd;
+    const fromDate = new Date(nowDate().getTime() - 29 * 24 * 60 * 60 * 1000);
+    const fromYmd = formatYmdInTz(fromDate);
+    return { from: startOfBusinessDay(fromYmd), to: endOfBusinessDay(toYmd), fromYmd, toYmd };
   }
 
-  return { from: startOfDay(nowDate()), to: endOfDay(nowDate()) };
+  return {
+    from: startOfBusinessDay(todayYmd),
+    to: endOfBusinessDay(todayYmd),
+    fromYmd: todayYmd,
+    toYmd: todayYmd,
+  };
 }
+
+const dateToStringCairo = (field) => ({
+  $dateToString: { format: '%Y-%m-%d', date: field, timezone: BUSINESS_TZ },
+});
+
 
 async function paymobReceivedForRange({ from, to }) {
   const [row] = await PaymobReceived.aggregate([
@@ -151,13 +232,13 @@ async function returnsForRange({ from, to }) {
   return { amount: row?.amount ?? 0, count: row?.count ?? 0 };
 }
 
-async function dailyBreakdownForRange({ from, to }) {
+async function dailyBreakdownForRange({ from, to, fromYmd, toYmd }) {
   const [placedRows, paymobRows, codRows, returnRows] = await Promise.all([
     Order.aggregate([
       { $match: { placedAt: { $gte: from, $lte: to } } },
       {
         $group: {
-          _id: { $dateToString: { format: '%Y-%m-%d', date: '$placedAt' } },
+          _id: dateToStringCairo('$placedAt'),
           revenueExclShipping: { $sum: '$totalSellingPrice' },
           orderCount: { $sum: 1 },
         },
@@ -167,7 +248,7 @@ async function dailyBreakdownForRange({ from, to }) {
       { $match: { receivedAt: { $gte: from, $lte: to } } },
       {
         $group: {
-          _id: { $dateToString: { format: '%Y-%m-%d', date: '$receivedAt' } },
+          _id: dateToStringCairo('$receivedAt'),
           paymobReceived: { $sum: '$amountEgp' },
           paymobCount: { $sum: 1 },
         },
@@ -183,7 +264,7 @@ async function dailyBreakdownForRange({ from, to }) {
       },
       {
         $group: {
-          _id: { $dateToString: { format: '%Y-%m-%d', date: '$bostaCollectedAt' } },
+          _id: dateToStringCairo('$bostaCollectedAt'),
           codCollected: { $sum: '$bostaCollectedAmount' },
           codCount: { $sum: 1 },
         },
@@ -207,7 +288,7 @@ async function dailyBreakdownForRange({ from, to }) {
       { $unwind: '$order' },
       {
         $group: {
-          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+          _id: dateToStringCairo('$createdAt'),
           returnCount: { $sum: 1 },
           returnAmount: { $sum: { $ifNull: ['$order.totalSellingPrice', 0] } },
         },
@@ -215,32 +296,45 @@ async function dailyBreakdownForRange({ from, to }) {
     ]),
   ]);
 
+  const emptyRow = (date) => ({
+    date,
+    revenueExclShipping: 0,
+    orderCount: 0,
+    paymobReceived: 0,
+    paymobCount: 0,
+    codCollected: 0,
+    codCount: 0,
+    returnCount: 0,
+    returnAmount: 0,
+  });
+
   const byDate = new Map();
   const ensure = (date) => {
-    if (!byDate.has(date)) {
-      byDate.set(date, {
-        date,
-        revenueExclShipping: 0,
-        orderCount: 0,
-        paymobReceived: 0,
-        paymobCount: 0,
-        codCollected: 0,
-        codCount: 0,
-        returnCount: 0,
-        returnAmount: 0,
-      });
-    }
+    if (!byDate.has(date)) byDate.set(date, emptyRow(date));
     return byDate.get(date);
   };
 
-  for (const row of placedRows) ensure(row._id).revenueExclShipping = row.revenueExclShipping;
-  for (const row of placedRows) ensure(row._id).orderCount = row.orderCount;
-  for (const row of paymobRows) ensure(row._id).paymobReceived = row.paymobReceived;
-  for (const row of paymobRows) ensure(row._id).paymobCount = row.paymobCount;
-  for (const row of codRows) ensure(row._id).codCollected = row.codCollected;
-  for (const row of codRows) ensure(row._id).codCount = row.codCount;
-  for (const row of returnRows) ensure(row._id).returnCount = row.returnCount;
-  for (const row of returnRows) ensure(row._id).returnAmount = row.returnAmount;
+  // Always include every calendar day in the selected range (Cairo).
+  const startYmd = fromYmd || formatYmdInTz(from);
+  const endYmd = toYmd || formatYmdInTz(to);
+  for (const ymd of listYmdInclusive(startYmd, endYmd)) ensure(ymd);
+
+  for (const row of placedRows) {
+    ensure(row._id).revenueExclShipping = row.revenueExclShipping;
+    ensure(row._id).orderCount = row.orderCount;
+  }
+  for (const row of paymobRows) {
+    ensure(row._id).paymobReceived = row.paymobReceived;
+    ensure(row._id).paymobCount = row.paymobCount;
+  }
+  for (const row of codRows) {
+    ensure(row._id).codCollected = row.codCollected;
+    ensure(row._id).codCount = row.codCount;
+  }
+  for (const row of returnRows) {
+    ensure(row._id).returnCount = row.returnCount;
+    ensure(row._id).returnAmount = row.returnAmount;
+  }
 
   return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
 }
@@ -402,6 +496,9 @@ export async function getDashboardStats(query = {}) {
       preset,
       from: range.from,
       to: range.to,
+      fromYmd: range.fromYmd,
+      toYmd: range.toYmd,
+      timezone: BUSINESS_TZ,
     },
     payment,
     paymobReceived,
@@ -409,6 +506,7 @@ export async function getDashboardStats(query = {}) {
     leftToCollect,
     returns,
     dailyBreakdown,
+    ordersPlaced: payment?.totalCount ?? 0,
     // Backward-compatible aliases
     revenueToday: revenueExclShipping,
     revenueCustom: revenueExclShipping,
