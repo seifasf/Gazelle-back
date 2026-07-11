@@ -701,43 +701,52 @@ export async function recordDeliveryJournal(order, actorUserId) {
   }
 }
 
-export async function getCogsHealth({ limit = 200 } = {}) {
+export async function getCogsHealth({ limit = 2000 } = {}) {
+  // Prefer missing COGS first so the admin page is actionable (not newest Shopify syncs).
   const variants = await Variant.find()
     .populate('productId', 'title status')
     .select('sku title cogs sellingPrice realStock onlineStock onHoldStock productId updatedAt')
-    .sort({ updatedAt: -1 })
-    .limit(limit)
     .lean();
 
-  const rows = variants.map((v) => {
-    const cogs = v.cogs || 0;
-    const price = v.sellingPrice || 0;
-    const unitMargin = price - cogs;
-    const marginPct = price > 0 ? (unitMargin / price) * 100 : 0;
-    let health = 'ok';
-    let decision = 'Hold';
-    if (!cogs) {
-      health = 'missing';
-      decision = 'Enter COGS now';
-    } else if (marginPct < 0) {
-      health = 'loss';
-      decision = 'Price below cost — fix immediately';
-    } else if (marginPct < 20) {
-      health = 'thin';
-      decision = 'Improve cost or raise price';
-    } else if (marginPct >= 45) {
-      health = 'strong';
-      decision = 'Protect margin; good to scale';
-    }
-    return {
-      ...v,
-      unitMargin,
-      marginPct,
-      health,
-      decision,
-      title: v.title || v.productId?.title || v.sku,
-    };
-  });
+  const rows = variants
+    .map((v) => {
+      const cogs = v.cogs || 0;
+      const price = v.sellingPrice || 0;
+      const unitMargin = price - cogs;
+      const marginPct = price > 0 ? (unitMargin / price) * 100 : 0;
+      let health = 'ok';
+      let decision = 'Hold';
+      if (!cogs) {
+        health = 'missing';
+        decision = 'Enter COGS now';
+      } else if (marginPct < 0) {
+        health = 'loss';
+        decision = 'Price below cost — fix immediately';
+      } else if (marginPct < 20) {
+        health = 'thin';
+        decision = 'Improve cost or raise price';
+      } else if (marginPct >= 45) {
+        health = 'strong';
+        decision = 'Protect margin; good to scale';
+      }
+      return {
+        ...v,
+        unitMargin,
+        marginPct,
+        health,
+        decision,
+        title: v.title || v.productId?.title || v.sku,
+      };
+    })
+    .sort((a, b) => {
+      const rank = { missing: 0, loss: 1, thin: 2, ok: 3, strong: 4 };
+      const ra = rank[a.health] ?? 5;
+      const rb = rank[b.health] ?? 5;
+      if (ra !== rb) return ra - rb;
+      return String(a.sku || '').localeCompare(String(b.sku || ''));
+    });
+
+  const capped = Number.isFinite(limit) && limit > 0 ? rows.slice(0, limit) : rows;
 
   const summary = {
     total: rows.length,
@@ -770,7 +779,7 @@ export async function getCogsHealth({ limit = 200 } = {}) {
     });
   }
 
-  return { summary, insights, variants: rows };
+  return { summary, insights, variants: capped };
 }
 
 export default {
