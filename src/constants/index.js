@@ -66,6 +66,7 @@ export const JOB_NAMES = {
   BOSTA_POLLING_FALLBACK: 'bosta-polling-fallback',
   CHECK_RESTOCK_NEEDED: 'check-restock-needed',
   CHECK_SLOW_MOVERS: 'check-slow-movers',
+  SHOPIFY_ORDERS_SYNC: 'shopify-orders-sync',
 };
 
 export const PO_STATUSES = [

@@ -3,6 +3,7 @@ import { processBostaStatusUpdate } from '../integrations/bosta/tracking.service
 import { syncCatalog } from '../integrations/shopify/sync.service.js';
 import { createDelivery } from '../integrations/bosta/shipments.service.js';
 import { pollStuckOrders } from '../integrations/bosta/tracking.service.js';
+import { importShopifyOrdersSince } from '../integrations/shopify/setup.service.js';
 import InventoryLedger from '../models/InventoryLedger.js';
 import Variant from '../models/Variant.js';
 import Order from '../models/Order.js';
@@ -125,11 +126,19 @@ export function registerJobs(agenda) {
   agenda.define(JOB_NAMES.CHECK_RESTOCK_NEEDED, async () => checkRestockNeeded());
   agenda.define(JOB_NAMES.CHECK_SLOW_MOVERS, async () => checkSlowMovers());
 
+  agenda.define(JOB_NAMES.SHOPIFY_ORDERS_SYNC, async () => {
+    const since = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    const result = await importShopifyOrdersSince({ since, maxItems: 250 });
+    logger.info(result, 'Scheduled Shopify orders sync finished');
+    return result;
+  });
+
   logger.info('Agenda jobs registered');
 }
 
 export async function scheduleRecurringJobs(agenda) {
   await agenda.every('1 hour', JOB_NAMES.SHOPIFY_CATALOG_SYNC);
+  await agenda.every('5 minutes', JOB_NAMES.SHOPIFY_ORDERS_SYNC);
   await agenda.every('6 hours', JOB_NAMES.BOSTA_POLLING_FALLBACK);
   await agenda.every('24 hours', JOB_NAMES.CHECK_RESTOCK_NEEDED);
   await agenda.every('24 hours', JOB_NAMES.CHECK_SLOW_MOVERS);

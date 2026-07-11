@@ -126,6 +126,58 @@ export async function importRecentShopifyOrders({ limit = 50 } = {}) {
 }
 
 /**
+ * Pull Shopify orders created since `since` (ISO date or Date).
+ * Used by the live sync job so yesterday/today sales appear without manual import.
+ */
+export async function importShopifyOrdersSince({ since, maxItems = 250 } = {}) {
+  if (!(await isShopifyConfigured())) {
+    const err = new Error('Shopify credentials not configured');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const sinceDate = since instanceof Date ? since : new Date(since || Date.now() - 3 * 24 * 60 * 60 * 1000);
+  if (Number.isNaN(sinceDate.getTime())) {
+    const err = new Error('Invalid since date');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const createdAtMin = encodeURIComponent(sinceDate.toISOString());
+  const results = { fetched: 0, imported: 0, skipped: 0, errors: [], since: sinceDate.toISOString() };
+
+  await shopifyRestPaginated(
+    `/orders.json?status=any&created_at_min=${createdAtMin}&limit=250&order=created_at%20asc`,
+    'orders',
+    {
+      maxItems,
+      onPage: async (orders) => {
+        for (const order of orders) {
+          results.fetched += 1;
+          try {
+            const existing = await Order.findOne({ shopifyOrderId: String(order.id) });
+            if (existing) {
+              results.skipped += 1;
+              continue;
+            }
+            const statusOverride = mapImportedOrderStatus(order);
+            await handleOrdersCreate(order, { statusOverride, source: 'shopify_import' });
+            results.imported += 1;
+          } catch (error) {
+            results.errors.push({ orderId: order.id, error: error.message });
+            logger.warn({ orderId: order.id, err: error }, 'Order since-import failed');
+          }
+        }
+      },
+    }
+  );
+
+  await Settings.findOneAndUpdate({ key: 'global' }, { shopifyLastSyncAt: new Date() }, { upsert: true });
+  logger.info(results, 'Shopify orders since-import complete');
+  return results;
+}
+
+/**
  * Import every order from Shopify using cursor pagination. Historical orders are
  * mapped to a sensible status (delivered/cancelled/pending) and only open orders
  * reserve warehouse stock so inventory isn't distorted by past orders.
@@ -222,15 +274,23 @@ export async function importOpenShopifyOrders({ maxItems = Infinity } = {}) {
 export async function ensureOrdersLoaded() {
   if (!(await isShopifyConfigured())) return { skipped: 'not_configured' };
   const existing = await Order.countDocuments();
-  if (existing > 0) return { skipped: 'already_loaded', orders: existing };
+  if (existing === 0) {
+    logger.info('No orders in OMS — importing open (not closed) Shopify orders (read-only)');
+    const orders = await importOpenShopifyOrders().catch((err) => {
+      logger.warn({ err }, 'Startup order import failed');
+      return null;
+    });
+    logger.info({ orders }, 'Startup Shopify import complete');
+    return { orders };
+  }
 
-  logger.info('No orders in OMS — importing open (not closed) Shopify orders (read-only)');
-  const orders = await importOpenShopifyOrders().catch((err) => {
-    logger.warn({ err }, 'Startup order import failed');
+  // Catch up recent orders so dashboard stays live even if webhooks were missed.
+  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const catchUp = await importShopifyOrdersSince({ since, maxItems: 250 }).catch((err) => {
+    logger.warn({ err }, 'Startup order catch-up failed');
     return null;
   });
-  logger.info({ orders }, 'Startup Shopify import complete');
-  return { orders };
+  return { skipped: 'already_loaded', orders: existing, catchUp };
 }
 
 function mapShopifyCustomer(sc) {
@@ -324,6 +384,7 @@ export default {
   testShopifyConnection,
   getShopifyStatus,
   importRecentShopifyOrders,
+  importShopifyOrdersSince,
   importAllShopifyOrders,
   importOpenShopifyOrders,
   importAllShopifyCustomers,

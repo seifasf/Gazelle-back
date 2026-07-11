@@ -87,21 +87,38 @@ export async function testConnection(req, res, next) {
 
 export async function importOrders(req, res, next) {
   try {
-    const { importOpenShopifyOrders, importRecentShopifyOrders, importAllShopifyOrders } = await import(
-      '../integrations/shopify/setup.service.js'
-    );
-    // Default: import only OPEN (not closed) orders — the live work queue.
-    // { all: true } forces a full historical backfill; { orderLimit } imports the
-    // most recent N orders regardless of status.
+    const {
+      importOpenShopifyOrders,
+      importRecentShopifyOrders,
+      importAllShopifyOrders,
+      importShopifyOrdersSince,
+    } = await import('../integrations/shopify/setup.service.js');
+    // Default: recent orders (any status) so dashboard revenue stays live.
+    // { openOnly: true } → open/unfulfilled work queue only
+    // { all: true } → full historical backfill
+    // { since: ISO } → orders created since that timestamp
+    // { orderLimit: N } → most recent N orders
     if (req.body?.all) {
       const orders = await importAllShopifyOrders();
+      return res.json({ data: { orders } });
+    }
+    if (req.body?.since || req.body?.days) {
+      const days = Number(req.body.days) || 7;
+      const since = req.body.since
+        ? new Date(req.body.since)
+        : new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      const orders = await importShopifyOrdersSince({ since });
+      return res.json({ data: { orders } });
+    }
+    if (req.body?.openOnly) {
+      const orders = await importOpenShopifyOrders();
       return res.json({ data: { orders } });
     }
     if (req.body?.orderLimit) {
       const orders = await importRecentShopifyOrders({ limit: Number(req.body.orderLimit) });
       return res.json({ data: { orders } });
     }
-    const orders = await importOpenShopifyOrders();
+    const orders = await importRecentShopifyOrders({ limit: 100 });
     res.json({ data: { orders } });
   } catch (err) {
     next(err);
