@@ -20,6 +20,19 @@ const DEFAULT_BOSTA_MAPPINGS = [
   { bostaState: 'FAILED', internalStatus: 'failed_delivery', description: 'Delivery attempt failed' },
   { bostaState: 'RETURNED', internalStatus: 'returning_to_origin', description: 'Return to origin' },
   { bostaState: 'RETURNED_TO_BUSINESS', internalStatus: 'returning_to_origin', description: 'Returned to sender' },
+  { bostaState: 'Terminated', internalStatus: 'returning_to_origin', description: 'Terminated after failed attempts / return' },
+  { bostaState: 'Returned to business', internalStatus: 'returning_to_origin', description: 'Package returned to business' },
+  // Numeric Bosta state codes (webhooks send state as a number or { code, value })
+  { bostaState: '21', internalStatus: 'picked_up_by_bosta', description: 'Picked up from business (code 21)' },
+  { bostaState: '41', internalStatus: 'picked_up_by_bosta', description: 'Picked up (code 41)' },
+  { bostaState: '24', internalStatus: 'in_transit', description: 'Received at warehouse (code 24)' },
+  { bostaState: '30', internalStatus: 'in_transit', description: 'In transit between hubs (code 30)' },
+  { bostaState: '45', internalStatus: 'delivered', description: 'Delivered (code 45)' },
+  { bostaState: '46', internalStatus: 'returning_to_origin', description: 'Returned to business (code 46)' },
+  { bostaState: '47', internalStatus: 'failed_delivery', description: 'Exception (code 47)' },
+  { bostaState: '48', internalStatus: 'returning_to_origin', description: 'Terminated (code 48)' },
+  { bostaState: '60', internalStatus: 'returning_to_origin', description: 'Returned to stock (code 60)' },
+  { bostaState: '103', internalStatus: 'returning_to_origin', description: 'Awaiting business action on return (code 103)' },
 ];
 
 async function seed() {

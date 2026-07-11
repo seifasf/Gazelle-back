@@ -8,11 +8,13 @@ export const ORDER_TRANSITIONS = {
   pending_verification: ['verified_ready_for_shipping', 'cancelled'],
   // Pickup orders can be marked as delivered directly (no courier step).
   verified_ready_for_shipping: ['picked_up_by_bosta', 'delivered', 'cancelled'],
-  picked_up_by_bosta: ['in_transit'],
-  in_transit: ['delivered', 'failed_delivery'],
-  failed_delivery: ['in_transit', 'returning_to_origin'],
+  // Bosta webhooks can skip steps (e.g. exception → RTO without a separate in_transit event).
+  picked_up_by_bosta: ['in_transit', 'delivered', 'failed_delivery', 'returning_to_origin'],
+  in_transit: ['delivered', 'failed_delivery', 'returning_to_origin'],
+  failed_delivery: ['in_transit', 'returning_to_origin', 'delivered'],
   returning_to_origin: ['returned_to_stock'],
-  delivered: [],
+  // Customer return / RTO after a successful delivery is handled via Bosta return sync + stock confirm.
+  delivered: ['returning_to_origin'],
   returned_to_stock: [],
   cancelled: [],
 };

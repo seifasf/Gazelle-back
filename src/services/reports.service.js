@@ -205,35 +205,49 @@ async function codLeftToCollect() {
 }
 
 async function returnsForRange({ from, to }) {
-  const [row] = await OrderStatusHistory.aggregate([
-    {
-      $match: {
-        toStatus: 'returned_to_stock',
-        createdAt: { $gte: from, $lte: to },
+  const { bostaReturnsForRange } = await import('../integrations/bosta/returns.service.js');
+  const [stockRow, bosta] = await Promise.all([
+    OrderStatusHistory.aggregate([
+      {
+        $match: {
+          toStatus: 'returned_to_stock',
+          createdAt: { $gte: from, $lte: to },
+        },
       },
-    },
-    {
-      $lookup: {
-        from: 'orders',
-        localField: 'orderId',
-        foreignField: '_id',
-        as: 'order',
+      {
+        $lookup: {
+          from: 'orders',
+          localField: 'orderId',
+          foreignField: '_id',
+          as: 'order',
+        },
       },
-    },
-    { $unwind: '$order' },
-    {
-      $group: {
-        _id: null,
-        count: { $sum: 1 },
-        amount: { $sum: { $ifNull: ['$order.totalSellingPrice', 0] } },
+      { $unwind: '$order' },
+      {
+        $group: {
+          _id: null,
+          count: { $sum: 1 },
+          amount: { $sum: { $ifNull: ['$order.totalSellingPrice', 0] } },
+        },
       },
-    },
+    ]),
+    bostaReturnsForRange({ from, to }),
   ]);
-  return { amount: row?.amount ?? 0, count: row?.count ?? 0 };
+  const stock = stockRow[0] || { count: 0, amount: 0 };
+  // Prefer live Bosta return counts; keep warehouse confirms as a secondary signal.
+  return {
+    amount: bosta.count > 0 ? bosta.amount : stock.amount ?? 0,
+    count: bosta.count > 0 ? bosta.count : stock.count ?? 0,
+    bostaCount: bosta.count,
+    bostaAmount: bosta.amount,
+    confirmedInStockCount: stock.count ?? 0,
+    confirmedInStockAmount: stock.amount ?? 0,
+    byType: bosta.byType,
+  };
 }
 
 async function dailyBreakdownForRange({ from, to, fromYmd, toYmd }) {
-  const [placedRows, paymobRows, codRows, returnRows] = await Promise.all([
+  const [placedRows, paymobRows, codRows, stockReturnRows, bostaReturnRows] = await Promise.all([
     Order.aggregate([
       { $match: { placedAt: { $gte: from, $lte: to } } },
       {
@@ -294,7 +308,22 @@ async function dailyBreakdownForRange({ from, to, fromYmd, toYmd }) {
         },
       },
     ]),
+    (async () => {
+      const BostaReturn = (await import('../models/BostaReturn.js')).default;
+      return BostaReturn.aggregate([
+        { $match: { returnedAt: { $gte: from, $lte: to } } },
+        {
+          $group: {
+            _id: dateToStringCairo('$returnedAt'),
+            returnCount: { $sum: 1 },
+            returnAmount: { $sum: { $ifNull: ['$codAmount', 0] } },
+          },
+        },
+      ]);
+    })(),
   ]);
+
+  const returnRows = (bostaReturnRows?.length ? bostaReturnRows : stockReturnRows) || [];
 
   const emptyRow = (date) => ({
     date,
@@ -511,45 +540,93 @@ async function orderMixForRange({ from, to }) {
 
 async function returnsAnalyticsForRange({ from, to }) {
   const { resolveGender } = await import('../utils/gender.js');
+  const { bostaReturnsForRange } = await import('../integrations/bosta/returns.service.js');
 
-  const history = await OrderStatusHistory.find({
-    toStatus: 'returned_to_stock',
-    createdAt: { $gte: from, $lte: to },
-  })
-    .select('orderId createdAt')
-    .lean();
-
-  const orderIds = [...new Set(history.map((h) => String(h.orderId)))];
-  const orders = await Order.find({ _id: { $in: orderIds } })
-    .populate('customerId', 'fullName gender')
-    .select('paymentMethod orderSource manualSource totalSellingPrice customerId shippingAddress')
-    .lean();
-
+  const bosta = await bostaReturnsForRange({ from, to });
+  const orderIds = [...new Set(bosta.rows.map((r) => r.orderId).filter(Boolean).map(String))];
+  const orders = orderIds.length
+    ? await Order.find({ _id: { $in: orderIds } })
+        .populate('customerId', 'fullName gender')
+        .select('paymentMethod orderSource manualSource totalSellingPrice customerId shippingAddress')
+        .lean()
+    : [];
   const byId = Object.fromEntries(orders.map((o) => [String(o._id), o]));
 
   const payment = { cod: 0, online: 0 };
   const gender = { male: 0, female: 0, unknown: 0 };
   let amount = 0;
 
-  for (const h of history) {
-    const order = byId[String(h.orderId)];
-    if (!order) continue;
-    amount += order.totalSellingPrice || 0;
-    const pay = order.paymentMethod === 'online' ? 'online' : 'cod';
-    payment[pay] += 1;
+  for (const row of bosta.rows) {
+    const order = row.orderId ? byId[String(row.orderId)] : null;
+    if (order) {
+      amount += order.totalSellingPrice || 0;
+      const pay = order.paymentMethod === 'online' ? 'online' : 'cod';
+      payment[pay] += 1;
+      const name = order.customerId?.fullName || order.shippingAddress?.fullName || row.receiverName || '';
+      const g = resolveGender(order.customerId?.gender, name);
+      gender[g] = (gender[g] || 0) + 1;
+    } else {
+      amount += row.codAmount || 0;
+      // Unlinked Bosta returns: treat positive COD as cash, else unknown bucket via gender only.
+      if ((row.codAmount || 0) > 0) payment.cod += 1;
+      else payment.cod += 1; // most Egypt RTOs / customer returns are COD channel
+      gender.unknown += 1;
+    }
+  }
 
-    const name = order.customerId?.fullName || order.shippingAddress?.fullName || '';
-    const g = resolveGender(order.customerId?.gender, name);
-    gender[g] = (gender[g] || 0) + 1;
+  // Fallback: warehouse confirms only (no Bosta sync yet)
+  if (bosta.count === 0) {
+    const history = await OrderStatusHistory.find({
+      toStatus: 'returned_to_stock',
+      createdAt: { $gte: from, $lte: to },
+    })
+      .select('orderId createdAt')
+      .lean();
+    const stockIds = [...new Set(history.map((h) => String(h.orderId)))];
+    const stockOrders = await Order.find({ _id: { $in: stockIds } })
+      .populate('customerId', 'fullName gender')
+      .select('paymentMethod totalSellingPrice customerId shippingAddress')
+      .lean();
+    const stockById = Object.fromEntries(stockOrders.map((o) => [String(o._id), o]));
+    for (const h of history) {
+      const order = stockById[String(h.orderId)];
+      if (!order) continue;
+      amount += order.totalSellingPrice || 0;
+      payment[order.paymentMethod === 'online' ? 'online' : 'cod'] += 1;
+      const name = order.customerId?.fullName || order.shippingAddress?.fullName || '';
+      const g = resolveGender(order.customerId?.gender, name);
+      gender[g] = (gender[g] || 0) + 1;
+    }
+    const paymentMix = mixFromCounts(payment);
+    const genderMix = mixFromCounts(gender);
+    return {
+      count: history.length,
+      amount,
+      source: 'warehouse',
+      byType: null,
+      payment: {
+        ...paymentMix,
+        cashPercent: paymentMix.cod?.percent ?? 0,
+        onlinePercent: paymentMix.online?.percent ?? 0,
+      },
+      gender: {
+        ...genderMix,
+        malePercent: genderMix.male?.percent ?? 0,
+        femalePercent: genderMix.female?.percent ?? 0,
+        unknownPercent: genderMix.unknown?.percent ?? 0,
+      },
+    };
   }
 
   const paymentMix = mixFromCounts(payment);
   const genderMix = mixFromCounts(gender);
-  const total = history.length;
 
   return {
-    count: total,
+    count: bosta.count,
     amount,
+    source: 'bosta',
+    linkedCount: bosta.linkedCount,
+    byType: bosta.byType,
     payment: {
       ...paymentMix,
       cashPercent: paymentMix.cod?.percent ?? 0,
@@ -609,7 +686,12 @@ export async function getDashboardStats(query = {}) {
 
   const revenueExclShipping = payment?.totals?.revenueExclShipping ?? 0;
   const ordersPlaced = payment?.totalCount ?? 0;
-  const returnRate = ordersPlaced > 0 ? pct(returnsAnalytics.count, ordersPlaced) : 0;
+  const returnRate =
+    returnsAnalytics?.source === 'bosta'
+      ? null
+      : ordersPlaced > 0
+        ? pct(returnsAnalytics.count, ordersPlaced)
+        : 0;
 
   return {
     ordersByStatus: statusMap,

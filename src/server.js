@@ -7,6 +7,7 @@ import Product from './models/Product.js';
 import Settings from './models/Settings.js';
 import { syncCatalog } from './integrations/shopify/sync.service.js';
 import { ensureOrdersLoaded } from './integrations/shopify/setup.service.js';
+import { syncBostaReturns } from './integrations/bosta/returns.service.js';
 import { ensureChartOfAccounts } from './services/chartOfAccounts.seed.js';
 import { ensureBrandExpenses } from './services/brandExpenses.seed.js';
 import logger from './utils/logger.js';
@@ -31,6 +32,11 @@ async function ensureCatalogLoaded() {
     await ensureOrdersLoaded();
     await ensureChartOfAccounts();
     await ensureBrandExpenses();
+
+    // Pull Bosta RTO / returned-to-business counts for the dashboard (non-blocking failure).
+    syncBostaReturns({ maxPages: 40 })
+      .then((result) => logger.info(result, 'Startup Bosta returns sync complete'))
+      .catch((err) => logger.warn({ err }, 'Startup Bosta returns sync failed'));
   } catch (err) {
     logger.warn({ err }, 'Startup catalog sync failed — existing data will be served if available');
   }

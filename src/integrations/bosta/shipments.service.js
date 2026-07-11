@@ -61,15 +61,18 @@ export async function createDelivery(order, customer) {
     cod: codAmount,
   };
 
-  return bostaRequest('/deliveries', { method: 'POST', body: payload });
+  const response = await bostaRequest('/deliveries', { method: 'POST', body: payload });
+  return response?.data || response;
 }
 
 export async function getDelivery(deliveryId) {
-  return bostaRequest(`/deliveries/${deliveryId}`);
+  const response = await bostaRequest(`/deliveries/${deliveryId}`);
+  return response?.data || response;
 }
 
 export async function getAwb(deliveryId) {
-  return bostaRequest(`/deliveries/${deliveryId}/awb`);
+  const response = await bostaRequest(`/deliveries/${deliveryId}/awb`);
+  return response?.data || response;
 }
 
 export default { createDelivery, getDelivery, getAwb };
