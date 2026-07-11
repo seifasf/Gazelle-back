@@ -8,6 +8,7 @@ const router = Router();
 router.use(authenticate, sanitizeFinancialResponse);
 
 router.get('/', requireRoles('admin', 'stock_manager'), productsController.listProducts);
+router.get('/cogs-health', adminOnly, productsController.cogsHealth);
 
 router.patch('/variants/:variantId/cogs', adminOnly, productsController.updateCogs);
 router.post('/variants/:variantId/cogs-batches', adminOnly, productsController.addCogsBatch);

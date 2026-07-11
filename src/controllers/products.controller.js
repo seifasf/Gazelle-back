@@ -1,4 +1,5 @@
 import * as productService from '../services/product.service.js';
+import * as accountingService from '../services/accounting.service.js';
 
 export async function listProducts(req, res, next) {
   try {
@@ -35,4 +36,16 @@ export async function addCogsBatch(req, res, next) {
   }
 }
 
-export default { listProducts, updateCogs, addCogsBatch };
+/** COGS health for the admin COGS page (also under /accounting/reports/cogs-health). */
+export async function cogsHealth(req, res, next) {
+  try {
+    const report = await accountingService.getCogsHealth({
+      limit: Number(req.query.limit) || 200,
+    });
+    res.json({ data: report });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export default { listProducts, updateCogs, addCogsBatch, cogsHealth };
