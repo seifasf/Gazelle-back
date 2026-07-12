@@ -86,6 +86,15 @@ export async function verifyOrder(req, res, next) {
 export async function cancelOrder(req, res, next) {
   try {
     const order = await orderService.cancelOrder(req.params.id, req.user._id, req.body);
+    const warning = order?.shopifyCancelWarning;
+    if (warning) {
+      const data = order.toObject ? order.toObject() : { ...order };
+      delete data.shopifyCancelWarning;
+      return res.json({
+        data,
+        warning: `Order cancelled in Gazelle, but Shopify cancel failed: ${warning}`,
+      });
+    }
     res.json({ data: order });
   } catch (err) {
     next(err);

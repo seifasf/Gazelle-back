@@ -97,7 +97,13 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
   }
 
   if (outcome === 'customer_cancelled') {
-    return cancelOrder(orderId, actorUserId, { reason: 'customer_changed_mind', note });
+    const cancelNote = typeof note === 'string' ? note.trim() : '';
+    if (!cancelNote) {
+      const err = new Error('A cancellation note is required');
+      err.statusCode = 400;
+      throw err;
+    }
+    return cancelOrder(orderId, actorUserId, { reason: 'customer_changed_mind', note: cancelNote });
   }
 
   if (outcome !== 'confirmed') {
@@ -137,7 +143,16 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
 }
 
 export async function cancelOrder(orderId, actorUserId, { reason, note, source = 'user_action' }) {
-  return withTransaction(async (session) => {
+  const cancelNote = typeof note === 'string' ? note.trim() : '';
+  // Shopify-originated cancels already have context; staff cancels need an explicit note.
+  if (source !== 'shopify_webhook' && !cancelNote) {
+    const err = new Error('A cancellation note is required');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  let newlyCancelled = false;
+  const cancelled = await withTransaction(async (session) => {
     const order = await Order.findById(orderId).session(session);
     if (!order) {
       const err = new Error('Order not found');
@@ -145,6 +160,9 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
       throw err;
     }
     if (isTerminalStatus(order.internalStatus)) {
+      if (order.internalStatus === 'cancelled') {
+        return Order.findById(orderId).session(session);
+      }
       const err = new Error('Order already in terminal state');
       err.statusCode = 400;
       throw err;
@@ -166,15 +184,45 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
     await transitionOrder(
       order,
       'cancelled',
-      { source, actorUserId, note: note || reason },
+      { source, actorUserId, note: cancelNote || reason },
       session
     );
 
     await recordCustomerCancellation(order.customerId, session);
 
     await enqueueShopifySync(ledgerDocs);
+    newlyCancelled = true;
     return Order.findById(orderId).session(session);
   });
+
+  // Cancel on Shopify after OMS commit (skip when Shopify already cancelled / manual orders).
+  if (
+    newlyCancelled &&
+    source !== 'shopify_webhook' &&
+    cancelled?.orderSource === 'shopify' &&
+    cancelled?.shopifyOrderId
+  ) {
+    try {
+      const { cancelShopifyOrder } = await import('../integrations/shopify/mutations/orderCancel.js');
+      await cancelShopifyOrder({
+        shopifyOrderId: cancelled.shopifyOrderId,
+        reason,
+        staffNote: cancelNote || reason,
+        notifyCustomer: false,
+        refund: cancelled.paymentMethod === 'online',
+      });
+    } catch (err) {
+      // OMS cancel already succeeded — surface Shopify failure without rolling back.
+      const logger = (await import('../utils/logger.js')).default;
+      logger.error(
+        { err: err?.message || err, orderId: String(cancelled._id), shopifyOrderId: cancelled.shopifyOrderId },
+        'Failed to cancel order on Shopify after OMS cancel'
+      );
+      cancelled.shopifyCancelWarning = err?.message || 'Failed to cancel on Shopify';
+    }
+  }
+
+  return cancelled;
 }
 
 async function executeDelivered(order, { source, actorUserId, note }, session) {

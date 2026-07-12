@@ -7,6 +7,13 @@ import { applyLedgerEntries } from './inventory.service.js';
  * Exchange variant before shipment (O2.2).
  */
 export async function processExchange(orderId, actorUserId, { fromItemId, toVariantId, note }) {
+  const exchangeNote = typeof note === 'string' ? note.trim() : '';
+  if (!exchangeNote) {
+    const err = new Error('An exchange note is required (e.g. wrong size / color)');
+    err.statusCode = 400;
+    throw err;
+  }
+
   return withTransaction(async (session) => {
     const order = await Order.findById(orderId).session(session);
     if (!order) {
@@ -36,12 +43,20 @@ export async function processExchange(orderId, actorUserId, { fromItemId, toVari
       throw err;
     }
 
+    if (String(item.variantId) === String(newVariant._id)) {
+      const err = new Error('Replacement variant must be different from the current item');
+      err.statusCode = 400;
+      throw err;
+    }
+
     const available = newVariant.realStock - newVariant.onHoldStock;
     if (available < item.quantity) {
       const err = new Error('Insufficient stock for exchange variant');
       err.statusCode = 409;
       throw err;
     }
+
+    const previousSku = item.sku;
 
     await applyLedgerEntries(
       [
@@ -73,13 +88,11 @@ export async function processExchange(orderId, actorUserId, { fromItemId, toVari
       0
     );
 
-    if (note) {
-      order.verificationLog.push({
-        outcome: 'customer_requested_changes',
-        note: `Exchange: ${note}`,
-        actorUserId,
-      });
-    }
+    order.verificationLog.push({
+      outcome: 'customer_requested_changes',
+      note: `Exchange ${previousSku} → ${newVariant.sku}: ${exchangeNote}`,
+      actorUserId,
+    });
 
     await order.save({ session });
     return order;

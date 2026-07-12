@@ -208,6 +208,8 @@ export async function handleOrdersCancelled(payload) {
   const shopifyOrderId = String(payload.id);
   const order = await Order.findOne({ shopifyOrderId });
   if (!order) return null;
+  // Already cancelled in Gazelle (e.g. staff cancel that also cancelled Shopify).
+  if (order.internalStatus === 'cancelled') return order;
 
   return cancelOrder(order._id, null, {
     reason: 'customer_changed_mind',
