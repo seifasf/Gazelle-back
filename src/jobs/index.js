@@ -1,6 +1,7 @@
 import { processShopifyWebhookJob } from '../webhooks/shopify.handlers.js';
 import { processBostaStatusUpdate, pollStuckOrders } from '../integrations/bosta/tracking.service.js';
 import { syncBostaReturns } from '../integrations/bosta/returns.service.js';
+import { syncOrderStatesFromBosta } from '../integrations/bosta/orderStates.service.js';
 import { syncCatalog } from '../integrations/shopify/sync.service.js';
 import { createDelivery } from '../integrations/bosta/shipments.service.js';
 import { importShopifyOrdersSince } from '../integrations/shopify/setup.service.js';
@@ -119,8 +120,15 @@ export function registerJobs(agenda) {
 
   agenda.define(JOB_NAMES.BOSTA_POLLING_FALLBACK, async () => {
     const settings = await Settings.findOne({ key: 'global' });
-    const hours = settings?.bostaPollingThresholdHours || 48;
+    // Default 2h — webhooks often miss when APP_URL is wrong; poll keeps states live.
+    const hours = settings?.bostaPollingThresholdHours || 2;
     return pollStuckOrders(hours);
+  });
+
+  agenda.define(JOB_NAMES.BOSTA_ORDER_STATES_SYNC, async () => {
+    const result = await syncOrderStatesFromBosta({ limit: 100 });
+    logger.info(result, 'Scheduled Bosta order-states sync finished');
+    return result;
   });
 
   agenda.define(JOB_NAMES.BOSTA_RETURNS_SYNC, async () => {
@@ -145,7 +153,8 @@ export function registerJobs(agenda) {
 export async function scheduleRecurringJobs(agenda) {
   await agenda.every('1 hour', JOB_NAMES.SHOPIFY_CATALOG_SYNC);
   await agenda.every('5 minutes', JOB_NAMES.SHOPIFY_ORDERS_SYNC);
-  await agenda.every('6 hours', JOB_NAMES.BOSTA_POLLING_FALLBACK);
+  await agenda.every('10 minutes', JOB_NAMES.BOSTA_ORDER_STATES_SYNC);
+  await agenda.every('30 minutes', JOB_NAMES.BOSTA_POLLING_FALLBACK);
   await agenda.every('30 minutes', JOB_NAMES.BOSTA_RETURNS_SYNC);
   await agenda.every('24 hours', JOB_NAMES.CHECK_RESTOCK_NEEDED);
   await agenda.every('24 hours', JOB_NAMES.CHECK_SLOW_MOVERS);

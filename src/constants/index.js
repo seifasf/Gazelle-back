@@ -64,6 +64,7 @@ export const JOB_NAMES = {
   SHOPIFY_CATALOG_SYNC: 'shopify-catalog-sync',
   BOSTA_CREATE_SHIPMENT: 'bosta-create-shipment',
   BOSTA_POLLING_FALLBACK: 'bosta-polling-fallback',
+  BOSTA_ORDER_STATES_SYNC: 'bosta-order-states-sync',
   BOSTA_RETURNS_SYNC: 'bosta-returns-sync',
   CHECK_RESTOCK_NEEDED: 'check-restock-needed',
   CHECK_SLOW_MOVERS: 'check-slow-movers',

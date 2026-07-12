@@ -95,4 +95,20 @@ export async function forceShopifySync(req, res, next) {
   }
 }
 
-export default { getSettings, updateSettings, upsertBostaMapping, forceShopifySync };
+export async function forceBostaStatesSync(req, res, next) {
+  try {
+    const agenda = getAgenda();
+    await agenda.now(JOB_NAMES.BOSTA_ORDER_STATES_SYNC, {});
+    res.json({ queued: true, job: JOB_NAMES.BOSTA_ORDER_STATES_SYNC });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export default {
+  getSettings,
+  updateSettings,
+  upsertBostaMapping,
+  forceShopifySync,
+  forceBostaStatesSync,
+};

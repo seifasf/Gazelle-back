@@ -65,9 +65,28 @@ export async function createDelivery(order, customer) {
   return response?.data || response;
 }
 
-export async function getDelivery(deliveryId) {
-  const response = await bostaRequest(`/deliveries/${deliveryId}`);
-  return response?.data || response;
+export async function getDelivery(deliveryIdOrTracking) {
+  const key = String(deliveryIdOrTracking || '').trim();
+  if (!key) {
+    const err = new Error('Missing Bosta delivery id/tracking');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  // Prefer business tracking lookup — GET /deliveries/:id often 404s for plugin-created shipments.
+  if (/^\d{8,}$/.test(key)) {
+    const byTracking = await bostaRequest(`/deliveries/business/${encodeURIComponent(key)}`);
+    return byTracking?.data || byTracking;
+  }
+
+  try {
+    const response = await bostaRequest(`/deliveries/${encodeURIComponent(key)}`);
+    return response?.data || response;
+  } catch (err) {
+    // Fall back: treat key as tracking if id lookup fails.
+    const byTracking = await bostaRequest(`/deliveries/business/${encodeURIComponent(key)}`);
+    return byTracking?.data || byTracking;
+  }
 }
 
 export async function getAwb(deliveryId) {

@@ -100,6 +100,18 @@ async function transitionToward(orderId, fromStatus, toStatus, meta) {
   }
 
   const bridges = {
+    pending_verification: {
+      picked_up_by_bosta: ['verified_ready_for_shipping'],
+      in_transit: ['verified_ready_for_shipping', 'picked_up_by_bosta'],
+      delivered: ['verified_ready_for_shipping', 'picked_up_by_bosta', 'in_transit'],
+      failed_delivery: ['verified_ready_for_shipping', 'picked_up_by_bosta', 'in_transit'],
+      returning_to_origin: [
+        'verified_ready_for_shipping',
+        'picked_up_by_bosta',
+        'in_transit',
+        'failed_delivery',
+      ],
+    },
     picked_up_by_bosta: {
       delivered: ['in_transit'],
       failed_delivery: ['in_transit'],
@@ -207,15 +219,25 @@ export async function processBostaStatusUpdate({ deliveryId, state, payload, not
   }
 }
 
-export async function pollStuckOrders(thresholdHours = 48) {
+export async function pollStuckOrders(thresholdHours = 2) {
   const cutoff = new Date(Date.now() - thresholdHours * 60 * 60 * 1000);
   const stuck = await Order.find({
-    internalStatus: {
-      $in: ['picked_up_by_bosta', 'in_transit', 'failed_delivery', 'returning_to_origin'],
-    },
-    lastStatusUpdateAt: { $lt: cutoff },
     bostaDeliveryId: { $exists: true, $ne: null },
-  }).limit(50);
+    internalStatus: {
+      $in: [
+        'verified_ready_for_shipping',
+        'picked_up_by_bosta',
+        'in_transit',
+        'failed_delivery',
+        'returning_to_origin',
+      ],
+    },
+    $or: [
+      { lastStatusUpdateAt: { $lt: cutoff } },
+      { lastStatusUpdateAt: { $exists: false } },
+      { lastStatusUpdateAt: null },
+    ],
+  }).limit(100);
 
   const results = [];
   for (const order of stuck) {
