@@ -4,6 +4,7 @@ import OrderStatusHistory from '../models/OrderStatusHistory.js';
 import InventoryLedger from '../models/InventoryLedger.js';
 import Employee from '../models/Employee.js';
 import * as kpiService from './kpi.service.js';
+import logger from '../utils/logger.js';
 
 /** Business calendar for Gazelle (Egypt). */
 const BUSINESS_TZ = 'Africa/Cairo';
@@ -144,6 +145,23 @@ const dateToStringCairo = (field) => ({
 
 
 async function paymobReceivedForRange({ from, to }) {
+  // Live Paymob Accept API (successful transactions in range).
+  try {
+    const { isPaymobApiConfigured, sumSuccessfulTransactions } = await import(
+      '../integrations/paymob/transactions.service.js'
+    );
+    if (isPaymobApiConfigured()) {
+      const live = await sumSuccessfulTransactions({ from, to });
+      return {
+        amount: live.amount ?? 0,
+        count: live.count ?? 0,
+        source: 'paymob_api',
+      };
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Paymob API sum failed — trying local ledger');
+  }
+
   const [row] = await PaymobReceived.aggregate([
     { $match: { receivedAt: { $gte: from, $lte: to } } },
     {
@@ -158,7 +176,7 @@ async function paymobReceivedForRange({ from, to }) {
     return { amount: row.amount ?? 0, count: row.count ?? 0, source: 'paymob_webhook' };
   }
 
-  // Fallback until Paymob webhook ledger is wired: Shopify-marked online paid orders.
+  // Last resort: Shopify-marked online paid (until Paymob is configured).
   const [onlineRow] = await Order.aggregate([
     {
       $match: {
@@ -190,7 +208,23 @@ async function paymobReceivedForRange({ from, to }) {
 }
 
 async function codCollectedForRange({ from, to }) {
-  // Prefer explicit Bosta COD collection timestamps when present.
+  // Live Bosta Delivered COD (account-wide).
+  try {
+    const { isBostaConfigured } = await import('../integrations/bosta/client.js');
+    const { sumDeliveredCod } = await import('../integrations/bosta/cod.service.js');
+    if (isBostaConfigured()) {
+      const live = await sumDeliveredCod({ from, to });
+      return {
+        amount: live.amount ?? 0,
+        count: live.count ?? 0,
+        source: 'bosta_api',
+      };
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Bosta COD API sum failed — trying OMS fields');
+  }
+
+  // Prefer explicit Bosta COD stamps on OMS orders.
   const [bostaRow] = await Order.aggregate([
     {
       $match: {
@@ -212,7 +246,7 @@ async function codCollectedForRange({ from, to }) {
     return { amount: bostaRow.amount ?? 0, count: bostaRow.count ?? 0, source: 'bosta' };
   }
 
-  // Fallback: COD orders marked delivered in-range (no Bosta collection webhook yet).
+  // Last resort: COD orders marked delivered in-range.
   const [deliveredRow] = await Order.aggregate([
     {
       $match: {
