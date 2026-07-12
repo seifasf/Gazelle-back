@@ -110,6 +110,26 @@ async function run() {
   await expect('manufacturing factories', 'GET', '/manufacturing/factories', { token: admin });
   await expect('pl report', 'GET', '/accounting/reports/pl', { token: admin });
   await expect('cities list', 'GET', '/reference/bosta-cities', { token: admin });
+  await expect('warehouse review', 'GET', '/fulfillment/warehouse-review', { token: admin });
+
+  /* ---------------- EXCEL EXPORTS (admin) ---------------- */
+  section = 'EXCEL_EXPORTS';
+  console.log('\n[EXCEL EXPORTS — ADMIN]');
+  async function expectExcel(name, path, token) {
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    const res = await fetch(`${BASE}${path}`, { headers });
+    const ct = res.headers.get('content-type') || '';
+    const ok = res.status === 200 && ct.includes('spreadsheetml');
+    record(name, ok, `${res.status} ${ct.slice(0, 40)}`);
+  }
+  await expectExcel('profitability export', '/reports/profitability/export', admin);
+  await expectExcel('pl export', '/accounting/reports/pl/export', admin);
+  await expectExcel('cogs export', '/products/cogs-health/export?limit=10', admin);
+  await expectExcel('warehouse backlog export', '/fulfillment/warehouse-review/export', admin);
+  {
+    const res = await fetch(`${BASE}/reports/profitability/export`, { headers: { Authorization: `Bearer ${sm}` } });
+    record('BLOCK SM profitability export', res.status === 403, String(res.status));
+  }
 
   /* ---------------- STOCK MANAGER ---------------- */
   section = 'STOCK_MANAGER';
@@ -122,14 +142,26 @@ async function run() {
   }
   await expect('discrepancies', 'GET', '/inventory/discrepancies', { token: sm });
   await expect('pick list', 'GET', '/fulfillment/pick-list', { token: sm });
+  await expect('warehouse review', 'GET', '/fulfillment/warehouse-review', { token: sm });
   await expect('order counts (shared)', 'GET', '/orders/counts', { token: sm });
   await expect('notifications', 'GET', '/notifications', { token: sm });
   await expect('products (no cogs)', 'GET', '/products', { token: sm });
+  if (variantId) {
+    await expect('SM stock intake', 'POST', '/inventory/stock-intake', {
+      token: sm,
+      status: [200, 201],
+      body: { variantId, quantity: 1, reasonCode: 'restock', syncToShopify: false },
+    });
+    const barcodeRes = await fetch(`${BASE}/inventory/variants/${variantId}/barcode.png`, {
+      headers: { Authorization: `Bearer ${sm}` },
+    });
+    const barcodeCt = barcodeRes.headers.get('content-type') || '';
+    record('barcode PNG', barcodeRes.status === 200 && barcodeCt.includes('image/png'), `${barcodeRes.status}`);
+  }
   // Forbidden for stock manager:
   await expect('BLOCK settings', 'GET', '/settings', { token: sm, status: 403 });
   await expect('BLOCK reports', 'GET', '/reports/dashboard', { token: sm, status: 403 });
   await expect('BLOCK users', 'GET', '/users', { token: sm, status: 403 });
-  await expect('BLOCK stock-intake', 'POST', '/inventory/stock-intake', { token: sm, body: { variantId, quantity: 1 }, status: 403 });
   await expect('BLOCK customers', 'GET', '/customers', { token: sm, status: 403 });
   await expect('BLOCK accounting', 'GET', '/accounting/accounts', { token: sm, status: 403 });
   await expect('BLOCK cities sync', 'POST', '/reference/bosta-cities/sync', { token: sm, status: 403 });
@@ -161,6 +193,36 @@ async function run() {
   await expect('BLOCK hr', 'GET', '/hr/employees', { token: om, status: 403 });
   await expect('BLOCK manufacturing', 'GET', '/manufacturing/factories', { token: om, status: 403 });
   await expect('variants for exchange', 'GET', '/inventory/variants?limit=5', { token: om });
+  await expect('BLOCK warehouse review export', 'GET', '/fulfillment/warehouse-review/export', { token: om, status: 403 });
+
+  /* ---------------- OM CANCEL NOTE ---------------- */
+  section = 'OM_CANCEL';
+  console.log('\n[OM CANCEL — NOTE REQUIRED]');
+  if (variantId) {
+    const draft = await call('POST', '/orders/manual', {
+      token: om,
+      body: {
+        manualSource: 'phone',
+        shippingMethod: 'local_shipping',
+        customer: { fullName: 'Cancel Test', phone: '+201555000999' },
+        shippingAddress: { line1: '2 Test St', city: 'Cairo', phone: '+201555000999' },
+        items: [{ variantId, quantity: 1 }],
+      },
+    });
+    const cancelOrderId = draft.data?.data?._id;
+    if (cancelOrderId) {
+      await expect('cancel without note rejected', 'POST', `/orders/${cancelOrderId}/cancel`, {
+        token: om,
+        status: 400,
+        body: { reason: 'customer_changed_mind' },
+      });
+      await expect('cancel with note ok', 'POST', `/orders/${cancelOrderId}/cancel`, {
+        token: om,
+        status: [200, 201],
+        body: { reason: 'customer_changed_mind', note: 'Role test — customer changed mind' },
+      });
+    }
+  }
 
   /* ---------------- FULL ORDER LIFECYCLE + NOTIFICATIONS ---------------- */
   section = 'LIFECYCLE';
