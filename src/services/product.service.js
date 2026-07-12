@@ -87,9 +87,20 @@ function escapeRegex(value) {
 }
 
 export async function findVariantBySku(sku) {
-  const escaped = escapeRegex(sku);
-  const variant = await Variant.findOne({ sku: { $regex: new RegExp(`^${escaped}$`, 'i') } })
+  const raw = String(sku || '').trim();
+  if (!raw) return null;
+
+  const escaped = escapeRegex(raw);
+  const exact = new RegExp(`^${escaped}$`, 'i');
+
+  let variant = await Variant.findOne({ sku: exact })
     .populate('productId', 'title imageUrl vendor productType shopifyProductId defaultFactoryId');
+
+  if (!variant) {
+    variant = await Variant.findOne({ barcode: exact })
+      .populate('productId', 'title imageUrl vendor productType shopifyProductId defaultFactoryId');
+  }
+
   return variant;
 }
 

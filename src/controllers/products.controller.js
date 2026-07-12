@@ -1,5 +1,7 @@
 import * as productService from '../services/product.service.js';
 import * as accountingService from '../services/accounting.service.js';
+import * as excelReports from '../services/excelReports.service.js';
+import { sendExcel } from '../utils/excelExport.js';
 
 export async function listProducts(req, res, next) {
   try {
@@ -48,4 +50,13 @@ export async function cogsHealth(req, res, next) {
   }
 }
 
-export default { listProducts, updateCogs, addCogsBatch, cogsHealth };
+export async function exportCogsHealth(req, res, next) {
+  try {
+    const { buffer, filename } = await excelReports.exportCogsHealthExcel(req.query);
+    sendExcel(res, { buffer, filename });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export default { listProducts, updateCogs, addCogsBatch, cogsHealth, exportCogsHealth };

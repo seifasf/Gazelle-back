@@ -1,5 +1,6 @@
 import * as productService from '../services/product.service.js';
 import * as orderService from '../services/order.service.js';
+import * as barcodeService from '../services/barcode.service.js';
 import Settings from '../models/Settings.js';
 
 export async function listVariants(req, res, next) {
@@ -129,6 +130,27 @@ export async function catalogFilters(req, res, next) {
   }
 }
 
+export async function getVariantBarcodePng(req, res, next) {
+  try {
+    const { png, value } = await barcodeService.getVariantBarcodePng(req.params.id);
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Content-Disposition', `inline; filename="barcode-${value}.png"`);
+    res.send(png);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getVariantBarcodeLabels(req, res, next) {
+  try {
+    const html = await barcodeService.buildBarcodeLabelHtml(req.params.id, req.query.copies);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export default {
   listVariants,
   getVariant,
@@ -139,4 +161,6 @@ export default {
   listDiscrepancies,
   listCatalog,
   catalogFilters,
+  getVariantBarcodePng,
+  getVariantBarcodeLabels,
 };

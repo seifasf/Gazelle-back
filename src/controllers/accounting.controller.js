@@ -1,4 +1,6 @@
 import * as accountingService from '../services/accounting.service.js';
+import * as excelReports from '../services/excelReports.service.js';
+import { sendExcel } from '../utils/excelExport.js';
 
 export async function listAccounts(req, res, next) {
   try {
@@ -136,6 +138,42 @@ export async function cogsHealth(req, res, next) {
   }
 }
 
+export async function exportPl(req, res, next) {
+  try {
+    const { buffer, filename } = await excelReports.exportPlExcel(req.query);
+    sendExcel(res, { buffer, filename });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function exportTopProducts(req, res, next) {
+  try {
+    const { buffer, filename } = await excelReports.exportTopProductsExcel(req.query);
+    sendExcel(res, { buffer, filename });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function exportCogsHealth(req, res, next) {
+  try {
+    const { buffer, filename } = await excelReports.exportCogsHealthExcel(req.query);
+    sendExcel(res, { buffer, filename });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function exportBrandExpenses(req, res, next) {
+  try {
+    const { buffer, filename } = await excelReports.exportBrandExpensesExcel(req.query);
+    sendExcel(res, { buffer, filename });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export default {
   listAccounts,
   createAccount,
@@ -149,4 +187,8 @@ export default {
   listBrandExpenses,
   getMonthExpenses,
   saveMonthExpenses,
+  exportPl,
+  exportTopProducts,
+  exportCogsHealth,
+  exportBrandExpenses,
 };

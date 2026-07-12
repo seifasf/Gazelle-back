@@ -9,6 +9,7 @@ router.use(authenticate, sanitizeFinancialResponse);
 
 router.get('/', requireRoles('admin', 'stock_manager'), productsController.listProducts);
 router.get('/cogs-health', adminOnly, productsController.cogsHealth);
+router.get('/cogs-health/export', adminOnly, productsController.exportCogsHealth);
 
 router.patch('/variants/:variantId/cogs', adminOnly, productsController.updateCogs);
 router.post('/variants/:variantId/cogs-batches', adminOnly, productsController.addCogsBatch);

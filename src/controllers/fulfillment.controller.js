@@ -1,5 +1,31 @@
 import * as fulfillmentService from '../services/fulfillment.service.js';
+import * as warehouseReviewService from '../services/warehouseReview.service.js';
+import { sendExcel } from '../utils/excelExport.js';
 import Order from '../models/Order.js';
+
+export async function getWarehouseReview(req, res, next) {
+  try {
+    const data = await warehouseReviewService.getWarehouseBacklog({
+      from: req.query.from,
+      to: req.query.to,
+    });
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function exportWarehouseReview(req, res, next) {
+  try {
+    const { buffer, filename } = await warehouseReviewService.exportWarehouseBacklogExcel({
+      from: req.query.from,
+      to: req.query.to,
+    });
+    sendExcel(res, { buffer, filename });
+  } catch (err) {
+    next(err);
+  }
+}
 
 export async function getPickList(req, res, next) {
   try {
@@ -61,4 +87,13 @@ export async function getOrderSheet(req, res, next) {
   }
 }
 
-export default { getPickList, pickAndPack, getAwb, getOrderSheet };
+export default {
+  getWarehouseReview,
+  exportWarehouseReview,
+  getPickList,
+  pickAndPack,
+  getAwb,
+  getShipmentStatus,
+  checkStock,
+  getOrderSheet,
+};

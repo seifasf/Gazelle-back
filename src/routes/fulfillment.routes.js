@@ -7,6 +7,8 @@ const router = Router();
 
 router.use(authenticate);
 
+router.get('/warehouse-review', requireRoles('admin', 'stock_manager'), fulfillmentController.getWarehouseReview);
+router.get('/warehouse-review/export', requireRoles('admin', 'stock_manager'), fulfillmentController.exportWarehouseReview);
 router.get('/pick-list', requireRoles('admin', 'stock_manager'), fulfillmentController.getPickList);
 router.post('/:id/pick-pack', requireRoles('admin', 'stock_manager'), fulfillmentController.pickAndPack);
 // Read-only shipment status for orders managers (order detail integrations panel).

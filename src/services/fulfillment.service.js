@@ -1,8 +1,9 @@
 import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import QRCode from 'qrcode';
+import bwipjs from 'bwip-js';
 import { getAgenda } from '../config/agenda.js';
+import { barcodeValueForVariant } from './barcode.service.js';
 import { JOB_NAMES } from '../constants/index.js';
 import Order from '../models/Order.js';
 import Variant from '../models/Variant.js';
@@ -138,7 +139,7 @@ export async function getAwbForOrder(orderId) {
 export async function buildOrderSheet(orderId) {
   const order = await Order.findById(orderId)
     .populate('customerId', 'fullName phone email')
-    .populate('items.variantId', 'sku title color size imageUrl');
+    .populate('items.variantId', 'sku title color size imageUrl barcode');
 
   if (!order) {
     const err = new Error('Order not found');
@@ -150,15 +151,32 @@ export async function buildOrderSheet(orderId) {
     order.items.map(async (item) => {
       const variant = item.variantId;
       const sku = variant?.sku || item.sku;
-      const qrDataUrl = await QRCode.toDataURL(sku, { width: 120, margin: 1 });
+      const codeValue = barcodeValueForVariant(variant || { sku });
+      let barcodeDataUrl = null;
+      try {
+        const png = await bwipjs.toBuffer({
+          bcid: 'code128',
+          text: codeValue,
+          scale: 2,
+          height: 10,
+          includetext: true,
+          textxalign: 'center',
+        });
+        barcodeDataUrl = `data:image/png;base64,${png.toString('base64')}`;
+      } catch {
+        barcodeDataUrl = null;
+      }
       return {
         sku,
+        barcodeValue: codeValue,
         title: variant?.title || sku,
         color: variant?.color || '',
         size: variant?.size || '',
         quantity: item.quantity,
         unitSellingPrice: item.unitSellingPrice,
-        qrDataUrl,
+        barcodeDataUrl,
+        // Keep old key for any existing print clients.
+        qrDataUrl: barcodeDataUrl,
       };
     })
   );

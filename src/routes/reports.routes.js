@@ -9,6 +9,8 @@ router.use(authenticate, adminOnly);
 
 router.get('/dashboard', reportsController.dashboard);
 router.get('/profitability', reportsController.profitability);
+router.get('/profitability/export', reportsController.exportProfitability);
 router.get('/audit', reportsController.auditLog);
+router.get('/audit/export', reportsController.exportAuditLog);
 
 export default router;

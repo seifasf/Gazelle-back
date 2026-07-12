@@ -17,10 +17,15 @@ router.post('/journal', accountingController.createJournal);
 router.get('/reports/cogs-health', accountingController.cogsHealth);
 router.get('/cogs-health', accountingController.cogsHealth);
 router.get('/reports/pl', accountingController.profitAndLoss);
+router.get('/reports/pl/export', accountingController.exportPl);
 router.get('/reports/balance-sheet', accountingController.balanceSheet);
 router.get('/reports/top-products', accountingController.topProducts);
+router.get('/reports/top-products/export', accountingController.exportTopProducts);
+router.get('/reports/cogs-health/export', accountingController.exportCogsHealth);
+router.get('/cogs-health/export', accountingController.exportCogsHealth);
 
 router.get('/expenses', accountingController.listBrandExpenses);
+router.get('/expenses/export', accountingController.exportBrandExpenses);
 router.get('/expenses/month', accountingController.getMonthExpenses);
 router.put('/expenses/month', accountingController.saveMonthExpenses);
 

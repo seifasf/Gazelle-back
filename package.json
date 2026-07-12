@@ -21,6 +21,7 @@
   "dependencies": {
     "agenda": "^5.0.0",
     "bcrypt": "^5.1.1",
+    "bwip-js": "^4.11.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "exceljs": "^4.4.0",

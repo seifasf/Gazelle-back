@@ -1,4 +1,6 @@
 import * as reportsService from '../services/reports.service.js';
+import * as excelReports from '../services/excelReports.service.js';
+import { sendExcel } from '../utils/excelExport.js';
 
 export async function dashboard(req, res, next) {
   try {
@@ -34,4 +36,22 @@ export async function auditLog(req, res, next) {
   }
 }
 
-export default { dashboard, profitability, auditLog };
+export async function exportProfitability(req, res, next) {
+  try {
+    const { buffer, filename } = await excelReports.exportProfitabilityExcel(req.query);
+    sendExcel(res, { buffer, filename });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function exportAuditLog(req, res, next) {
+  try {
+    const { buffer, filename } = await excelReports.exportAuditLogExcel(req.query);
+    sendExcel(res, { buffer, filename });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export default { dashboard, profitability, auditLog, exportProfitability, exportAuditLog };
