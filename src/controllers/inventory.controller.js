@@ -88,6 +88,15 @@ export async function listDiscrepancies(req, res, next) {
   }
 }
 
+export async function getQueueCounts(req, res, next) {
+  try {
+    const data = await productService.getStockQueueCounts();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function listCatalog(req, res, next) {
   try {
     const limit = Number(req.query.limit) || 24;
@@ -159,6 +168,7 @@ export default {
   lookupVariantBySku,
   getLedger,
   listDiscrepancies,
+  getQueueCounts,
   listCatalog,
   catalogFilters,
   getVariantBarcodePng,

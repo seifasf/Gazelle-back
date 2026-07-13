@@ -377,6 +377,15 @@ export async function createManualOrder({
         }],
         { session }
       );
+    } else {
+      // Keep customer profile current so name/phone search stays accurate.
+      const patch = {};
+      if (customer.fullName && customer.fullName !== customerDoc.fullName) patch.fullName = customer.fullName;
+      if (customer.email && customer.email !== customerDoc.email) patch.email = customer.email;
+      if (Object.keys(patch).length) {
+        Object.assign(customerDoc, patch);
+        await customerDoc.save({ session });
+      }
     }
 
     const orderItems = [];
@@ -465,6 +474,10 @@ export async function getOrderStateCounts() {
   return counts;
 }
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export async function listOrders({ status, search, orderSource, shippingMethod, limit = 50, skip = 0, sort = { placedAt: -1 } }) {
   const filter = {};
   if (status) {
@@ -476,13 +489,30 @@ export async function listOrders({ status, search, orderSource, shippingMethod, 
   if (orderSource) filter.orderSource = orderSource;
   if (shippingMethod) filter.shippingMethod = shippingMethod;
   if (search) {
-    const regex = { $regex: search, $options: 'i' };
-    filter.$or = [
-      { shopifyOrderId: regex },
-      { 'shippingAddress.fullName': regex },
-      { 'shippingAddress.phone': regex },
-      { 'shippingAddress.city': regex },
-    ];
+    const term = String(search).trim();
+    if (term) {
+      const regex = { $regex: escapeRegex(term), $options: 'i' };
+      // Match customer name/phone/email too — UI shows customerId.fullName,
+      // and pickup/manual orders often have no searchable shippingAddress.
+      const matchingCustomers = await Customer.find({
+        $or: [
+          { fullName: regex },
+          { phone: regex },
+          { email: regex },
+        ],
+      })
+        .select('_id')
+        .lean();
+      const customerIds = matchingCustomers.map((c) => c._id);
+
+      filter.$or = [
+        { shopifyOrderId: regex },
+        { 'shippingAddress.fullName': regex },
+        { 'shippingAddress.phone': regex },
+        { 'shippingAddress.city': regex },
+        ...(customerIds.length ? [{ customerId: { $in: customerIds } }] : []),
+      ];
+    }
   }
   const [orders, total] = await Promise.all([
     Order.find(filter)

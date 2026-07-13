@@ -31,5 +31,6 @@ router.post(
   inventoryController.adjustStock
 );
 router.get('/discrepancies', requireRoles('admin', 'stock_manager'), inventoryController.listDiscrepancies);
+router.get('/queue-counts', requireRoles('admin', 'stock_manager'), inventoryController.getQueueCounts);
 
 export default router;

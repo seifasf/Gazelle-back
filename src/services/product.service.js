@@ -2,6 +2,7 @@ import Variant from '../models/Variant.js';
 import Product from '../models/Product.js';
 import CogsBatch from '../models/CogsBatch.js';
 import InventoryLedger from '../models/InventoryLedger.js';
+import DiscrepancyAlert from '../models/DiscrepancyAlert.js';
 
 export async function listVariants({ search, lowStockOnly, limit = 50, skip = 0, activeOnly = true }) {
   const filter = {};
@@ -292,6 +293,21 @@ export async function listProducts({ limit = 50, skip = 0 }) {
   return { products, total };
 }
 
+export async function getStockQueueCounts() {
+  const activeProductIds = await Product.find({ status: 'active' }).distinct('_id');
+  const variantFilter = {
+    productId: { $in: activeProductIds },
+    $expr: { $lte: ['$realStock', '$lowStockThreshold'] },
+  };
+
+  const [lowStock, discrepancies] = await Promise.all([
+    Variant.countDocuments(variantFilter),
+    DiscrepancyAlert.countDocuments({ resolvedAt: { $exists: false } }),
+  ]);
+
+  return { lowStock, discrepancies };
+}
+
 export default {
   listVariants,
   getVariantById,
@@ -302,4 +318,5 @@ export default {
   listProducts,
   listCatalog,
   getCatalogFilterOptions,
+  getStockQueueCounts,
 };
