@@ -3,10 +3,11 @@ import logger from '../utils/logger.js';
 
 /**
  * Gazelle brand operating expenses.
- * Fixed = constant every month. Variable = entered each month (ranges are guidance).
+ * Fixed = auto-applied every month toward OpEx (EGP only).
+ * Variable = entered each month; once saved they add to total OpEx.
  */
 export const BRAND_EXPENSE_SEED = [
-  // Fixed
+  // Fixed (Brand fixed — editable in admin)
   { key: 'rent', name: 'Rent', kind: 'fixed', amount: 20000, currency: 'EGP', sortOrder: 10 },
   { key: 'salary-mayar', name: 'Mayar Salary', kind: 'fixed', amount: 11000, currency: 'EGP', sortOrder: 20 },
   { key: 'salary-moaz', name: 'Moaz Salary', kind: 'fixed', amount: 5000, currency: 'EGP', sortOrder: 30 },
@@ -14,7 +15,8 @@ export const BRAND_EXPENSE_SEED = [
   { key: 'salary-mariem-cx', name: 'Mariem (CX) Salary', kind: 'fixed', amount: 4000, currency: 'EGP', sortOrder: 50 },
   { key: 'salary-omar-media', name: 'Omar (Media Buyer) Salary', kind: 'fixed', amount: 12000, currency: 'EGP', sortOrder: 60 },
   { key: 'mayar-other', name: 'Mayar', kind: 'fixed', amount: 7000, currency: 'EGP', sortOrder: 70 },
-  { key: 'website', name: 'Website', kind: 'fixed', amount: 120, currency: 'USD', sortOrder: 80 },
+  // Website moved to variable (EGP only) — enter monthly actual
+  { key: 'website', name: 'Website', kind: 'variable', amount: 6000, currency: 'EGP', sortOrder: 105 },
   // Variable
   {
     key: 'boxes',
@@ -41,43 +43,51 @@ export const BRAND_EXPENSE_SEED = [
   { key: 'freight-in', name: 'Freight In', kind: 'variable', amount: 5000, currency: 'EGP', sortOrder: 150 },
 ];
 
-/** Default USD→EGP when Settings / env not set. */
+/** @deprecated kept for any residual FX helpers */
 export const DEFAULT_USD_TO_EGP = 50;
 
 export async function ensureBrandExpenses() {
   let created = 0;
-  let updated = 0;
+  let migrated = 0;
 
   for (const row of BRAND_EXPENSE_SEED) {
     const existing = await BrandExpense.findOne({ key: row.key });
     if (!existing) {
-      await BrandExpense.create(row);
+      await BrandExpense.create({ ...row, currency: 'EGP' });
       created += 1;
       continue;
     }
-    // Keep amounts in sync with the brand sheet on boot (admin can still override monthly).
-    const next = {
-      name: row.name,
-      kind: row.kind,
-      amount: row.amount,
-      amountMin: row.amountMin ?? null,
-      amountMax: row.amountMax ?? null,
-      currency: row.currency,
-      sortOrder: row.sortOrder,
-      isActive: true,
-    };
-    const changed = Object.keys(next).some((k) => String(existing[k] ?? '') !== String(next[k] ?? ''));
-    if (changed) {
-      Object.assign(existing, next);
+
+    // One-time migrations only — do not overwrite admin-edited amounts every boot.
+    let dirty = false;
+    if (row.key === 'website' && (existing.kind !== 'variable' || existing.currency !== 'EGP')) {
+      if (existing.currency === 'USD') {
+        existing.amount = Math.round((Number(existing.amount) || 0) * DEFAULT_USD_TO_EGP);
+      }
+      existing.kind = 'variable';
+      existing.currency = 'EGP';
+      existing.name = row.name;
+      existing.sortOrder = row.sortOrder;
+      dirty = true;
+    }
+    if (existing.currency === 'USD') {
+      existing.amount = Math.round((Number(existing.amount) || 0) * DEFAULT_USD_TO_EGP);
+      existing.currency = 'EGP';
+      dirty = true;
+    }
+    if (!existing.isActive && !existing.deletedAt) {
+      // leave soft-deleted alone
+    }
+    if (dirty) {
       await existing.save();
-      updated += 1;
+      migrated += 1;
     }
   }
 
-  if (created || updated) {
-    logger.info({ created, updated }, 'Brand expenses seeded');
+  if (created || migrated) {
+    logger.info({ created, migrated }, 'Brand expenses seeded/migrated');
   }
-  return { created, updated, total: BRAND_EXPENSE_SEED.length };
+  return { created, migrated, total: BRAND_EXPENSE_SEED.length };
 }
 
 export default { ensureBrandExpenses, BRAND_EXPENSE_SEED, DEFAULT_USD_TO_EGP };

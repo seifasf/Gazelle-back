@@ -26,8 +26,21 @@ async function resolveBostaCityId(cityName) {
 
 export async function createDelivery(order, customer) {
   const shipping = order.shippingAddress;
+  if (!shipping?.line1 || !shipping?.city) {
+    const err = new Error('Shipping address (street + city) is required to create a Bosta delivery');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const phone = shipping.phone || customer?.phone;
+  if (!phone) {
+    const err = new Error('Customer phone is required to create a Bosta delivery');
+    err.statusCode = 400;
+    throw err;
+  }
+
   const codAmount = (order.totalSellingPrice || 0) + (order.shippingFee || 0);
-  const { firstName, lastName } = splitName(shipping.fullName || customer.fullName);
+  const { firstName, lastName } = splitName(shipping.fullName || customer?.fullName);
   const cityId = await resolveBostaCityId(shipping.city);
 
   const address = {
@@ -53,7 +66,7 @@ export async function createDelivery(order, customer) {
     receiver: {
       firstName,
       lastName,
-      phone: shipping.phone || customer.phone,
+      phone,
       address,
     },
     businessReference: order._id.toString(),

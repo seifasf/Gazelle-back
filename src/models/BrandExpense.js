@@ -12,6 +12,7 @@ const brandExpenseSchema = new mongoose.Schema(
     currency: { type: String, enum: ['EGP', 'USD'], default: 'EGP' },
     sortOrder: { type: Number, default: 0 },
     isActive: { type: Boolean, default: true },
+    deletedAt: { type: Date },
   },
   { timestamps: true }
 );

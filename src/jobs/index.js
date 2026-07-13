@@ -3,18 +3,15 @@ import { processBostaStatusUpdate, pollStuckOrders } from '../integrations/bosta
 import { syncBostaReturns } from '../integrations/bosta/returns.service.js';
 import { syncOrderStatesFromBosta } from '../integrations/bosta/orderStates.service.js';
 import { syncCatalog } from '../integrations/shopify/sync.service.js';
-import { createDelivery } from '../integrations/bosta/shipments.service.js';
 import { importShopifyOrdersSince } from '../integrations/shopify/setup.service.js';
 import InventoryLedger from '../models/InventoryLedger.js';
 import Variant from '../models/Variant.js';
 import Order from '../models/Order.js';
-import Customer from '../models/Customer.js';
 import Settings from '../models/Settings.js';
 import WebhookReceipt from '../models/WebhookReceipt.js';
 import { inventoryAdjustQuantities } from '../integrations/shopify/mutations/inventoryAdjust.js';
 import { assertShopifyInventoryWriteAllowed } from '../integrations/shopify/writePolicy.js';
 import { config } from '../config/index.js';
-import orderService from '../services/order.service.js';
 import { JOB_NAMES } from '../constants/index.js';
 import { checkRestockNeeded, checkSlowMovers } from '../services/adminJobs.service.js';
 import logger from '../utils/logger.js';
@@ -85,37 +82,8 @@ export function registerJobs(agenda) {
 
   agenda.define(JOB_NAMES.BOSTA_CREATE_SHIPMENT, async (job) => {
     const { orderId, actorUserId } = job.attrs.data;
-    const order = await Order.findById(orderId).populate('customerId');
-    if (!order) throw new Error('Order not found');
-
-    order.bostaShipmentStatus = 'creating';
-    order.bostaShipmentError = null;
-    await order.save();
-
-    try {
-      const result = await createDelivery(order, order.customerId);
-      const deliveryId = result._id || result.id || result.data?._id;
-      const trackingNumber = result.trackingNumber || result.tracking_number;
-
-      order.bostaDeliveryId = deliveryId;
-      order.bostaTrackingNumber = trackingNumber;
-      order.bostaShipmentStatus = 'created';
-      if (actorUserId) order.assignedStockManagerId = actorUserId;
-      await order.save();
-
-      await orderService.transitionOrderStatus(orderId, 'picked_up_by_bosta', {
-        source: 'system',
-        actorUserId,
-        note: 'Bosta shipment created',
-      });
-
-      return result;
-    } catch (error) {
-      order.bostaShipmentStatus = 'failed';
-      order.bostaShipmentError = error.message;
-      await order.save();
-      throw error;
-    }
+    const fulfillmentService = await import('../services/fulfillment.service.js');
+    return fulfillmentService.createBostaShipmentForOrder(orderId, actorUserId);
   });
 
   agenda.define(JOB_NAMES.BOSTA_POLLING_FALLBACK, async () => {

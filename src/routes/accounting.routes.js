@@ -25,6 +25,9 @@ router.get('/reports/cogs-health/export', accountingController.exportCogsHealth)
 router.get('/cogs-health/export', accountingController.exportCogsHealth);
 
 router.get('/expenses', accountingController.listBrandExpenses);
+router.post('/expenses', accountingController.createBrandExpense);
+router.patch('/expenses/:id', accountingController.updateBrandExpense);
+router.delete('/expenses/:id', accountingController.deleteBrandExpense);
 router.get('/expenses/export', accountingController.exportBrandExpenses);
 router.get('/expenses/month', accountingController.getMonthExpenses);
 router.put('/expenses/month', accountingController.saveMonthExpenses);

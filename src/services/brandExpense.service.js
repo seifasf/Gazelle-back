@@ -8,6 +8,7 @@ function usdToEgpRate() {
   return Number.isFinite(rate) && rate > 0 ? rate : DEFAULT_USD_TO_EGP;
 }
 
+/** All brand OpEx is tracked in EGP. Legacy USD amounts are converted once. */
 export function toEgp(amount, currency = 'EGP') {
   const n = Number(amount) || 0;
   if (currency === 'USD') return Math.round(n * usdToEgpRate() * 100) / 100;
@@ -43,15 +44,106 @@ export function listYearMonthsInRange(from, to) {
   return months;
 }
 
-export async function listBrandExpenses({ kind } = {}) {
-  const filter = { isActive: true };
+export async function listBrandExpenses({ kind, includeInactive = false } = {}) {
+  const filter = includeInactive ? {} : { isActive: true };
   if (kind) filter.kind = kind;
   return BrandExpense.find(filter).sort({ sortOrder: 1, name: 1 });
 }
 
+function slugKey(name) {
+  return String(name || 'expense')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 60) || `expense-${Date.now()}`;
+}
+
+export async function createBrandExpense({ name, kind, amount, amountMin, amountMax, sortOrder }) {
+  if (!name?.trim()) {
+    const err = new Error('Name is required');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!['fixed', 'variable'].includes(kind)) {
+    const err = new Error('kind must be fixed or variable');
+    err.statusCode = 400;
+    throw err;
+  }
+  const numeric = Number(amount);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    const err = new Error('Amount must be a non-negative EGP number');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  let key = slugKey(name);
+  const clash = await BrandExpense.findOne({ key });
+  if (clash) key = `${key}-${Date.now().toString(36)}`;
+
+  return BrandExpense.create({
+    key,
+    name: name.trim(),
+    kind,
+    amount: numeric,
+    amountMin: amountMin != null ? Number(amountMin) : undefined,
+    amountMax: amountMax != null ? Number(amountMax) : undefined,
+    currency: 'EGP',
+    sortOrder: sortOrder ?? (kind === 'fixed' ? 50 : 200),
+    isActive: true,
+  });
+}
+
+export async function updateBrandExpense(id, patch) {
+  const doc = await BrandExpense.findById(id);
+  if (!doc || !doc.isActive) {
+    const err = new Error('Expense not found');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  if (patch.name != null) doc.name = String(patch.name).trim();
+  if (patch.kind != null) {
+    if (!['fixed', 'variable'].includes(patch.kind)) {
+      const err = new Error('kind must be fixed or variable');
+      err.statusCode = 400;
+      throw err;
+    }
+    doc.kind = patch.kind;
+  }
+  if (patch.amount != null) {
+    const numeric = Number(patch.amount);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+      const err = new Error('Amount must be a non-negative EGP number');
+      err.statusCode = 400;
+      throw err;
+    }
+    doc.amount = numeric;
+  }
+  if (patch.amountMin !== undefined) doc.amountMin = patch.amountMin == null ? undefined : Number(patch.amountMin);
+  if (patch.amountMax !== undefined) doc.amountMax = patch.amountMax == null ? undefined : Number(patch.amountMax);
+  if (patch.sortOrder != null) doc.sortOrder = Number(patch.sortOrder);
+  doc.currency = 'EGP';
+  await doc.save();
+  return doc;
+}
+
+export async function deleteBrandExpense(id) {
+  const doc = await BrandExpense.findById(id);
+  if (!doc || !doc.isActive) {
+    const err = new Error('Expense not found');
+    err.statusCode = 404;
+    throw err;
+  }
+  doc.isActive = false;
+  doc.deletedAt = new Date();
+  await doc.save();
+  return doc;
+}
+
 /**
  * Resolve effective lines for one calendar month.
- * Fixed: template amount (or monthly override). Variable: monthly entry only (else 0).
+ * Fixed: template amount (or monthly override) — auto-included in OpEx from day 1 of the month.
+ * Variable: monthly entry only (else 0) — once saved, adds to total OpEx.
  */
 export async function getMonthExpenseBreakdown(yearMonth) {
   const templates = await listBrandExpenses();
@@ -66,14 +158,15 @@ export async function getMonthExpenseBreakdown(yearMonth) {
       : isFixed
         ? t.amount
         : 0;
-    const currency = override?.currency || t.currency;
+    const currency = 'EGP';
     const amountEgp = override
-      ? override.amountEgp
+      ? toEgp(override.amountEgp ?? override.amount, override.currency || 'EGP')
       : isFixed
         ? toEgp(t.amount, t.currency)
         : 0;
 
     return {
+      id: t._id,
       key: t.key,
       name: t.name,
       kind: t.kind,
@@ -92,7 +185,6 @@ export async function getMonthExpenseBreakdown(yearMonth) {
   const variableTotal = lines.filter((l) => l.kind === 'variable').reduce((s, l) => s + l.amountEgp, 0);
   const total = fixedTotal + variableTotal;
 
-  // Operational context: delivered revenue in this calendar month (Egypt-ish UTC month bounds).
   let revenue = 0;
   let deliveredCount = 0;
   try {
@@ -143,7 +235,7 @@ export async function getMonthExpenseBreakdown(yearMonth) {
 
   return {
     yearMonth,
-    usdToEgp: usdToEgpRate(),
+    currency: 'EGP',
     lines,
     fixedTotal,
     variableTotal,
@@ -179,7 +271,7 @@ export async function saveMonthExpenses(yearMonth, items, userId) {
       throw err;
     }
 
-    const currency = item.currency || template.currency || 'EGP';
+    const currency = 'EGP';
     const amountEgp = toEgp(amount, currency);
 
     const doc = await MonthlyExpense.findOneAndUpdate(
@@ -203,8 +295,7 @@ export async function saveMonthExpenses(yearMonth, items, userId) {
 
 /**
  * Sum brand expenses across months overlapping [from, to].
- * Fixed monthly costs are prorated by days in range / days in month
- * so a 7-day window does not charge a full month of rent/salaries.
+ * Fixed monthly costs are prorated by days in range / days in month.
  */
 export async function getBrandExpensesForRange({ from, to } = {}) {
   const months = listYearMonthsInRange(from, to);
@@ -230,7 +321,6 @@ export async function getBrandExpensesForRange({ from, to } = {}) {
     const overlapStart = rangeStart && rangeStart > monthStart ? rangeStart : monthStart;
     const overlapEnd = rangeEnd && rangeEnd < monthEnd ? rangeEnd : monthEnd;
 
-    // Inclusive calendar-day overlap
     const startUtc = Date.UTC(overlapStart.getFullYear(), overlapStart.getMonth(), overlapStart.getDate());
     const endUtc = Date.UTC(overlapEnd.getFullYear(), overlapEnd.getMonth(), overlapEnd.getDate());
     const inclusiveDays = Math.max(1, Math.round((endUtc - startUtc) / 86400000) + 1);
@@ -247,12 +337,15 @@ export async function getBrandExpensesForRange({ from, to } = {}) {
     variableTotal: Math.round(variableTotal * 100) / 100,
     total: Math.round((fixedTotal + variableTotal) * 100) / 100,
     prorated: Boolean(from || to),
-    usdToEgp: usdToEgpRate(),
+    currency: 'EGP',
   };
 }
 
 export default {
   listBrandExpenses,
+  createBrandExpense,
+  updateBrandExpense,
+  deleteBrandExpense,
   getMonthExpenseBreakdown,
   saveMonthExpenses,
   getBrandExpensesForRange,

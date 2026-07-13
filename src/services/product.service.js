@@ -18,17 +18,19 @@ export async function listVariants({ search, lowStockOnly, limit = 50, skip = 0,
     filter.productId = { $in: activeProductIds };
   }
 
-  let variants = await Variant.find(filter)
-    .populate('productId', 'title status imageUrl vendor productType handle')
-    .sort({ sku: 1 })
-    .skip(skip)
-    .limit(limit);
-
   if (lowStockOnly) {
-    variants = variants.filter((v) => v.realStock <= v.lowStockThreshold);
+    filter.$expr = { $lte: ['$realStock', '$lowStockThreshold'] };
   }
 
-  const total = await Variant.countDocuments(filter);
+  const [variants, total] = await Promise.all([
+    Variant.find(filter)
+      .populate('productId', 'title status imageUrl vendor productType handle')
+      .sort({ realStock: 1, sku: 1 })
+      .skip(skip)
+      .limit(limit),
+    Variant.countDocuments(filter),
+  ]);
+
   return { variants, total };
 }
 

@@ -1,4 +1,6 @@
 import ExcelJS from 'exceljs';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import Factory from '../models/Factory.js';
 import PurchaseOrder from '../models/PurchaseOrder.js';
 import Product from '../models/Product.js';
@@ -409,46 +411,125 @@ export async function exportPurchaseOrderExcel(id) {
   }
 
   const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet('Purchase Order');
+  workbook.creator = 'Gazelle OMS';
+  workbook.created = new Date();
+  const sheet = workbook.addWorksheet('Quotation', {
+    pageSetup: { paperSize: 9, orientation: 'portrait', fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
+  });
 
   sheet.columns = [
-    { header: 'PO Number', key: 'poNumber', width: 18 },
-    { header: 'Factory', key: 'factory', width: 24 },
-    { header: 'SKU', key: 'sku', width: 18 },
-    { header: 'Product', key: 'title', width: 30 },
-    { header: 'Color', key: 'color', width: 14 },
-    { header: 'Size', key: 'size', width: 10 },
-    { header: 'Quantity', key: 'quantity', width: 10 },
-    { header: 'Unit Cost', key: 'unitCost', width: 12 },
-    { header: 'Line Total', key: 'lineTotal', width: 12 },
-    { header: 'Currency', key: 'currency', width: 10 },
-    { header: 'Expected Delivery', key: 'expectedDelivery', width: 18 },
+    { key: 'a', width: 18 },
+    { key: 'b', width: 32 },
+    { key: 'c', width: 14 },
+    { key: 'd', width: 10 },
+    { key: 'e', width: 12 },
+    { key: 'f', width: 12 },
+    { key: 'g', width: 14 },
   ];
 
-  const factoryName = po.factoryId?.name || '';
-  const expected = po.expectedDeliveryDate
-    ? new Date(po.expectedDeliveryDate).toISOString().slice(0, 10)
-    : '';
-
-  for (const item of po.items) {
-    sheet.addRow({
-      poNumber: po.poNumber,
-      factory: factoryName,
-      sku: item.sku,
-      title: item.title,
-      color: item.color || '',
-      size: item.size || '',
-      quantity: item.quantity,
-      unitCost: item.unitCost,
-      lineTotal: item.quantity * item.unitCost,
-      currency: item.currency || po.factoryId?.currency || 'EGP',
-      expectedDelivery: expected,
+  // Brand logo
+  try {
+    const logoPath = resolve(dirname(fileURLToPath(import.meta.url)), '../assets/gazelle-logo.png');
+    const logoId = workbook.addImage({
+      filename: logoPath,
+      extension: 'png',
     });
+    sheet.addImage(logoId, {
+      tl: { col: 0, row: 0 },
+      ext: { width: 120, height: 48 },
+    });
+  } catch {
+    // logo optional
   }
 
-  sheet.getRow(1).font = { bold: true };
+  sheet.mergeCells('C1', 'G1');
+  sheet.getCell('C1').value = 'GAZELLE — PRODUCTION QUOTATION';
+  sheet.getCell('C1').font = { bold: true, size: 16, color: { argb: 'FF1C1917' } };
+  sheet.getCell('C1').alignment = { vertical: 'middle' };
+
+  sheet.mergeCells('C2', 'G2');
+  sheet.getCell('C2').value = 'Purchase / production order summary';
+  sheet.getCell('C2').font = { size: 11, color: { argb: 'FF6B6560' } };
+
+  const factoryName = po.factoryId?.name || '—';
+  const factoryContact = [po.factoryId?.contactName, po.factoryId?.phone, po.factoryId?.email].filter(Boolean).join(' · ');
+  const expected = po.expectedDeliveryDate
+    ? new Date(po.expectedDeliveryDate).toISOString().slice(0, 10)
+    : '—';
+  const currency = po.factoryId?.currency || po.items?.[0]?.currency || 'EGP';
+  const issued = po.createdAt ? new Date(po.createdAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+
+  sheet.getRow(4).values = ['Quotation #', po.poNumber, '', 'Date', issued];
+  sheet.getRow(5).values = ['Factory', factoryName, '', 'Status', po.status || '—'];
+  sheet.getRow(6).values = ['Contact', factoryContact || '—', '', 'Expected', expected];
+  sheet.getRow(7).values = ['Notes', po.notes || '—'];
+  sheet.mergeCells('B7', 'G7');
+  for (const r of [4, 5, 6, 7]) {
+    sheet.getCell(`A${r}`).font = { bold: true, color: { argb: 'FF6B6560' } };
+  }
+
+  const headerRow = 9;
+  sheet.getRow(headerRow).values = ['SKU', 'Product', 'Color', 'Size', 'Qty', 'Unit cost', 'Line total'];
+  sheet.getRow(headerRow).font = { bold: true, color: { argb: 'FF1C1917' } };
+  sheet.getRow(headerRow).fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFF5C518' },
+  };
+  sheet.getRow(headerRow).border = {
+    bottom: { style: 'thin', color: { argb: 'FF1C1917' } },
+  };
+
+  let totalQty = 0;
+  let grandTotal = 0;
+  let rowIdx = headerRow + 1;
+  for (const item of po.items || []) {
+    const lineTotal = (Number(item.quantity) || 0) * (Number(item.unitCost) || 0);
+    totalQty += Number(item.quantity) || 0;
+    grandTotal += lineTotal;
+    sheet.getRow(rowIdx).values = [
+      item.sku,
+      item.title || '',
+      item.color || '',
+      item.size || '',
+      item.quantity,
+      Number(item.unitCost) || 0,
+      lineTotal,
+    ];
+    sheet.getCell(`F${rowIdx}`).numFmt = '#,##0.00';
+    sheet.getCell(`G${rowIdx}`).numFmt = '#,##0.00';
+    rowIdx += 1;
+  }
+
+  const summaryStart = rowIdx + 1;
+  sheet.getCell(`A${summaryStart}`).value = 'ORDER SUMMARY';
+  sheet.getCell(`A${summaryStart}`).font = { bold: true, size: 12 };
+  sheet.mergeCells(`A${summaryStart}`, `C${summaryStart}`);
+
+  sheet.getRow(summaryStart + 1).values = ['Line items', (po.items || []).length];
+  sheet.getRow(summaryStart + 2).values = ['Total units', totalQty];
+  sheet.getRow(summaryStart + 3).values = ['Currency', currency];
+  sheet.getRow(summaryStart + 4).values = ['Grand total (EGP)', grandTotal];
+  sheet.getCell(`B${summaryStart + 4}`).numFmt = '#,##0.00';
+  sheet.getCell(`A${summaryStart + 4}`).font = { bold: true };
+  sheet.getCell(`B${summaryStart + 4}`).font = { bold: true, size: 13 };
+  sheet.getCell(`A${summaryStart + 4}`).fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFFFF6D1' },
+  };
+  sheet.getCell(`B${summaryStart + 4}`).fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFFFF6D1' },
+  };
+
+  sheet.getCell(`A${summaryStart + 6}`).value = 'Prepared by Gazelle OMS · Quotation for factory production';
+  sheet.getCell(`A${summaryStart + 6}`).font = { italic: true, size: 9, color: { argb: 'FF9A938B' } };
+  sheet.mergeCells(`A${summaryStart + 6}`, `G${summaryStart + 6}`);
+
   const buffer = await workbook.xlsx.writeBuffer();
-  return { buffer, filename: `${po.poNumber}.xlsx` };
+  return { buffer, filename: `${po.poNumber}-quotation.xlsx` };
 }
 
 export default {

@@ -77,6 +77,36 @@ export async function listBrandExpenses(req, res, next) {
   }
 }
 
+export async function createBrandExpense(req, res, next) {
+  try {
+    const { createBrandExpense: create } = await import('../services/brandExpense.service.js');
+    const expense = await create(req.body);
+    res.status(201).json({ data: expense });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function updateBrandExpense(req, res, next) {
+  try {
+    const { updateBrandExpense: update } = await import('../services/brandExpense.service.js');
+    const expense = await update(req.params.id, req.body);
+    res.json({ data: expense });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function deleteBrandExpense(req, res, next) {
+  try {
+    const { deleteBrandExpense: remove } = await import('../services/brandExpense.service.js');
+    const expense = await remove(req.params.id);
+    res.json({ data: expense });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getMonthExpenses(req, res, next) {
   try {
     const { getMonthExpenseBreakdown } = await import('../services/brandExpense.service.js');
@@ -185,6 +215,9 @@ export default {
   topProducts,
   cogsHealth,
   listBrandExpenses,
+  createBrandExpense,
+  updateBrandExpense,
+  deleteBrandExpense,
   getMonthExpenses,
   saveMonthExpenses,
   exportPl,

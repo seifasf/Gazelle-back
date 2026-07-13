@@ -7,8 +7,8 @@ const router = Router();
 
 router.use(authenticate, sanitizeFinancialResponse);
 
-router.get('/catalog', requireRoles('admin', 'stock_manager'), inventoryController.listCatalog);
-router.get('/catalog/filters', requireRoles('admin', 'stock_manager'), inventoryController.catalogFilters);
+router.get('/catalog', requireRoles('admin', 'stock_manager', 'orders_manager'), inventoryController.listCatalog);
+router.get('/catalog/filters', requireRoles('admin', 'stock_manager', 'orders_manager'), inventoryController.catalogFilters);
 router.get('/variants/lookup', requireRoles('admin', 'stock_manager', 'orders_manager'), inventoryController.lookupVariantBySku);
 router.post('/stock-intake', requireRoles('admin', 'stock_manager'), inventoryController.stockIntake);
 // Orders managers need variant lists for exchanges during verification.

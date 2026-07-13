@@ -185,7 +185,7 @@ async function run() {
   await expect('notifications', 'GET', '/notifications', { token: om });
   if (sku) await expect('SKU lookup', 'GET', `/inventory/variants/lookup?sku=${encodeURIComponent(sku)}`, { token: om });
   // Forbidden for orders manager:
-  await expect('BLOCK catalog', 'GET', '/inventory/catalog?limit=2', { token: om, status: 403 });
+  await expect('catalog', 'GET', '/inventory/catalog?limit=2', { token: om });
   await expect('BLOCK reports', 'GET', '/reports/dashboard', { token: om, status: 403 });
   await expect('BLOCK settings', 'GET', '/settings', { token: om, status: 403 });
   await expect('BLOCK pick-list', 'GET', '/fulfillment/pick-list', { token: om, status: 403 });
