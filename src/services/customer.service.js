@@ -144,16 +144,61 @@ export async function recordCustomerCancellation(customerId, session) {
   return customer;
 }
 
-export async function listCustomers({ search, riskFlag, limit = 50, skip = 0 }) {
-  const filter = {};
-  if (search) {
-    filter.$or = [
-      { fullName: { $regex: search, $options: 'i' } },
-      { phone: { $regex: search, $options: 'i' } },
-      { email: { $regex: search, $options: 'i' } },
-    ];
+/** VIP = more than 4 lifetime orders from the brand. */
+export const VIP_ORDER_THRESHOLD = 4;
+
+/**
+ * Build Mongo filter for customer segments derived from order history:
+ * - green: received deliveries well (delivered > 0, cancels ≤ 2)
+ * - red: cancel / delivery risk (cancels > 2, rejects ≥ delivered when ordered, or high_risk)
+ * - vip: lifetimeOrders > 4
+ */
+export function buildCustomerSegmentFilter(segment) {
+  if (!segment || segment === 'all') return null;
+  if (segment === 'vip') {
+    return { lifetimeOrders: { $gt: VIP_ORDER_THRESHOLD } };
   }
-  if (riskFlag && riskFlag !== 'all') filter.riskFlag = riskFlag;
+  if (segment === 'green') {
+    return {
+      lifetimeDelivered: { $gte: 1 },
+      lifetimeCancelled: { $lte: FREQUENT_CANCEL_THRESHOLD },
+    };
+  }
+  if (segment === 'red') {
+    return {
+      $or: [
+        { lifetimeCancelled: { $gt: FREQUENT_CANCEL_THRESHOLD } },
+        { riskFlag: 'high_risk' },
+        {
+          $expr: {
+            $and: [
+              { $gt: ['$lifetimeOrders', 0] },
+              { $gte: ['$lifetimeRejectedOrReturned', '$lifetimeDelivered'] },
+            ],
+          },
+        },
+      ],
+    };
+  }
+  return null;
+}
+
+export async function listCustomers({ search, riskFlag, segment, limit = 50, skip = 0 }) {
+  const parts = [];
+  if (search) {
+    parts.push({
+      $or: [
+        { fullName: { $regex: search, $options: 'i' } },
+        { phone: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+      ],
+    });
+  }
+  if (riskFlag && riskFlag !== 'all') parts.push({ riskFlag });
+  const segmentFilter = buildCustomerSegmentFilter(segment);
+  if (segmentFilter) parts.push(segmentFilter);
+
+  const filter = parts.length === 0 ? {} : parts.length === 1 ? parts[0] : { $and: parts };
   const [customers, total] = await Promise.all([
     Customer.find(filter).sort({ createdAt: -1 }).skip(Number(skip) || 0).limit(Number(limit) || 50),
     Customer.countDocuments(filter),
@@ -168,5 +213,7 @@ export default {
   updateCustomerRiskFlag,
   recordCustomerCancellation,
   listCustomers,
+  buildCustomerSegmentFilter,
   FREQUENT_CANCEL_THRESHOLD,
+  VIP_ORDER_THRESHOLD,
 };

@@ -81,9 +81,18 @@ async function findOrderForBostaPayload({ deliveryId, payload }) {
   }
 
   const ref = String(payload?.businessReference || payload?.business_reference || '').trim();
-  if (ref && /^[a-f\d]{24}$/i.test(ref)) {
-    const byRef = await Order.findById(ref);
-    if (byRef) return byRef;
+  if (ref) {
+    if (/^[a-f\d]{24}$/i.test(ref)) {
+      const byRef = await Order.findById(ref);
+      if (byRef) return byRef;
+    }
+    // Older / plugin shipments may use Shopify order id as business reference.
+    const byShopify = await Order.findOne({ shopifyOrderId: ref });
+    if (byShopify) return byShopify;
+    if (/^\d+$/.test(ref)) {
+      const byShopifyNum = await Order.findOne({ shopifyOrderId: String(ref) });
+      if (byShopifyNum) return byShopifyNum;
+    }
   }
 
   return null;
@@ -206,10 +215,21 @@ export async function processBostaStatusUpdate({ deliveryId, state, payload, not
   }
 
   try {
-    return await transitionToward(order._id, order.internalStatus, internalStatus, {
+    const updated = await transitionToward(order._id, order.internalStatus, internalStatus, {
       source: 'bosta_webhook',
       note: note || `Bosta state: ${stateLabel}`,
     });
+    logger.info(
+      {
+        orderId: order._id,
+        deliveryId,
+        from: order.internalStatus,
+        to: internalStatus,
+        state: stateLabel,
+      },
+      'Bosta status applied to order'
+    );
+    return updated;
   } catch (err) {
     logger.warn(
       { err, orderId: order._id, from: order.internalStatus, to: internalStatus, state: stateLabel },

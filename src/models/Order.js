@@ -104,5 +104,10 @@ const orderSchema = new mongoose.Schema(
 
 orderSchema.index({ internalStatus: 1, placedAt: 1 });
 orderSchema.index({ 'items.variantId': 1, internalStatus: 1 });
+orderSchema.index({ placedAt: 1 });
+orderSchema.index({ deliveredAt: 1, internalStatus: 1 });
+orderSchema.index({ bostaCollectedAt: 1 });
+orderSchema.index({ paymentMethod: 1, onlinePaidAt: 1 });
+orderSchema.index({ onlinePaymentStatus: 1, onlinePaidAt: 1 });
 
 export default mongoose.model('Order', orderSchema);

@@ -27,13 +27,22 @@ export function registerJobs(agenda) {
     const receipt = await WebhookReceipt.findById(receiptId);
     if (!receipt || receipt.processedAt) return;
 
-    const payload = receipt.payload;
-    const deliveryId = payload._id || payload.deliveryId || payload.id;
-    const state = payload.state || payload.status;
+    const { normalizeBostaWebhookPayload } = await import('../integrations/bosta/webhookPayload.js');
+    const { payload, deliveryId, state } = normalizeBostaWebhookPayload(receipt.payload);
 
     try {
-      await processBostaStatusUpdate({ deliveryId, state, payload, note: 'Bosta webhook' });
+      const updated = await processBostaStatusUpdate({
+        deliveryId,
+        state,
+        payload,
+        note: 'Bosta webhook',
+      });
       receipt.processedAt = new Date();
+      if (!updated) {
+        receipt.error = 'no_matching_order';
+      } else if (receipt.error) {
+        receipt.error = undefined;
+      }
       await receipt.save();
     } catch (error) {
       receipt.error = error.message;

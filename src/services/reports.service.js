@@ -145,23 +145,7 @@ const dateToStringCairo = (field) => ({
 
 
 async function paymobReceivedForRange({ from, to }) {
-  // Live Paymob Accept API (successful transactions in range).
-  try {
-    const { isPaymobApiConfigured, sumSuccessfulTransactions } = await import(
-      '../integrations/paymob/transactions.service.js'
-    );
-    if (isPaymobApiConfigured()) {
-      const live = await sumSuccessfulTransactions({ from, to });
-      return {
-        amount: live.amount ?? 0,
-        count: live.count ?? 0,
-        source: 'paymob_api',
-      };
-    }
-  } catch (err) {
-    logger.warn({ err }, 'Paymob API sum failed — trying local ledger');
-  }
-
+  // Prefer local ledger first (fast). Live Paymob API is optional and timed out.
   const [row] = await PaymobReceived.aggregate([
     { $match: { receivedAt: { $gte: from, $lte: to } } },
     {
@@ -174,6 +158,25 @@ async function paymobReceivedForRange({ from, to }) {
   ]);
   if ((row?.count || 0) > 0) {
     return { amount: row.amount ?? 0, count: row.count ?? 0, source: 'paymob_webhook' };
+  }
+
+  try {
+    const { isPaymobApiConfigured, sumSuccessfulTransactions } = await import(
+      '../integrations/paymob/transactions.service.js'
+    );
+    if (isPaymobApiConfigured()) {
+      const live = await Promise.race([
+        sumSuccessfulTransactions({ from, to }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Paymob API timeout')), 2500)),
+      ]);
+      return {
+        amount: live.amount ?? 0,
+        count: live.count ?? 0,
+        source: 'paymob_api',
+      };
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Paymob API sum skipped — using Shopify online fallback');
   }
 
   // Last resort: Shopify-marked online paid (until Paymob is configured).
@@ -208,23 +211,7 @@ async function paymobReceivedForRange({ from, to }) {
 }
 
 async function codCollectedForRange({ from, to }) {
-  // Live Bosta Delivered COD (account-wide).
-  try {
-    const { isBostaConfigured } = await import('../integrations/bosta/client.js');
-    const { sumDeliveredCod } = await import('../integrations/bosta/cod.service.js');
-    if (isBostaConfigured()) {
-      const live = await sumDeliveredCod({ from, to });
-      return {
-        amount: live.amount ?? 0,
-        count: live.count ?? 0,
-        source: 'bosta_api',
-      };
-    }
-  } catch (err) {
-    logger.warn({ err }, 'Bosta COD API sum failed — trying OMS fields');
-  }
-
-  // Prefer explicit Bosta COD stamps on OMS orders.
+  // Prefer OMS stamps first — live Bosta paging is too slow for dashboard load.
   const [bostaRow] = await Order.aggregate([
     {
       $match: {
@@ -307,43 +294,52 @@ async function codLeftToCollect() {
 
 async function returnsForRange({ from, to }) {
   const { bostaReturnsForRange } = await import('../integrations/bosta/returns.service.js');
-  const [stockRow, bosta] = await Promise.all([
-    OrderStatusHistory.aggregate([
-      {
-        $match: {
-          toStatus: 'returned_to_stock',
-          createdAt: { $gte: from, $lte: to },
-        },
+  const bosta = await bostaReturnsForRange({ from, to });
+  if (bosta.count > 0) {
+    return {
+      amount: bosta.amount,
+      count: bosta.count,
+      bostaCount: bosta.count,
+      bostaAmount: bosta.amount,
+      confirmedInStockCount: 0,
+      confirmedInStockAmount: 0,
+      byType: bosta.byType,
+    };
+  }
+
+  // Fallback only when Bosta cache is empty for the range.
+  const [stock] = await OrderStatusHistory.aggregate([
+    {
+      $match: {
+        toStatus: 'returned_to_stock',
+        createdAt: { $gte: from, $lte: to },
       },
-      {
-        $lookup: {
-          from: 'orders',
-          localField: 'orderId',
-          foreignField: '_id',
-          as: 'order',
-        },
+    },
+    {
+      $lookup: {
+        from: 'orders',
+        localField: 'orderId',
+        foreignField: '_id',
+        as: 'order',
       },
-      { $unwind: '$order' },
-      {
-        $group: {
-          _id: null,
-          count: { $sum: 1 },
-          amount: { $sum: { $ifNull: ['$order.totalSellingPrice', 0] } },
-        },
+    },
+    { $unwind: '$order' },
+    {
+      $group: {
+        _id: null,
+        count: { $sum: 1 },
+        amount: { $sum: { $ifNull: ['$order.totalSellingPrice', 0] } },
       },
-    ]),
-    bostaReturnsForRange({ from, to }),
+    },
   ]);
-  const stock = stockRow[0] || { count: 0, amount: 0 };
-  // Prefer live Bosta return counts; keep warehouse confirms as a secondary signal.
   return {
-    amount: bosta.count > 0 ? bosta.amount : stock.amount ?? 0,
-    count: bosta.count > 0 ? bosta.count : stock.count ?? 0,
-    bostaCount: bosta.count,
-    bostaAmount: bosta.amount,
-    confirmedInStockCount: stock.count ?? 0,
-    confirmedInStockAmount: stock.amount ?? 0,
-    byType: bosta.byType,
+    amount: stock?.amount ?? 0,
+    count: stock?.count ?? 0,
+    bostaCount: 0,
+    bostaAmount: 0,
+    confirmedInStockCount: stock?.count ?? 0,
+    confirmedInStockAmount: stock?.amount ?? 0,
+    byType: null,
   };
 }
 
@@ -742,7 +738,26 @@ async function returnsAnalyticsForRange({ from, to }) {
   };
 }
 
+/** Short in-memory cache so dashboard refreshes feel instant. */
+const dashboardCache = new Map();
+const DASHBOARD_CACHE_TTL_MS = 45_000;
+
+function dashboardCacheKey(query) {
+  return JSON.stringify({
+    preset: query?.preset || 'day',
+    date: query?.date || '',
+    from: query?.from || '',
+    to: query?.to || '',
+  });
+}
+
 export async function getDashboardStats(query = {}) {
+  const cacheKey = dashboardCacheKey(query);
+  const cached = dashboardCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < DASHBOARD_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
   const preset = query?.preset || 'day';
   const range = rangeForPreset({
     preset,
@@ -751,6 +766,7 @@ export async function getDashboardStats(query = {}) {
     to: query?.to,
   });
 
+  // Skip unused employee KPIs and live Bosta COD paging — keep dashboard on local DB.
   const [
     ordersByStatus,
     deliveredCount,
@@ -759,10 +775,8 @@ export async function getDashboardStats(query = {}) {
     paymobReceived,
     codCollected,
     leftToCollect,
-    returns,
     dailyBreakdown,
     topProducts,
-    employeeKpis,
     orderMix,
     returnsAnalytics,
   ] = await Promise.all([
@@ -773,10 +787,8 @@ export async function getDashboardStats(query = {}) {
     paymobReceivedForRange(range),
     codCollectedForRange(range),
     codLeftToCollect(),
-    returnsForRange(range),
     dailyBreakdownForRange(range),
     topProductsForRange(range),
-    employeeKpisForRange(range),
     orderMixForRange(range),
     returnsAnalyticsForRange(range),
   ]);
@@ -787,6 +799,13 @@ export async function getDashboardStats(query = {}) {
 
   const revenueExclShipping = payment?.totals?.revenueExclShipping ?? 0;
   const ordersPlaced = payment?.totalCount ?? 0;
+  const returns = {
+    amount: returnsAnalytics.amount ?? 0,
+    count: returnsAnalytics.count ?? 0,
+    bostaCount: returnsAnalytics.source === 'bosta' ? returnsAnalytics.count : 0,
+    bostaAmount: returnsAnalytics.source === 'bosta' ? returnsAnalytics.amount : 0,
+    byType: returnsAnalytics.byType,
+  };
   // Bosta returns are account-wide (often WooCommerce RTOs) and usually not linked to
   // Gazelle Shopify orders — don't present that as an order return-rate %.
   const returnRate =
@@ -796,7 +815,7 @@ export async function getDashboardStats(query = {}) {
         ? pct(returnsAnalytics.count, ordersPlaced)
         : 0;
 
-  return {
+  const result = {
     ordersByStatus: statusMap,
     deliverySuccessRate,
     deliveredCount,
@@ -827,10 +846,19 @@ export async function getDashboardStats(query = {}) {
       range: { from: range.from, to: range.to },
     },
     employeeAnalytics: {
-      employees: employeeKpis || [],
+      employees: [],
       range: { from: range.from, to: range.to },
     },
   };
+
+  dashboardCache.set(cacheKey, { at: Date.now(), data: result });
+  // Bound cache size
+  if (dashboardCache.size > 40) {
+    const oldest = dashboardCache.keys().next().value;
+    dashboardCache.delete(oldest);
+  }
+
+  return result;
 }
 
 export async function getProfitabilityReport({ from, to, groupBy = 'product' }) {

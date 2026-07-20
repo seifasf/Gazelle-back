@@ -32,21 +32,27 @@ export const BOSTA_STATE = {
 
 /** Built-in fallback when DB BostaStatusMapping has no row. */
 export const DEFAULT_STATE_TO_INTERNAL = {
+  [BOSTA_STATE.PICKUP_REQUESTED]: 'picked_up_by_bosta',
+  [BOSTA_STATE.WAITING_FOR_ROUTE]: 'picked_up_by_bosta',
+  [BOSTA_STATE.ROUTE_ASSIGNED]: 'picked_up_by_bosta',
   [BOSTA_STATE.PICKED_UP_FROM_BUSINESS]: 'picked_up_by_bosta',
+  [BOSTA_STATE.PICKING_UP_FROM_CONSIGNEE]: 'in_transit',
   [BOSTA_STATE.PICKED_UP_FROM_CONSIGNEE]: 'picked_up_by_bosta',
-  [BOSTA_STATE.PICKED_UP]: 'picked_up_by_bosta',
   [BOSTA_STATE.RECEIVED_AT_WAREHOUSE]: 'in_transit',
   [BOSTA_STATE.FULFILLED]: 'in_transit',
   [BOSTA_STATE.IN_TRANSIT_BETWEEN_HUBS]: 'in_transit',
   [BOSTA_STATE.PICKING_UP_CASH]: 'in_transit',
+  [BOSTA_STATE.PICKED_UP]: 'picked_up_by_bosta',
   [BOSTA_STATE.DELIVERED]: 'delivered',
   [BOSTA_STATE.RETURNED_TO_BUSINESS]: 'returning_to_origin',
   [BOSTA_STATE.EXCEPTION]: 'failed_delivery',
   [BOSTA_STATE.TERMINATED]: 'returning_to_origin',
+  [BOSTA_STATE.CANCELED]: 'returning_to_origin',
   [BOSTA_STATE.RETURNED_TO_STOCK]: 'returning_to_origin',
   [BOSTA_STATE.AWAITING_YOUR_ACTION]: 'returning_to_origin',
   [BOSTA_STATE.LOST]: 'failed_delivery',
   [BOSTA_STATE.DAMAGED]: 'failed_delivery',
+  [BOSTA_STATE.ON_HOLD]: 'failed_delivery',
   // String aliases (legacy seed + webhook variants)
   PICKED_UP: 'picked_up_by_bosta',
   IN_TRANSIT: 'in_transit',
@@ -58,6 +64,9 @@ export const DEFAULT_STATE_TO_INTERNAL = {
   EXCEPTION: 'failed_delivery',
   'Returned to business': 'returning_to_origin',
   Terminated: 'returning_to_origin',
+  Delivered: 'delivered',
+  'In transit': 'in_transit',
+  'Picked up': 'picked_up_by_bosta',
 };
 
 export const RETURN_STATE_CODES = new Set([

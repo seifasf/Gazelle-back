@@ -1,6 +1,7 @@
 import { bostaRequest } from './client.js';
 import { config } from '../../config/index.js';
 import Settings from '../../models/Settings.js';
+import { bostaWebhookUrl } from './webhookPayload.js';
 
 function splitName(fullName) {
   const parts = (fullName || 'Customer').trim().split(/\s+/);
@@ -70,7 +71,7 @@ export async function createDelivery(order, customer) {
       address,
     },
     businessReference: order._id.toString(),
-    webhookUrl: `${config.APP_URL}/webhooks/bosta`,
+    webhookUrl: bostaWebhookUrl(config.APP_URL),
     cod: codAmount,
   };
 

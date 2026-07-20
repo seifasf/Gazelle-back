@@ -3,6 +3,7 @@ import WebhookReceipt from '../models/WebhookReceipt.js';
 import Order from '../models/Order.js';
 import { getShopifyStatus } from '../integrations/shopify/setup.service.js';
 import { isBostaConfigured } from '../integrations/bosta/client.js';
+import { bostaWebhookUrl } from '../integrations/bosta/webhookPayload.js';
 import { config } from '../config/index.js';
 
 export async function getIntegrationHealth() {
@@ -12,21 +13,22 @@ export async function getIntegrationHealth() {
   const [
     shopifyWebhookLast,
     bostaWebhookLast,
+    bostaWebhookFailed,
     paymobWebhookLast,
     failedShipments,
     pendingVerify,
     readyToShip,
     inTransit,
-  ] =
-    await Promise.all([
-      WebhookReceipt.findOne({ source: 'shopify' }).sort({ createdAt: -1 }).select('createdAt topic'),
-      WebhookReceipt.findOne({ source: 'bosta' }).sort({ createdAt: -1 }).select('createdAt'),
-      WebhookReceipt.findOne({ source: 'paymob' }).sort({ createdAt: -1 }).select('createdAt'),
-      Order.countDocuments({ bostaShipmentStatus: 'failed' }),
-      Order.countDocuments({ internalStatus: 'pending_verification' }),
-      Order.countDocuments({ internalStatus: 'verified_ready_for_shipping' }),
-      Order.countDocuments({ internalStatus: { $in: ['picked_up_by_bosta', 'in_transit'] } }),
-    ]);
+  ] = await Promise.all([
+    WebhookReceipt.findOne({ source: 'shopify' }).sort({ createdAt: -1 }).select('createdAt topic'),
+    WebhookReceipt.findOne({ source: 'bosta' }).sort({ createdAt: -1 }).select('createdAt processedAt error'),
+    WebhookReceipt.countDocuments({ source: 'bosta', error: { $exists: true, $ne: null } }),
+    WebhookReceipt.findOne({ source: 'paymob' }).sort({ createdAt: -1 }).select('createdAt'),
+    Order.countDocuments({ bostaShipmentStatus: 'failed' }),
+    Order.countDocuments({ internalStatus: 'pending_verification' }),
+    Order.countDocuments({ internalStatus: 'verified_ready_for_shipping' }),
+    Order.countDocuments({ internalStatus: { $in: ['picked_up_by_bosta', 'in_transit'] } }),
+  ]);
 
   return {
     shopify: {
@@ -41,7 +43,11 @@ export async function getIntegrationHealth() {
       citiesCount: settings?.bostaCities?.length ?? 0,
       lastSyncAt: settings?.bostaLastSyncAt,
       lastWebhookAt: bostaWebhookLast?.createdAt || settings?.bostaLastWebhookAt,
-      pollingThresholdHours: settings?.bostaPollingThresholdHours ?? 48,
+      lastWebhookProcessedAt: bostaWebhookLast?.processedAt || null,
+      lastWebhookError: bostaWebhookLast?.error || null,
+      webhookFailures: bostaWebhookFailed,
+      webhookUrl: bostaWebhookUrl(config.APP_URL),
+      pollingThresholdHours: settings?.bostaPollingThresholdHours ?? 2,
     },
     paymob: {
       configured: Boolean(config.PAYMOB_HMAC_SECRET),
