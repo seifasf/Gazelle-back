@@ -120,21 +120,32 @@ function upsertDocFromDelivery(delivery, orderId) {
 
 /**
  * Pull return deliveries from Bosta and upsert into BostaReturn.
+ * When `from`/`to` are set, keep only returns whose returnedAt falls in that window
+ * (and stop paging early once pages fall outside the range).
  */
-export async function syncBostaReturns({ maxPages = MAX_PAGES } = {}) {
+export async function syncBostaReturns({ maxPages = MAX_PAGES, from = null, to = null } = {}) {
   const byId = new Map();
+  const inRange = (delivery) => {
+    if (!from && !to) return true;
+    const at = extractBostaReturnedAt(delivery);
+    if (!at) return false;
+    if (from && at < from) return false;
+    if (to && at > to) return false;
+    return true;
+  };
 
   for (const state of RETURN_SEARCH_STATES) {
     const list = await searchDeliveries({ state }, { maxPages });
-    for (const d of list) byId.set(String(d._id || d.id), d);
+    for (const d of list) {
+      if (inRange(d) || (!from && !to)) byId.set(String(d._id || d.id), d);
+    }
   }
 
   try {
     const rto = await searchDeliveries({ type: 'RTO' }, { maxPages: Math.min(20, maxPages) });
     for (const d of rto) {
-      if (isReturnState(d.state) || extractBostaReturnedAt(d)) {
-        byId.set(String(d._id || d.id), d);
-      }
+      if (!(isReturnState(d.state) || extractBostaReturnedAt(d))) continue;
+      if (inRange(d) || (!from && !to)) byId.set(String(d._id || d.id), d);
     }
   } catch (err) {
     logger.warn({ err }, 'Bosta RTO type search failed');

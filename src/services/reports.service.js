@@ -145,7 +145,7 @@ const dateToStringCairo = (field) => ({
 
 
 async function paymobReceivedForRange({ from, to }) {
-  // Prefer local ledger first (fast). Live Paymob API is optional and timed out.
+  // Real Paymob only — never Shopify "online paid" as Paymob.
   const [row] = await PaymobReceived.aggregate([
     { $match: { receivedAt: { $gte: from, $lte: to } } },
     {
@@ -157,7 +157,7 @@ async function paymobReceivedForRange({ from, to }) {
     },
   ]);
   if ((row?.count || 0) > 0) {
-    return { amount: row.amount ?? 0, count: row.count ?? 0, source: 'paymob_webhook' };
+    return { amount: row.amount ?? 0, count: row.count ?? 0, source: 'paymob_webhook', real: true };
   }
 
   try {
@@ -173,45 +173,18 @@ async function paymobReceivedForRange({ from, to }) {
         amount: live.amount ?? 0,
         count: live.count ?? 0,
         source: 'paymob_api',
+        real: true,
       };
     }
   } catch (err) {
-    logger.warn({ err }, 'Paymob API sum skipped — using Shopify online fallback');
+    logger.warn({ err }, 'Paymob API sum skipped');
   }
 
-  // Last resort: Shopify-marked online paid (until Paymob is configured).
-  const [onlineRow] = await Order.aggregate([
-    {
-      $match: {
-        paymentMethod: 'online',
-        onlinePaymentStatus: 'paid',
-        onlinePaidAt: { $gte: from, $lte: to },
-      },
-    },
-    {
-      $group: {
-        _id: null,
-        amount: {
-          $sum: {
-            $ifNull: [
-              '$onlinePaymentAmount',
-              { $add: [{ $ifNull: ['$totalSellingPrice', 0] }, { $ifNull: ['$shippingFee', 0] }] },
-            ],
-          },
-        },
-        count: { $sum: 1 },
-      },
-    },
-  ]);
-  return {
-    amount: onlineRow?.amount ?? 0,
-    count: onlineRow?.count ?? 0,
-    source: 'shopify_online_fallback',
-  };
+  return { amount: null, count: 0, source: 'unavailable', real: false };
 }
 
 async function codCollectedForRange({ from, to }) {
-  // Prefer OMS stamps first — live Bosta paging is too slow for dashboard load.
+  // Prefer OMS stamps in the admin-selected range (fast, Gazelle-linked).
   const [bostaRow] = await Order.aggregate([
     {
       $match: {
@@ -230,57 +203,67 @@ async function codCollectedForRange({ from, to }) {
   ]);
 
   if ((bostaRow?.count || 0) > 0) {
-    return { amount: bostaRow.amount ?? 0, count: bostaRow.count ?? 0, source: 'bosta' };
+    return { amount: bostaRow.amount ?? 0, count: bostaRow.count ?? 0, source: 'bosta', real: true };
   }
 
-  // Last resort: COD orders marked delivered in-range.
-  const [deliveredRow] = await Order.aggregate([
-    {
-      $match: {
-        $or: [{ paymentMethod: 'cod' }, { paymentMethod: { $exists: false } }, { paymentMethod: null }],
-        deliveredAt: { $gte: from, $lte: to },
-        internalStatus: 'delivered',
-      },
-    },
-    {
-      $group: {
-        _id: null,
-        amount: {
-          $sum: {
-            $add: [{ $ifNull: ['$totalSellingPrice', 0] }, { $ifNull: ['$shippingFee', 0] }],
-          },
-        },
-        count: { $sum: 1 },
-      },
-    },
-  ]);
+  // Fallback: live Bosta delivered COD for the same date range only.
+  try {
+    const { sumDeliveredCod } = await import('../integrations/bosta/cod.service.js');
+    const live = await Promise.race([
+      sumDeliveredCod({ from, to, maxPages: 20 }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Bosta COD timeout')), 4000)),
+    ]);
+    if ((live?.count || 0) > 0) {
+      return {
+        amount: live.amount ?? 0,
+        count: live.count ?? 0,
+        source: 'bosta_api',
+        real: true,
+      };
+    }
+    return { amount: 0, count: 0, source: 'bosta_api', real: true };
+  } catch (err) {
+    logger.warn({ err }, 'Bosta COD for range skipped');
+  }
 
-  return {
-    amount: deliveredRow?.amount ?? 0,
-    count: deliveredRow?.count ?? 0,
-    source: 'delivered_fallback',
-  };
+  return { amount: null, count: 0, source: 'unavailable', real: false };
 }
 
-async function codLeftToCollect() {
+/**
+ * Outstanding COD for the admin-selected days only:
+ * - delivered in range and still unpaid, or
+ * - still with courier and placed in range.
+ */
+async function codLeftToCollect({ from, to }) {
   const [row] = await Order.aggregate([
     {
       $match: {
-        // Treat missing paymentMethod as COD (legacy Shopify imports).
         $or: [{ paymentMethod: 'cod' }, { paymentMethod: { $exists: false } }, { paymentMethod: null }],
-        internalStatus: { $nin: ['cancelled', 'returned_to_stock'] },
+        $and: [
+          {
+            $or: [
+              {
+                internalStatus: 'delivered',
+                deliveredAt: { $gte: from, $lte: to },
+              },
+              {
+                internalStatus: { $in: ['picked_up_by_bosta', 'in_transit', 'failed_delivery'] },
+                placedAt: { $gte: from, $lte: to },
+              },
+            ],
+          },
+        ],
       },
     },
     {
       $addFields: {
-        // Do not reference other fields added in this same stage (Mongo may not resolve them).
         collected: { $ifNull: ['$bostaCollectedAmount', 0] },
         due: {
           $add: [{ $ifNull: ['$totalSellingPrice', 0] }, { $ifNull: ['$shippingFee', 0] }],
         },
       },
     },
-    { $match: { $expr: { $lt: ['$collected', '$due'] } } },
+    { $match: { $expr: { $and: [{ $gt: ['$due', 0] }, { $lt: ['$collected', '$due'] }] } } },
     {
       $group: {
         _id: null,
@@ -289,7 +272,20 @@ async function codLeftToCollect() {
       },
     },
   ]);
-  return { amount: row?.amount ?? 0, count: row?.count ?? 0 };
+  return {
+    amount: row?.amount ?? 0,
+    count: row?.count ?? 0,
+    real: true,
+    source: 'oms_open_cod_in_range',
+  };
+}
+
+/** Gazelle OMS returns only (warehouse confirms) — safe for return-rate %. */
+async function gazelleReturnCountForRange({ from, to }) {
+  return OrderStatusHistory.countDocuments({
+    toStatus: 'returned_to_stock',
+    createdAt: { $gte: from, $lte: to },
+  });
 }
 
 async function returnsForRange({ from, to }) {
@@ -637,9 +633,24 @@ async function orderMixForRange({ from, to }) {
 
 async function returnsAnalyticsForRange({ from, to }) {
   const { resolveGender } = await import('../utils/gender.js');
-  const { bostaReturnsForRange } = await import('../integrations/bosta/returns.service.js');
+  const { bostaReturnsForRange, syncBostaReturns } = await import('../integrations/bosta/returns.service.js');
 
-  const bosta = await bostaReturnsForRange({ from, to });
+  // Prefer cached Bosta returns already filtered to the admin date range.
+  let bosta = await bostaReturnsForRange({ from, to });
+
+  // If cache is empty for this range, do a short Bosta refresh scoped to those days.
+  if (bosta.count === 0) {
+    try {
+      await Promise.race([
+        syncBostaReturns({ from, to, maxPages: 15 }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Bosta returns sync timeout')), 5000)),
+      ]);
+      bosta = await bostaReturnsForRange({ from, to });
+    } catch (err) {
+      logger.warn({ err }, 'Bosta returns range sync skipped');
+    }
+  }
+
   const orderIds = [...new Set(bosta.rows.map((r) => r.orderId).filter(Boolean).map(String))];
   const orders = orderIds.length
     ? await Order.find({ _id: { $in: orderIds } })
@@ -779,6 +790,7 @@ export async function getDashboardStats(query = {}) {
     topProducts,
     orderMix,
     returnsAnalytics,
+    gazelleReturnCount,
   ] = await Promise.all([
     Order.aggregate([{ $group: { _id: '$internalStatus', count: { $sum: 1 } } }]),
     Order.countDocuments({ internalStatus: 'delivered' }),
@@ -786,11 +798,12 @@ export async function getDashboardStats(query = {}) {
     paymentSplitForRange(range),
     paymobReceivedForRange(range),
     codCollectedForRange(range),
-    codLeftToCollect(),
+    codLeftToCollect(range),
     dailyBreakdownForRange(range),
     topProductsForRange(range),
     orderMixForRange(range),
     returnsAnalyticsForRange(range),
+    gazelleReturnCountForRange(range),
   ]);
 
   const statusMap = Object.fromEntries(ordersByStatus.map((s) => [s._id, s.count]));
@@ -805,15 +818,17 @@ export async function getDashboardStats(query = {}) {
     bostaCount: returnsAnalytics.source === 'bosta' ? returnsAnalytics.count : 0,
     bostaAmount: returnsAnalytics.source === 'bosta' ? returnsAnalytics.amount : 0,
     byType: returnsAnalytics.byType,
+    gazelleCount: gazelleReturnCount,
   };
-  // Bosta returns are account-wide (often WooCommerce RTOs) and usually not linked to
-  // Gazelle Shopify orders — don't present that as an order return-rate %.
+
+  // Return rate = Gazelle warehouse returns ÷ Gazelle orders in range only.
+  // Never use Bosta account-wide RTOs (WooCommerce etc.) against Shopify order counts.
   const returnRate =
-    returnsAnalytics?.source === 'bosta' && !(returnsAnalytics.linkedCount > 0)
-      ? null
-      : ordersPlaced > 0
-        ? pct(returnsAnalytics.count, ordersPlaced)
-        : 0;
+    ordersPlaced > 0 && gazelleReturnCount > 0
+      ? pct(gazelleReturnCount, ordersPlaced)
+      : ordersPlaced > 0 && gazelleReturnCount === 0
+        ? 0
+        : null;
 
   const result = {
     ordersByStatus: statusMap,
@@ -836,6 +851,12 @@ export async function getDashboardStats(query = {}) {
     returnsAnalytics,
     orderMix,
     returnRate,
+    returnRateBasis: {
+      returns: gazelleReturnCount,
+      orders: ordersPlaced,
+      source: 'gazelle_warehouse',
+      real: true,
+    },
     dailyBreakdown,
     ordersPlaced,
     // Backward-compatible aliases
