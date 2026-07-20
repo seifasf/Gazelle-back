@@ -55,6 +55,21 @@ export async function notifyOrderVerified(order) {
   });
 }
 
+export async function notifyOrderCallbackDue(order) {
+  const ref = order.bostaTrackingNumber || order.shopifyOrderId || order._id;
+  return createNotification({
+    type: 'order_callback_due',
+    roles: ['admin', 'orders_manager'],
+    severity: 'warning',
+    title: `Call back #${ref}`,
+    body: order.delayNote
+      ? `Customer delay ends today. Note: ${order.delayNote}`
+      : 'Customer asked to delay — call today to confirm and ready to ship.',
+    link: `/orders/${order._id}`,
+    orderId: order._id,
+  });
+}
+
 export async function notifyFailedDelivery(order) {
   return createNotification({
     type: 'failed_delivery',
@@ -173,6 +188,7 @@ export default {
   createNotification,
   notifyNewOrder,
   notifyOrderVerified,
+  notifyOrderCallbackDue,
   notifyFailedDelivery,
   notifyReturnToOrigin,
   notifyDiscrepancy,

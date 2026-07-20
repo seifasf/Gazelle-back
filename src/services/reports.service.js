@@ -1044,4 +1044,109 @@ export async function getAuditLog({ from, to, limit = 100, skip = 0 }) {
   return { statusHistory, inventoryLedger };
 }
 
-export default { getDashboardStats, getProfitabilityReport, getAuditLog };
+export async function getTopSellersByUnits({ month, limit = 40 } = {}) {
+  const BUSINESS_TZ = 'Africa/Cairo';
+  const now = new Date();
+  let y;
+  let m;
+  if (month && /^\d{4}-\d{2}$/.test(month)) {
+    y = Number(month.slice(0, 4));
+    m = Number(month.slice(5, 7));
+  } else {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: BUSINESS_TZ,
+      year: 'numeric',
+      month: '2-digit',
+    }).formatToParts(now);
+    y = Number(parts.find((p) => p.type === 'year').value);
+    m = Number(parts.find((p) => p.type === 'month').value);
+  }
+
+  const fromYmd = `${y}-${String(m).padStart(2, '0')}-01`;
+  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const toYmd = `${y}-${String(m).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+
+  // Reuse Cairo day bounds from range helpers
+  const from = (() => {
+    const utc = Date.UTC(y, m - 1, 1, 0, 0, 0, 0);
+    const asTz = new Date(utc).toLocaleString('en-US', { timeZone: BUSINESS_TZ });
+    const asUtc = new Date(utc).toLocaleString('en-US', { timeZone: 'UTC' });
+    return new Date(utc + (new Date(asUtc).getTime() - new Date(asTz).getTime()));
+  })();
+  const to = (() => {
+    const utc = Date.UTC(y, m - 1, lastDay, 23, 59, 59, 999);
+    const asTz = new Date(utc).toLocaleString('en-US', { timeZone: BUSINESS_TZ });
+    const asUtc = new Date(utc).toLocaleString('en-US', { timeZone: 'UTC' });
+    return new Date(utc + (new Date(asUtc).getTime() - new Date(asTz).getTime()));
+  })();
+
+  const rows = await Order.aggregate([
+    {
+      $match: {
+        internalStatus: 'delivered',
+        deliveredAt: { $gte: from, $lte: to },
+      },
+    },
+    { $unwind: '$items' },
+    {
+      $group: {
+        _id: '$items.variantId',
+        sku: { $first: '$items.sku' },
+        unitsSold: { $sum: '$items.quantity' },
+      },
+    },
+    { $sort: { unitsSold: -1 } },
+    { $limit: Number(limit) || 40 },
+  ]);
+
+  const Variant = (await import('../models/Variant.js')).default;
+  const variantIds = rows.map((r) => r._id).filter(Boolean);
+  const variants = await Variant.find({ _id: { $in: variantIds } })
+    .populate('productId', 'title imageUrl')
+    .lean();
+  const byId = Object.fromEntries(variants.map((v) => [String(v._id), v]));
+
+  // Roll up to product level (pieces), keep best image/title
+  const byProduct = new Map();
+  for (const row of rows) {
+    const v = byId[String(row._id)];
+    const productId = v?.productId?._id ? String(v.productId._id) : String(row.sku);
+    const title = v?.productId?.title || v?.title || row.sku;
+    const imageUrl = v?.imageUrl || v?.productId?.imageUrl || '';
+    const code = v?.sku || row.sku;
+    const prev = byProduct.get(productId) || {
+      productId,
+      title,
+      imageUrl,
+      code,
+      unitsSold: 0,
+      skus: [],
+    };
+    prev.unitsSold += row.unitsSold;
+    if (!prev.imageUrl && imageUrl) prev.imageUrl = imageUrl;
+    if (code && !prev.skus.includes(code)) prev.skus.push(code);
+    // Prefer product title; keep a representative code (first / most sold already ordered)
+    if (!prev.code) prev.code = code;
+    byProduct.set(productId, prev);
+  }
+
+  const products = [...byProduct.values()]
+    .sort((a, b) => b.unitsSold - a.unitsSold)
+    .slice(0, Number(limit) || 40)
+    .map((p) => ({
+      productId: p.productId,
+      title: p.title,
+      imageUrl: p.imageUrl,
+      code: p.skus.length === 1 ? p.skus[0] : p.code,
+      unitsSold: p.unitsSold,
+    }));
+
+  return {
+    month: `${y}-${String(m).padStart(2, '0')}`,
+    fromYmd,
+    toYmd,
+    products,
+  };
+}
+
+export default { getDashboardStats, getProfitabilityReport, getAuditLog, getTopSellersByUnits };

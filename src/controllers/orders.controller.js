@@ -172,6 +172,15 @@ export async function transitionStatus(req, res, next) {
   }
 }
 
+export async function delayOrder(req, res, next) {
+  try {
+    const order = await orderService.delayOrder(req.params.id, req.user._id, req.body);
+    res.json({ data: order });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export default {
   listOrders,
   getStateCounts,
@@ -185,4 +194,5 @@ export default {
   exchangeItem,
   updateShippingAddress,
   transitionStatus,
+  delayOrder,
 };

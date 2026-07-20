@@ -98,6 +98,11 @@ const orderSchema = new mongoose.Schema(
     deliveredAt: Date,
     closedAt: Date,
     lastStatusUpdateAt: { type: Date, default: Date.now },
+    /** Customer asked to delay — call again on this Cairo calendar day. */
+    delayedUntil: { type: Date, index: true },
+    delayNote: { type: String, maxlength: 500 },
+    /** Idempotency: YYYY-MM-DD already notified for delayedUntil. */
+    delayNotifiedOn: String,
   },
   { timestamps: true }
 );

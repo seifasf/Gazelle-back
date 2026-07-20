@@ -18,6 +18,7 @@ router.get(
 );
 router.post('/:id/claim', requireRoles('admin', 'orders_manager', 'stock_manager'), ordersController.claimOrder);
 router.post('/:id/verify', requireRoles('admin', 'orders_manager'), ordersController.verifyOrder);
+router.post('/:id/delay', requireRoles('admin', 'orders_manager'), ordersController.delayOrder);
 router.post('/:id/cancel', requireRoles('admin', 'orders_manager'), ordersController.cancelOrder);
 router.post('/:id/exchange', requireRoles('admin', 'orders_manager'), ordersController.exchangeItem);
 router.patch('/:id/shipping', requireRoles('admin', 'orders_manager'), ordersController.updateShippingAddress);

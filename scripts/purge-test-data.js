@@ -1,9 +1,12 @@
 /**
- * Remove all API-test / dummy data from MongoDB.
- * Keeps: admin users, real staff users, settings, Bosta mappings & cities.
- * Does NOT touch Shopify — run catalog sync after connecting credentials.
+ * Remove test / transactional OMS data from MongoDB.
+ * Keeps: staff users, settings, Bosta mappings & cities, catalog (unless test SKUs),
+ * HR/accounting masters.
+ * Does NOT touch Shopify — re-import orders after a full wipe.
  *
- * Usage: node scripts/purge-test-data.js
+ * Usage:
+ *   node scripts/purge-test-data.js              # seed/test fixtures only
+ *   node scripts/purge-test-data.js --all-orders # wipe ALL orders + related transactional data
  */
 import dotenv from 'dotenv';
 dotenv.config();
@@ -20,24 +23,15 @@ import CogsBatch from '../src/models/CogsBatch.js';
 import DiscrepancyAlert from '../src/models/DiscrepancyAlert.js';
 import WebhookReceipt from '../src/models/WebhookReceipt.js';
 import BostaStatusMapping from '../src/models/BostaStatusMapping.js';
-import Settings from '../src/models/Settings.js';
+import BostaReturn from '../src/models/BostaReturn.js';
+import PaymobReceived from '../src/models/PaymobReceived.js';
+import Notification from '../src/models/Notification.js';
 
-const TEST_PRODUCT_IDS = [/test-1/i, /Product\/test/i];
-const TEST_VARIANT_IDS = [/test-1/i, /test-2/i, /Variant\/test/i];
-const TEST_SKUS = [/^TEST-SKU/i];
-const TEST_ORDER_IDS = [/^test-order/i, /^webhook-test/i];
-const TEST_CUSTOMER_PHONES = ['+201000000001', 'unknown'];
-const TEST_CUSTOMER_EMAILS = [/test@/i, /@test\.local$/i];
 const TEST_USER_EMAILS = ['om@test.local', 'sm@test.local'];
+const ALL_ORDERS = process.argv.includes('--all-orders');
 
-function matchesAny(value, patterns) {
-  if (!value) return false;
-  const str = String(value);
-  return patterns.some((p) => (p instanceof RegExp ? p.test(str) : str === p));
-}
-
-async function purge() {
-  await connectDatabase();
+async function purgeSeedFixtures() {
+  const counts = {};
 
   const testProducts = await Product.find({
     $or: [
@@ -68,16 +62,13 @@ async function purge() {
 
   const testCustomers = await Customer.find({
     $or: [
-      { phone: { $in: TEST_CUSTOMER_PHONES } },
-      { phone: '+201111111111' },
+      { phone: { $in: ['+201000000001', 'unknown', '+201111111111'] } },
       { email: { $regex: /test@/i } },
       { fullName: { $regex: /^Test /i } },
       { fullName: 'Webhook Test' },
     ],
   });
   const testCustomerIds = testCustomers.map((c) => c._id);
-
-  const counts = {};
 
   if (testOrderIds.length) {
     counts.orderStatusHistory = (
@@ -108,22 +99,56 @@ async function purge() {
     }
   }
 
-  counts.testUsers = (
-    await User.deleteMany({ email: { $in: TEST_USER_EMAILS } })
-  ).deletedCount;
-
+  counts.testUsers = (await User.deleteMany({ email: { $in: TEST_USER_EMAILS } })).deletedCount;
   counts.testBostaMappings = (
     await BostaStatusMapping.deleteMany({ bostaState: 'TEST_STATE' })
   ).deletedCount;
-
   counts.webhookReceipts = (
     await WebhookReceipt.deleteMany({
-      $or: [
-        { externalId: { $regex: /test/i } },
-        { topic: { $regex: /test/i } },
-      ],
+      $or: [{ externalId: { $regex: /test/i } }, { topic: { $regex: /test/i } }],
     })
   ).deletedCount;
+
+  return counts;
+}
+
+async function purgeAllOrders() {
+  const counts = {};
+
+  counts.orderStatusHistory = (await OrderStatusHistory.deleteMany({})).deletedCount;
+  counts.orders = (await Order.deleteMany({})).deletedCount;
+  counts.bostaReturns = (await BostaReturn.deleteMany({})).deletedCount;
+  counts.paymobReceived = (await PaymobReceived.deleteMany({})).deletedCount;
+  counts.orderNotifications = (
+    await Notification.deleteMany({
+      $or: [{ orderId: { $exists: true, $ne: null } }, { type: { $in: ['new_order', 'order_verified', 'shipment_created', 'failed_delivery', 'return_to_origin', 'order_callback_due'] } }],
+    })
+  ).deletedCount;
+  counts.webhookReceipts = (await WebhookReceipt.deleteMany({})).deletedCount;
+
+  // Customers with no remaining orders
+  const customers = await Customer.find({}).select('_id').lean();
+  const customerIds = customers.map((c) => c._id);
+  if (customerIds.length) {
+    const withOrders = await Order.distinct('customerId');
+    const withOrderSet = new Set(withOrders.map(String));
+    const orphanIds = customerIds.filter((id) => !withOrderSet.has(String(id)));
+    if (orphanIds.length) {
+      counts.customers = (await Customer.deleteMany({ _id: { $in: orphanIds } })).deletedCount;
+    }
+  }
+
+  // Also remove seed fixtures (test products/users)
+  const seed = await purgeSeedFixtures();
+  return { ...seed, ...counts };
+}
+
+async function purge() {
+  await connectDatabase();
+
+  console.log(ALL_ORDERS ? 'Purging ALL orders + transactional OMS data…' : 'Purging seed/test fixtures only…');
+
+  const counts = ALL_ORDERS ? await purgeAllOrders() : await purgeSeedFixtures();
 
   console.log('Purge complete:', counts);
   console.log('Remaining:', {
@@ -131,6 +156,7 @@ async function purge() {
     variants: await Variant.countDocuments(),
     orders: await Order.countDocuments(),
     customers: await Customer.countDocuments(),
+    users: await User.countDocuments(),
   });
 
   await disconnectDatabase();

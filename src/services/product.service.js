@@ -6,16 +6,30 @@ import DiscrepancyAlert from '../models/DiscrepancyAlert.js';
 
 export async function listVariants({ search, lowStockOnly, limit = 50, skip = 0, activeOnly = true }) {
   const filter = {};
+  let productIdsFromTitle = null;
+
   if (search) {
+    const regex = { $regex: search, $options: 'i' };
+    productIdsFromTitle = await Product.find({ title: regex }).distinct('_id');
     filter.$or = [
-      { sku: { $regex: search, $options: 'i' } },
-      { title: { $regex: search, $options: 'i' } },
+      { sku: regex },
+      { title: regex },
+      { color: regex },
+      ...(productIdsFromTitle.length ? [{ productId: { $in: productIdsFromTitle } }] : []),
     ];
   }
 
   if (activeOnly) {
     const activeProductIds = await Product.find({ status: 'active' }).distinct('_id');
-    filter.productId = { $in: activeProductIds };
+    if (filter.productId?.$in) {
+      const allow = new Set(activeProductIds.map(String));
+      filter.productId.$in = filter.productId.$in.filter((id) => allow.has(String(id)));
+    } else if (filter.$or) {
+      filter.$and = [{ $or: filter.$or }, { productId: { $in: activeProductIds } }];
+      delete filter.$or;
+    } else {
+      filter.productId = { $in: activeProductIds };
+    }
   }
 
   if (lowStockOnly) {

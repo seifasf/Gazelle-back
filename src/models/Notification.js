@@ -4,6 +4,7 @@ import { USER_ROLES } from '../constants/index.js';
 export const NOTIFICATION_TYPES = [
   'new_order',
   'order_verified',
+  'order_callback_due',
   'shipment_created',
   'failed_delivery',
   'return_to_origin',

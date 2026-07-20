@@ -123,7 +123,15 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
     if (totalCogsSnapshot != null) fresh.totalCogsSnapshot = totalCogsSnapshot;
     if (!fresh.assignedOrdersManagerId) fresh.assignedOrdersManagerId = actorUserId;
     if (shippingMethod) fresh.shippingMethod = shippingMethod;
+    fresh.delayedUntil = undefined;
+    fresh.delayNote = undefined;
+    fresh.delayNotifiedOn = undefined;
     await fresh.save({ session });
+    await Order.updateOne(
+      { _id: fresh._id },
+      { $unset: { delayedUntil: 1, delayNote: 1, delayNotifiedOn: 1 } },
+      { session }
+    );
 
     if (fresh.orderSource === 'manual') {
       await reserveStockForOrder(fresh._id, fresh.items, session);
@@ -546,6 +554,95 @@ export async function claimOrder(orderId, actorUserId, role) {
   );
 }
 
+/**
+ * Customer asked to delay — stay in pending_verification until callback day.
+ * @param {string} delayedUntil - YYYY-MM-DD (Cairo business day)
+ */
+export async function delayOrder(orderId, actorUserId, { delayedUntil, note }) {
+  const order = await Order.findById(orderId);
+  if (!order) {
+    const err = new Error('Order not found');
+    err.statusCode = 404;
+    throw err;
+  }
+  if (order.internalStatus !== 'pending_verification') {
+    const err = new Error('Only pending verification orders can be delayed');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const ymd = String(delayedUntil || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) {
+    const err = new Error('delayedUntil must be YYYY-MM-DD');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  // Store as noon UTC-ish for the Cairo calendar day via Egypt offset approximation:
+  // Use start-of-day Cairo by constructing ISO with +03:00 (EET/EEST approx; fine for date-only).
+  const until = new Date(`${ymd}T12:00:00+03:00`);
+  if (Number.isNaN(until.getTime())) {
+    const err = new Error('Invalid delay date');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const todayYmd = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Cairo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+  if (ymd < todayYmd) {
+    const err = new Error('Delay date must be today or later');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  order.delayedUntil = until;
+  order.delayNote = typeof note === 'string' ? note.trim().slice(0, 500) : '';
+  order.delayNotifiedOn = undefined;
+  if (!order.assignedOrdersManagerId) order.assignedOrdersManagerId = actorUserId;
+  order.verificationLog.push({
+    outcome: 'no_response',
+    note: `Delayed until ${ymd}${order.delayNote ? ` — ${order.delayNote}` : ''}`,
+    actorUserId,
+  });
+  await order.save();
+  return order;
+}
+
+/**
+ * Daily job: notify OM for delays due today (Cairo).
+ */
+export async function processDelayCallbacksDue() {
+  const { notifyOrderCallbackDue } = await import('./notification.service.js');
+  const todayYmd = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Cairo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+
+  const dayStart = new Date(`${todayYmd}T00:00:00+03:00`);
+  const dayEnd = new Date(`${todayYmd}T23:59:59.999+03:00`);
+
+  const due = await Order.find({
+    internalStatus: 'pending_verification',
+    delayedUntil: { $gte: dayStart, $lte: dayEnd },
+    $or: [{ delayNotifiedOn: { $exists: false } }, { delayNotifiedOn: null }, { delayNotifiedOn: { $ne: todayYmd } }],
+  }).limit(200);
+
+  let notified = 0;
+  for (const order of due) {
+    await notifyOrderCallbackDue(order);
+    order.delayNotifiedOn = todayYmd;
+    await order.save();
+    notified += 1;
+  }
+  return { date: todayYmd, notified };
+}
+
 export default {
   verifyOrder,
   cancelOrder,
@@ -561,4 +658,6 @@ export default {
   listOrders,
   getOrderStatusHistory,
   claimOrder,
+  delayOrder,
+  processDelayCallbacksDue,
 };

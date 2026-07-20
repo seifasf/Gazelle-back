@@ -54,4 +54,16 @@ export async function exportAuditLog(req, res, next) {
   }
 }
 
-export default { dashboard, profitability, auditLog, exportProfitability, exportAuditLog };
+export async function topSellers(req, res, next) {
+  try {
+    const report = await reportsService.getTopSellersByUnits({
+      month: req.query.month,
+      limit: Number(req.query.limit) || 40,
+    });
+    res.json({ data: report });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export default { dashboard, profitability, auditLog, exportProfitability, exportAuditLog, topSellers };

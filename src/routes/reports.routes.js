@@ -1,11 +1,19 @@
 import { Router } from 'express';
 import * as reportsController from '../controllers/reports.controller.js';
 import { authenticate } from '../middleware/auth.js';
-import { adminOnly } from '../middleware/rbac.js';
+import { adminOnly, requireRoles } from '../middleware/rbac.js';
 
 const router = Router();
 
-router.use(authenticate, adminOnly);
+router.use(authenticate);
+
+router.get(
+  '/top-sellers',
+  requireRoles('admin', 'orders_manager'),
+  reportsController.topSellers
+);
+
+router.use(adminOnly);
 
 router.get('/dashboard', reportsController.dashboard);
 router.get('/profitability', reportsController.profitability);

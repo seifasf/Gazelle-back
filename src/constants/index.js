@@ -69,6 +69,7 @@ export const JOB_NAMES = {
   CHECK_RESTOCK_NEEDED: 'check-restock-needed',
   CHECK_SLOW_MOVERS: 'check-slow-movers',
   SHOPIFY_ORDERS_SYNC: 'shopify-orders-sync',
+  ORDER_DELAY_CALLBACKS: 'order-delay-callbacks',
 };
 
 export const PO_STATUSES = [

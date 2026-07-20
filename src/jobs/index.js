@@ -124,6 +124,13 @@ export function registerJobs(agenda) {
     return result;
   });
 
+  agenda.define(JOB_NAMES.ORDER_DELAY_CALLBACKS, async () => {
+    const orderService = await import('../services/order.service.js');
+    const result = await orderService.processDelayCallbacksDue();
+    logger.info(result, 'Order delay callbacks processed');
+    return result;
+  });
+
   logger.info('Agenda jobs registered');
 }
 
@@ -135,6 +142,8 @@ export async function scheduleRecurringJobs(agenda) {
   await agenda.every('30 minutes', JOB_NAMES.BOSTA_RETURNS_SYNC);
   await agenda.every('24 hours', JOB_NAMES.CHECK_RESTOCK_NEEDED);
   await agenda.every('24 hours', JOB_NAMES.CHECK_SLOW_MOVERS);
+  // ~08:00 Cairo daily (cron uses server local; also safe to run every day morning window)
+  await agenda.every('0 5 * * *', JOB_NAMES.ORDER_DELAY_CALLBACKS);
   logger.info('Agenda recurring jobs scheduled');
 }
 
