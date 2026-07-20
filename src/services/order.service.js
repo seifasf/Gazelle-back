@@ -515,11 +515,23 @@ export async function listOrders({ status, search, orderSource, shippingMethod, 
 
       filter.$or = [
         { shopifyOrderId: regex },
+        { bostaTrackingNumber: regex },
+        { bostaDeliveryId: regex },
         { 'shippingAddress.fullName': regex },
         { 'shippingAddress.phone': regex },
         { 'shippingAddress.city': regex },
         ...(customerIds.length ? [{ customerId: { $in: customerIds } }] : []),
       ];
+      // Allow searching with a leading # (UI shows Shopify as #123…).
+      const digits = term.replace(/^#/, '').trim();
+      if (digits && digits !== term) {
+        const digitsRegex = { $regex: escapeRegex(digits), $options: 'i' };
+        filter.$or.push(
+          { shopifyOrderId: digitsRegex },
+          { bostaTrackingNumber: digitsRegex },
+          { bostaDeliveryId: digitsRegex }
+        );
+      }
     }
   }
   const [orders, total] = await Promise.all([
