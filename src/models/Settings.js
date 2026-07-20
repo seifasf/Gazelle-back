@@ -22,7 +22,7 @@ const settingsSchema = new mongoose.Schema(
     bostaLastSyncAt: Date,
     bostaLastWebhookAt: Date,
     bostaConnectionHealthy: { type: Boolean, default: false },
-    bostaCities: [{ id: String, name: String, nameAr: String, code: String }],
+    bostaCities: [{ id: String, name: String, nameAr: String, code: String, alias: String }],
     bostaPollingThresholdHours: { type: Number, default: 48 },
     defaultLowStockThreshold: { type: Number, default: 5 },
   },

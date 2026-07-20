@@ -12,7 +12,7 @@ export async function fetchBostaCities({ force = false } = {}) {
   }
 
   const response = await bostaRequest('/cities');
-  const cities = response?.data?.list || response?.data || response?.list || [];
+  const cities = (response?.data?.list || response?.data || response?.list || []).filter(Boolean);
 
   citiesCache = cities;
   cacheTime = Date.now();
@@ -21,10 +21,11 @@ export async function fetchBostaCities({ force = false } = {}) {
     { key: 'global' },
     {
       bostaCities: cities.map((c) => ({
-        id: c._id,
+        id: c._id || c.id,
         name: c.name,
         nameAr: c.nameAr,
         code: c.code,
+        alias: c.alias || '',
       })),
       bostaConnectionHealthy: true,
       bostaLastSyncAt: new Date(),

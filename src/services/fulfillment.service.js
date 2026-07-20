@@ -60,8 +60,10 @@ export async function createBostaShipmentForOrder(orderId, actorUserId) {
     throw err;
   }
 
-  if (!order.shippingAddress?.line1 || !order.shippingAddress?.city) {
-    const err = new Error('Order is missing a shipping address (street + city required for Bosta)');
+  if (!order.shippingAddress?.line1 || !String(order.shippingAddress?.city || '').trim()) {
+    const err = new Error(
+      'Order is missing street or city. Open the order, fix the shipping address, then retry.'
+    );
     err.statusCode = 400;
     throw err;
   }
