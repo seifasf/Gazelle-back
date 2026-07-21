@@ -3,6 +3,8 @@ import PaymobReceived from '../models/PaymobReceived.js';
 import OrderStatusHistory from '../models/OrderStatusHistory.js';
 import InventoryLedger from '../models/InventoryLedger.js';
 import Employee from '../models/Employee.js';
+// Register for Order.populate('customerId') in returns analytics (dashboard details).
+import '../models/Customer.js';
 import * as kpiService from './kpi.service.js';
 import logger from '../utils/logger.js';
 
@@ -1216,4 +1218,11 @@ export async function getTopSellersByUnits({ month, limit = 40 } = {}) {
   };
 }
 
-export default { getDashboardStats, getProfitabilityReport, getAuditLog, getTopSellersByUnits };
+export default {
+  getDashboardStats,
+  getDashboardSummary,
+  getDashboardDetails,
+  getProfitabilityReport,
+  getAuditLog,
+  getTopSellersByUnits,
+};
