@@ -69,6 +69,52 @@ export async function lookupVariantBySku(req, res, next) {
   }
 }
 
+export async function lookupVariantFamilyBySku(req, res, next) {
+  try {
+    const family = await productService.findVariantFamilyBySku(req.query.sku);
+    if (!family) return res.status(404).json({ error: 'Variant not found' });
+    res.json({ data: family });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function stockIntakeBatch(req, res, next) {
+  try {
+    const { items, reasonCode, note, syncToShopify } = req.body || {};
+    if (!Array.isArray(items) || !items.length) {
+      return res.status(400).json({ error: 'items array is required' });
+    }
+
+    const results = [];
+    for (const item of items) {
+      const quantity = Number(item.quantity);
+      if (!item.variantId || !(quantity > 0)) continue;
+      const result = await orderService.stockIntake({
+        variantId: item.variantId,
+        quantity,
+        reasonCode,
+        note,
+        actorUserId: req.user._id,
+        syncToShopify: syncToShopify !== false,
+      });
+      results.push({
+        variantId: item.variantId,
+        quantity,
+        ...result,
+      });
+    }
+
+    if (!results.length) {
+      return res.status(400).json({ error: 'Enter at least one size quantity greater than 0' });
+    }
+
+    res.json({ data: { results, count: results.length } });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getLedger(req, res, next) {
   try {
     const result = await productService.getVariantLedger(req.params.id, req.query);
@@ -165,7 +211,9 @@ export default {
   getVariant,
   adjustStock,
   stockIntake,
+  stockIntakeBatch,
   lookupVariantBySku,
+  lookupVariantFamilyBySku,
   getLedger,
   listDiscrepancies,
   getQueueCounts,

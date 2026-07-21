@@ -120,20 +120,33 @@ async function transitionToward(orderId, fromStatus, toStatus, meta) {
         'in_transit',
         'failed_delivery',
       ],
+      returned_awaiting_receipt: [
+        'verified_ready_for_shipping',
+        'picked_up_by_bosta',
+        'in_transit',
+        'failed_delivery',
+        'returning_to_origin',
+      ],
     },
     picked_up_by_bosta: {
       delivered: ['in_transit'],
       failed_delivery: ['in_transit'],
       returning_to_origin: ['in_transit', 'failed_delivery'],
+      returned_awaiting_receipt: ['in_transit', 'failed_delivery', 'returning_to_origin'],
     },
     in_transit: {
       returning_to_origin: ['failed_delivery'],
+      returned_awaiting_receipt: ['failed_delivery', 'returning_to_origin'],
     },
     verified_ready_for_shipping: {
       in_transit: ['picked_up_by_bosta'],
       delivered: ['picked_up_by_bosta', 'in_transit'],
       failed_delivery: ['picked_up_by_bosta', 'in_transit'],
       returning_to_origin: ['picked_up_by_bosta', 'in_transit', 'failed_delivery'],
+      returned_awaiting_receipt: ['picked_up_by_bosta', 'in_transit', 'failed_delivery', 'returning_to_origin'],
+    },
+    delivered: {
+      returned_awaiting_receipt: ['returning_to_origin'],
     },
   };
 
@@ -206,7 +219,7 @@ export async function processBostaStatusUpdate({ deliveryId, state, payload, not
   }
 
   // Do not reopen terminal delivered orders except for return signals.
-  if (order.internalStatus === 'delivered' && internalStatus !== 'returning_to_origin') {
+  if (order.internalStatus === 'delivered' && !['returning_to_origin', 'returned_awaiting_receipt'].includes(internalStatus)) {
     logger.info(
       { orderId: order._id, state: stateLabel, internalStatus },
       'Ignoring Bosta update on delivered order'
@@ -250,6 +263,7 @@ export async function pollStuckOrders(thresholdHours = 2) {
         'in_transit',
         'failed_delivery',
         'returning_to_origin',
+        'returned_awaiting_receipt',
       ],
     },
     $or: [

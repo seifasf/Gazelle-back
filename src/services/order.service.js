@@ -271,7 +271,11 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
       throw err;
     }
 
-    assertTransition(order.internalStatus, 'returned_to_stock');
+    if (order.internalStatus !== 'returned_awaiting_receipt') {
+      const err = new Error('Only warehouse-received returns can be confirmed back into stock');
+      err.statusCode = 400;
+      throw err;
+    }
 
     // Post-delivery return vs RTO (never delivered)
     const ledgerDocs = await applyLedgerEntries(

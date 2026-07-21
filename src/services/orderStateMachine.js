@@ -12,9 +12,10 @@ export const ORDER_TRANSITIONS = {
   picked_up_by_bosta: ['in_transit', 'delivered', 'failed_delivery', 'returning_to_origin'],
   in_transit: ['delivered', 'failed_delivery', 'returning_to_origin'],
   failed_delivery: ['in_transit', 'returning_to_origin', 'delivered'],
-  returning_to_origin: ['returned_to_stock'],
+  returning_to_origin: ['returned_awaiting_receipt'],
+  returned_awaiting_receipt: ['returned_to_stock'],
   // Customer return / RTO after a successful delivery is handled via Bosta return sync + stock confirm.
-  delivered: ['returning_to_origin'],
+  delivered: ['returning_to_origin', 'returned_awaiting_receipt'],
   returned_to_stock: [],
   cancelled: [],
 };

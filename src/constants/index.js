@@ -8,6 +8,7 @@ export const ORDER_STATUSES = [
   'delivered',
   'failed_delivery',
   'returning_to_origin',
+  'returned_awaiting_receipt',
   'returned_to_stock',
   'cancelled',
 ];

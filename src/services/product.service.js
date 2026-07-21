@@ -118,7 +118,82 @@ export async function findVariantBySku(sku) {
       .populate('productId', 'title imageUrl vendor productType shopifyProductId defaultFactoryId');
   }
 
+  // Prefix match: typing "GMK-20" finds "GMK-20-38", "GMK-20-39", …
+  if (!variant) {
+    const prefixHits = await Variant.find({
+      $or: [
+        { sku: new RegExp(`^${escaped}([-_/]|$)`, 'i') },
+        { barcode: new RegExp(`^${escaped}([-_/]|$)`, 'i') },
+      ],
+    })
+      .limit(1)
+      .populate('productId', 'title imageUrl vendor productType shopifyProductId defaultFactoryId');
+    variant = prefixHits[0] || null;
+  }
+
   return variant;
+}
+
+function sortSizes(a, b) {
+  const sa = String(a?.size ?? '');
+  const sb = String(b?.size ?? '');
+  const na = Number(sa);
+  const nb = Number(sb);
+  if (Number.isFinite(na) && Number.isFinite(nb) && String(na) === sa && String(nb) === sb) {
+    return na - nb;
+  }
+  return sa.localeCompare(sb, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+/**
+ * Resolve a SKU/barcode to the product family (all sizes), optionally same color.
+ * Used by stock intake so staff enter one SKU and fill qty per size.
+ */
+export async function findVariantFamilyBySku(sku) {
+  const matched = await findVariantBySku(sku);
+  if (!matched) return null;
+
+  const product = matched.productId;
+  const productId = product?._id || matched.productId;
+
+  let variants = await Variant.find({ productId })
+    .select(
+      'sku barcode title color size imageUrl realStock onHoldStock sellingPrice productId shopifyVariantId'
+    )
+    .lean();
+
+  // Prefer same colorway when the product has multiple colors.
+  if (matched.color) {
+    const sameColor = variants.filter((v) => v.color === matched.color);
+    if (sameColor.length > 0) variants = sameColor;
+  }
+
+  variants.sort(sortSizes);
+
+  return {
+    matched: {
+      _id: matched._id,
+      sku: matched.sku,
+      barcode: matched.barcode,
+      title: matched.title,
+      color: matched.color,
+      size: matched.size,
+      imageUrl: matched.imageUrl,
+      realStock: matched.realStock,
+      onHoldStock: matched.onHoldStock,
+    },
+    product:
+      product && typeof product === 'object'
+        ? {
+            _id: product._id,
+            title: product.title,
+            imageUrl: product.imageUrl,
+            vendor: product.vendor,
+            productType: product.productType,
+          }
+        : null,
+    variants,
+  };
 }
 
 export async function listCatalog({
@@ -328,6 +403,7 @@ export default {
   listVariants,
   getVariantById,
   findVariantBySku,
+  findVariantFamilyBySku,
   updateVariantCogs,
   addCogsBatch,
   getVariantLedger,

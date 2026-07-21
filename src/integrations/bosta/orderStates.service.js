@@ -194,6 +194,7 @@ export async function syncOrderStatesFromBosta({ limit = 80 } = {}) {
         'in_transit',
         'failed_delivery',
         'returning_to_origin',
+        'returned_awaiting_receipt',
         'delivered',
       ],
     },

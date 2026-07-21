@@ -752,6 +752,8 @@ async function returnsAnalyticsForRange({ from, to }) {
 /** Short in-memory cache so dashboard refreshes feel instant. */
 const dashboardCache = new Map();
 const DASHBOARD_CACHE_TTL_MS = 45_000;
+const dashboardSummaryCache = new Map();
+const dashboardDetailsCache = new Map();
 
 function dashboardCacheKey(query) {
   return JSON.stringify({
@@ -762,22 +764,15 @@ function dashboardCacheKey(query) {
   });
 }
 
-export async function getDashboardStats(query = {}) {
-  const cacheKey = dashboardCacheKey(query);
-  const cached = dashboardCache.get(cacheKey);
-  if (cached && Date.now() - cached.at < DASHBOARD_CACHE_TTL_MS) {
-    return cached.data;
+function setBoundedCache(cache, key, data) {
+  cache.set(key, { at: Date.now(), data });
+  if (cache.size > 40) {
+    const oldest = cache.keys().next().value;
+    cache.delete(oldest);
   }
+}
 
-  const preset = query?.preset || 'day';
-  const range = rangeForPreset({
-    preset,
-    date: query?.date,
-    from: query?.from,
-    to: query?.to,
-  });
-
-  // Skip unused employee KPIs and live Bosta COD paging — keep dashboard on local DB.
+async function buildDashboardSummary(range, preset) {
   const [
     ordersByStatus,
     deliveredCount,
@@ -786,10 +781,6 @@ export async function getDashboardStats(query = {}) {
     paymobReceived,
     codCollected,
     leftToCollect,
-    dailyBreakdown,
-    topProducts,
-    orderMix,
-    returnsAnalytics,
     gazelleReturnCount,
   ] = await Promise.all([
     Order.aggregate([{ $group: { _id: '$internalStatus', count: { $sum: 1 } } }]),
@@ -799,10 +790,6 @@ export async function getDashboardStats(query = {}) {
     paymobReceivedForRange(range),
     codCollectedForRange(range),
     codLeftToCollect(range),
-    dailyBreakdownForRange(range),
-    topProductsForRange(range),
-    orderMixForRange(range),
-    returnsAnalyticsForRange(range),
     gazelleReturnCountForRange(range),
   ]);
 
@@ -813,16 +800,14 @@ export async function getDashboardStats(query = {}) {
   const revenueExclShipping = payment?.totals?.revenueExclShipping ?? 0;
   const ordersPlaced = payment?.totalCount ?? 0;
   const returns = {
-    amount: returnsAnalytics.amount ?? 0,
-    count: returnsAnalytics.count ?? 0,
-    bostaCount: returnsAnalytics.source === 'bosta' ? returnsAnalytics.count : 0,
-    bostaAmount: returnsAnalytics.source === 'bosta' ? returnsAnalytics.amount : 0,
-    byType: returnsAnalytics.byType,
+    amount: 0,
+    count: 0,
+    bostaCount: 0,
+    bostaAmount: 0,
+    byType: {},
     gazelleCount: gazelleReturnCount,
   };
 
-  // Return rate = Gazelle warehouse returns ÷ Gazelle orders in range only.
-  // Never use Bosta account-wide RTOs (WooCommerce etc.) against Shopify order counts.
   const returnRate =
     ordersPlaced > 0 && gazelleReturnCount > 0
       ? pct(gazelleReturnCount, ordersPlaced)
@@ -830,7 +815,7 @@ export async function getDashboardStats(query = {}) {
         ? 0
         : null;
 
-  const result = {
+  return {
     ordersByStatus: statusMap,
     deliverySuccessRate,
     deliveredCount,
@@ -848,8 +833,6 @@ export async function getDashboardStats(query = {}) {
     codCollected,
     leftToCollect,
     returns,
-    returnsAnalytics,
-    orderMix,
     returnRate,
     returnRateBasis: {
       returns: gazelleReturnCount,
@@ -857,11 +840,31 @@ export async function getDashboardStats(query = {}) {
       source: 'gazelle_warehouse',
       real: true,
     },
-    dailyBreakdown,
     ordersPlaced,
-    // Backward-compatible aliases
     revenueToday: revenueExclShipping,
     revenueCustom: revenueExclShipping,
+  };
+}
+
+async function buildDashboardDetails(range) {
+  const [dailyBreakdown, topProducts, orderMix, returnsAnalytics] = await Promise.all([
+    dailyBreakdownForRange(range),
+    topProductsForRange(range),
+    orderMixForRange(range),
+    returnsAnalyticsForRange(range),
+  ]);
+
+  return {
+    dailyBreakdown,
+    orderMix,
+    returnsAnalytics,
+    returns: {
+      amount: returnsAnalytics.amount ?? 0,
+      count: returnsAnalytics.count ?? 0,
+      bostaCount: returnsAnalytics.source === 'bosta' ? returnsAnalytics.count : 0,
+      bostaAmount: returnsAnalytics.source === 'bosta' ? returnsAnalytics.amount : 0,
+      byType: returnsAnalytics.byType,
+    },
     productAnalytics: {
       topProducts: topProducts || [],
       range: { from: range.from, to: range.to },
@@ -871,13 +874,77 @@ export async function getDashboardStats(query = {}) {
       range: { from: range.from, to: range.to },
     },
   };
+}
 
-  dashboardCache.set(cacheKey, { at: Date.now(), data: result });
-  // Bound cache size
-  if (dashboardCache.size > 40) {
-    const oldest = dashboardCache.keys().next().value;
-    dashboardCache.delete(oldest);
+export async function getDashboardSummary(query = {}) {
+  const cacheKey = dashboardCacheKey(query);
+  const cached = dashboardSummaryCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < DASHBOARD_CACHE_TTL_MS) {
+    return cached.data;
   }
+
+  const preset = query?.preset || 'day';
+  const range = rangeForPreset({
+    preset,
+    date: query?.date,
+    from: query?.from,
+    to: query?.to,
+  });
+
+  const result = await buildDashboardSummary(range, preset);
+  setBoundedCache(dashboardSummaryCache, cacheKey, result);
+  return result;
+}
+
+export async function getDashboardDetails(query = {}) {
+  const cacheKey = dashboardCacheKey(query);
+  const cached = dashboardDetailsCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < DASHBOARD_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  const preset = query?.preset || 'day';
+  const range = rangeForPreset({
+    preset,
+    date: query?.date,
+    from: query?.from,
+    to: query?.to,
+  });
+
+  const result = await buildDashboardDetails(range, preset);
+  setBoundedCache(dashboardDetailsCache, cacheKey, result);
+  return result;
+}
+
+export async function getDashboardStats(query = {}) {
+  const cacheKey = dashboardCacheKey(query);
+  const cached = dashboardCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < DASHBOARD_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  const preset = query?.preset || 'day';
+  const range = rangeForPreset({
+    preset,
+    date: query?.date,
+    from: query?.from,
+    to: query?.to,
+  });
+
+  const [summary, details] = await Promise.all([
+    buildDashboardSummary(range, preset),
+    buildDashboardDetails(range),
+  ]);
+  const result = {
+    ...summary,
+    ...details,
+    returns: {
+      ...details.returns,
+      gazelleCount: summary.returnRateBasis?.returns ?? 0,
+    },
+  };
+
+  setBoundedCache(dashboardCache, cacheKey, result);
 
   return result;
 }

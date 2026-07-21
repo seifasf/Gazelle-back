@@ -21,7 +21,7 @@ export function barcodeValueForVariant(variant) {
 /**
  * Code128 bars only (SKU printed as separate text under the bars, like warehouse stickers).
  */
-export async function renderCode128Png(text, { scale = 3, height = 12, includetext = false } = {}) {
+export async function renderCode128Png(text, { scale = 4, height = 16, includetext = false } = {}) {
   const value = String(text || '').trim();
   if (!value) {
     const err = new Error('Barcode text is required');
@@ -38,8 +38,8 @@ export async function renderCode128Png(text, { scale = 3, height = 12, includete
     textxalign: 'center',
     textsize: 11,
     backgroundcolor: 'FFFFFF',
-    paddingwidth: 2,
-    paddingheight: 2,
+    paddingwidth: 1,
+    paddingheight: 1,
   });
 }
 
@@ -52,8 +52,8 @@ export async function getVariantBarcodePng(variantId) {
   }
 
   const value = barcodeValueForVariant(variant);
-  // Slightly taller bars for the 58×40mm sticker; no embedded text under bars.
-  const png = await renderCode128Png(value, { scale: 3, height: 14, includetext: false });
+  // Dense, tall bars sized for the full 58×40mm sticker width.
+  const png = await renderCode128Png(value, { scale: 5, height: 18, includetext: false });
   return {
     png,
     value,
@@ -75,7 +75,6 @@ export async function buildBarcodeLabelHtml(variantId, copies = 1) {
   const n = Math.min(Math.max(Number(copies) || 1, 1), 200);
   const imgSrc = `data:image/png;base64,${png.toString('base64')}`;
 
-  // Title line can include color/size when present (same product content as before).
   const detailParts = [title, color, size ? `Size ${size}` : null].filter(Boolean);
   const detailText = detailParts.join(' — ');
 
@@ -100,7 +99,8 @@ export async function buildBarcodeLabelHtml(variantId, copies = 1) {
       margin: 0;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
+    html, body {
+      width: ${LABEL_WIDTH_MM}mm;
       margin: 0;
       font-family: Arial, Helvetica, sans-serif;
       color: #000;
@@ -109,28 +109,25 @@ export async function buildBarcodeLabelHtml(variantId, copies = 1) {
     .toolbar {
       margin: 12px;
       font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif;
+      width: auto;
     }
     .toolbar button {
       font-size: 14px; padding: 8px 14px; cursor: pointer;
       background: #111; color: #fff; border: 0; border-radius: 6px;
     }
     .sheet {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 4mm;
-      padding: 4mm;
-      align-content: flex-start;
+      display: block;
+      padding: 0;
     }
     .label {
       width: ${LABEL_WIDTH_MM}mm;
       height: ${LABEL_HEIGHT_MM}mm;
-      padding: 2.5mm 3mm 2mm;
-      border: 0.3mm solid #ddd;
-      border-radius: 1.5mm;
+      padding: 1.5mm 1.8mm 1.2mm;
+      border: 0.2mm solid #ccc;
       display: flex;
       flex-direction: column;
-      align-items: center;
-      justify-content: flex-start;
+      align-items: stretch;
+      justify-content: space-between;
       text-align: center;
       overflow: hidden;
       page-break-inside: avoid;
@@ -139,49 +136,58 @@ export async function buildBarcodeLabelHtml(variantId, copies = 1) {
     }
     .barcode-wrap {
       width: 100%;
-      flex: 0 0 auto;
+      flex: 1 1 auto;
       display: flex;
       justify-content: center;
       align-items: center;
-      min-height: 14mm;
-      max-height: 18mm;
+      min-height: 0;
+      max-height: 22mm;
     }
     .barcode {
-      width: 92%;
-      max-width: 52mm;
-      height: 15mm;
+      width: 100%;
+      height: 100%;
+      max-height: 21mm;
       object-fit: fill;
       image-rendering: pixelated;
+      display: block;
     }
     .sku {
-      margin-top: 1.2mm;
-      font-family: "Times New Roman", Times, Georgia, serif;
-      font-size: 9.5pt;
-      font-weight: 700;
-      letter-spacing: 0.02em;
-      line-height: 1.15;
+      flex: 0 0 auto;
+      margin-top: 0.6mm;
+      font-family: "Courier New", Courier, monospace;
+      font-size: 13pt;
+      font-weight: 800;
+      letter-spacing: 0.01em;
+      line-height: 1.05;
       max-width: 100%;
       word-break: break-all;
+      text-transform: none;
     }
     .title {
-      margin-top: 0.8mm;
+      flex: 0 0 auto;
+      margin-top: 0.4mm;
       font-family: Arial, Helvetica, sans-serif;
-      font-size: 7.5pt;
-      font-weight: 400;
-      line-height: 1.2;
+      font-size: 7pt;
+      font-weight: 500;
+      line-height: 1.1;
       max-width: 100%;
       overflow: hidden;
       display: -webkit-box;
-      -webkit-line-clamp: 3;
+      -webkit-line-clamp: 2;
       -webkit-box-orient: vertical;
     }
     @media print {
       .toolbar { display: none !important; }
-      body { margin: 0; background: #fff; }
-      .sheet { padding: 0; gap: 0; }
+      html, body {
+        width: ${LABEL_WIDTH_MM}mm;
+        margin: 0;
+        background: #fff;
+      }
+      .sheet { padding: 0; }
       .label {
         border: none;
-        border-radius: 0;
+        width: ${LABEL_WIDTH_MM}mm;
+        height: ${LABEL_HEIGHT_MM}mm;
         page-break-after: always;
         break-after: page;
       }
