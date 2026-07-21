@@ -33,6 +33,14 @@ async function resolveVariant(lineItem) {
   return variant;
 }
 
+function shopifyOrderNameFromPayload(payload = {}) {
+  if (payload.name && String(payload.name).trim()) return String(payload.name).trim();
+  if (payload.order_number != null && String(payload.order_number).trim()) {
+    return `#${String(payload.order_number).trim()}`;
+  }
+  return null;
+}
+
 /** Map a Shopify order payload to an internal OMS status for historical imports. */
 function mapImportedOrderStatus(payload) {
   if (payload.cancelled_at) return 'cancelled';
@@ -150,6 +158,9 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
       [
         {
           shopifyOrderId,
+          ...(shopifyOrderNameFromPayload(payload)
+            ? { shopifyOrderName: shopifyOrderNameFromPayload(payload) }
+            : {}),
           customerId: customer._id,
           shippingAddress,
           shippingMethod: 'bosta',
@@ -223,6 +234,11 @@ export async function handleOrdersUpdated(payload) {
   const order = await Order.findOne({ shopifyOrderId });
   if (!order) return null;
 
+  const name = shopifyOrderNameFromPayload(payload);
+  if (name && order.shopifyOrderName !== name) {
+    order.shopifyOrderName = name;
+  }
+
   const shipping = payload.shipping_address;
   if (shipping) {
     order.shippingAddress = {
@@ -233,8 +249,8 @@ export async function handleOrdersUpdated(payload) {
       zone: shipping.province,
       phone: shipping.phone,
     };
-    await order.save();
   }
+  await order.save();
   return order;
 }
 

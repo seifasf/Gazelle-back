@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs';
+import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import Factory from '../models/Factory.js';
@@ -7,6 +8,33 @@ import Product from '../models/Product.js';
 import Variant from '../models/Variant.js';
 import { OPEN_PO_STATUSES, FACTORY_AVG_LEAD_TIME_MIN_SAMPLES } from '../constants/index.js';
 import { stockIntake } from './order.service.js';
+import logger from '../utils/logger.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const LOGO_PATH = resolve(__dirname, '../assets/gazelle-logo.png');
+
+function logoBase64Raw() {
+  try {
+    return readFileSync(LOGO_PATH).toString('base64');
+  } catch {
+    return null;
+  }
+}
+
+async function fetchImageAsBase64(url) {
+  if (!url || typeof url !== 'string') return null;
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!response.ok) return null;
+    const buf = Buffer.from(await response.arrayBuffer());
+    const ctype = response.headers.get('content-type') || '';
+    const extension = ctype.includes('jpeg') || ctype.includes('jpg') ? 'jpeg' : 'png';
+    return { base64: buf.toString('base64'), extension };
+  } catch (err) {
+    logger.warn({ err: err.message, url }, 'PO excel image fetch failed');
+    return null;
+  }
+}
 
 function addDays(date, days) {
   const d = new Date(date);
@@ -418,36 +446,39 @@ export async function exportPurchaseOrderExcel(id) {
   });
 
   sheet.columns = [
-    { key: 'a', width: 18 },
-    { key: 'b', width: 32 },
-    { key: 'c', width: 14 },
+    { key: 'img', width: 12 },
+    { key: 'a', width: 16 },
+    { key: 'b', width: 28 },
+    { key: 'c', width: 12 },
     { key: 'd', width: 10 },
-    { key: 'e', width: 12 },
+    { key: 'e', width: 10 },
     { key: 'f', width: 12 },
     { key: 'g', width: 14 },
   ];
 
-  // Brand logo
+  // Brand logo via base64 (portable across deploy environments).
   try {
-    const logoPath = resolve(dirname(fileURLToPath(import.meta.url)), '../assets/gazelle-logo.png');
-    const logoId = workbook.addImage({
-      filename: logoPath,
-      extension: 'png',
-    });
-    sheet.addImage(logoId, {
-      tl: { col: 0, row: 0 },
-      ext: { width: 120, height: 48 },
-    });
+    const logoB64 = logoBase64Raw();
+    if (logoB64) {
+      const logoId = workbook.addImage({
+        base64: logoB64,
+        extension: 'png',
+      });
+      sheet.addImage(logoId, {
+        tl: { col: 0, row: 0 },
+        ext: { width: 120, height: 48 },
+      });
+    }
   } catch {
     // logo optional
   }
 
-  sheet.mergeCells('C1', 'G1');
+  sheet.mergeCells('C1', 'H1');
   sheet.getCell('C1').value = 'GAZELLE — PRODUCTION QUOTATION';
   sheet.getCell('C1').font = { bold: true, size: 16, color: { argb: 'FF1C1917' } };
   sheet.getCell('C1').alignment = { vertical: 'middle' };
 
-  sheet.mergeCells('C2', 'G2');
+  sheet.mergeCells('C2', 'H2');
   sheet.getCell('C2').value = 'Purchase / production order summary';
   sheet.getCell('C2').font = { size: 11, color: { argb: 'FF6B6560' } };
 
@@ -459,17 +490,17 @@ export async function exportPurchaseOrderExcel(id) {
   const currency = po.factoryId?.currency || po.items?.[0]?.currency || 'EGP';
   const issued = po.createdAt ? new Date(po.createdAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
 
-  sheet.getRow(4).values = ['Quotation #', po.poNumber, '', 'Date', issued];
-  sheet.getRow(5).values = ['Factory', factoryName, '', 'Status', po.status || '—'];
-  sheet.getRow(6).values = ['Contact', factoryContact || '—', '', 'Expected', expected];
-  sheet.getRow(7).values = ['Notes', po.notes || '—'];
-  sheet.mergeCells('B7', 'G7');
+  sheet.getRow(4).values = ['', 'Quotation #', po.poNumber, '', 'Date', issued];
+  sheet.getRow(5).values = ['', 'Factory', factoryName, '', 'Status', po.status || '—'];
+  sheet.getRow(6).values = ['', 'Contact', factoryContact || '—', '', 'Expected', expected];
+  sheet.getRow(7).values = ['', 'Notes', po.notes || '—'];
+  sheet.mergeCells('C7', 'H7');
   for (const r of [4, 5, 6, 7]) {
-    sheet.getCell(`A${r}`).font = { bold: true, color: { argb: 'FF6B6560' } };
+    sheet.getCell(`B${r}`).font = { bold: true, color: { argb: 'FF6B6560' } };
   }
 
   const headerRow = 9;
-  sheet.getRow(headerRow).values = ['SKU', 'Product', 'Color', 'Size', 'Qty', 'Unit cost', 'Line total'];
+  sheet.getRow(headerRow).values = ['Image', 'SKU', 'Product', 'Color', 'Size', 'Qty', 'Unit cost', 'Line total'];
   sheet.getRow(headerRow).font = { bold: true, color: { argb: 'FF1C1917' } };
   sheet.getRow(headerRow).fill = {
     type: 'pattern',
@@ -487,46 +518,68 @@ export async function exportPurchaseOrderExcel(id) {
     const lineTotal = (Number(item.quantity) || 0) * (Number(item.unitCost) || 0);
     totalQty += Number(item.quantity) || 0;
     grandTotal += lineTotal;
-    sheet.getRow(rowIdx).values = [
+    const excelRow = sheet.getRow(rowIdx);
+    excelRow.values = [
+      '',
       item.sku,
-      item.title || '',
-      item.color || '',
-      item.size || '',
+      item.title || item.variantId?.title || '',
+      item.color || item.variantId?.color || '',
+      item.size || item.variantId?.size || '',
       item.quantity,
       Number(item.unitCost) || 0,
       lineTotal,
     ];
-    sheet.getCell(`F${rowIdx}`).numFmt = '#,##0.00';
+    excelRow.height = 52;
     sheet.getCell(`G${rowIdx}`).numFmt = '#,##0.00';
+    sheet.getCell(`H${rowIdx}`).numFmt = '#,##0.00';
+
+    const imageUrl = item.variantId?.imageUrl || item.imageUrl || null;
+    const img = await fetchImageAsBase64(imageUrl);
+    if (img) {
+      try {
+        const imageId = workbook.addImage({
+          base64: img.base64,
+          extension: img.extension,
+        });
+        sheet.addImage(imageId, {
+          tl: { col: 0, row: rowIdx - 1 },
+          ext: { width: 56, height: 56 },
+          editAs: 'oneCell',
+        });
+      } catch {
+        // skip broken image
+      }
+    }
+
     rowIdx += 1;
   }
 
   const summaryStart = rowIdx + 1;
-  sheet.getCell(`A${summaryStart}`).value = 'ORDER SUMMARY';
-  sheet.getCell(`A${summaryStart}`).font = { bold: true, size: 12 };
-  sheet.mergeCells(`A${summaryStart}`, `C${summaryStart}`);
+  sheet.getCell(`B${summaryStart}`).value = 'ORDER SUMMARY';
+  sheet.getCell(`B${summaryStart}`).font = { bold: true, size: 12 };
+  sheet.mergeCells(`B${summaryStart}`, `D${summaryStart}`);
 
-  sheet.getRow(summaryStart + 1).values = ['Line items', (po.items || []).length];
-  sheet.getRow(summaryStart + 2).values = ['Total units', totalQty];
-  sheet.getRow(summaryStart + 3).values = ['Currency', currency];
-  sheet.getRow(summaryStart + 4).values = ['Grand total (EGP)', grandTotal];
-  sheet.getCell(`B${summaryStart + 4}`).numFmt = '#,##0.00';
-  sheet.getCell(`A${summaryStart + 4}`).font = { bold: true };
-  sheet.getCell(`B${summaryStart + 4}`).font = { bold: true, size: 13 };
-  sheet.getCell(`A${summaryStart + 4}`).fill = {
-    type: 'pattern',
-    pattern: 'solid',
-    fgColor: { argb: 'FFFFF6D1' },
-  };
+  sheet.getRow(summaryStart + 1).values = ['', 'Line items', (po.items || []).length];
+  sheet.getRow(summaryStart + 2).values = ['', 'Total units', totalQty];
+  sheet.getRow(summaryStart + 3).values = ['', 'Currency', currency];
+  sheet.getRow(summaryStart + 4).values = ['', 'Grand total (EGP)', grandTotal];
+  sheet.getCell(`C${summaryStart + 4}`).numFmt = '#,##0.00';
+  sheet.getCell(`B${summaryStart + 4}`).font = { bold: true };
+  sheet.getCell(`C${summaryStart + 4}`).font = { bold: true, size: 13 };
   sheet.getCell(`B${summaryStart + 4}`).fill = {
     type: 'pattern',
     pattern: 'solid',
     fgColor: { argb: 'FFFFF6D1' },
   };
+  sheet.getCell(`C${summaryStart + 4}`).fill = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFFFF6D1' },
+  };
 
-  sheet.getCell(`A${summaryStart + 6}`).value = 'Prepared by Gazelle OMS · Quotation for factory production';
-  sheet.getCell(`A${summaryStart + 6}`).font = { italic: true, size: 9, color: { argb: 'FF9A938B' } };
-  sheet.mergeCells(`A${summaryStart + 6}`, `G${summaryStart + 6}`);
+  sheet.getCell(`B${summaryStart + 6}`).value = 'Prepared by Gazelle OMS · Quotation for factory production';
+  sheet.getCell(`B${summaryStart + 6}`).font = { italic: true, size: 9, color: { argb: 'FF9A938B' } };
+  sheet.mergeCells(`B${summaryStart + 6}`, `H${summaryStart + 6}`);
 
   const buffer = await workbook.xlsx.writeBuffer();
   return { buffer, filename: `${po.poNumber}-quotation.xlsx` };

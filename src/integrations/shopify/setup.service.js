@@ -112,6 +112,11 @@ export async function importRecentShopifyOrders({ limit = 50 } = {}) {
     try {
       const existing = await Order.findOne({ shopifyOrderId: String(order.id) });
       if (existing) {
+        const name = order.name || (order.order_number != null ? `#${order.order_number}` : null);
+        if (name && existing.shopifyOrderName !== name) {
+          existing.shopifyOrderName = name;
+          await existing.save();
+        }
         results.skipped += 1;
         continue;
       }
@@ -166,6 +171,11 @@ export async function importShopifyOrdersSince({ since, maxItems = Infinity } = 
           try {
             const existing = await Order.findOne({ shopifyOrderId: String(order.id) });
             if (existing) {
+              const name = order.name || (order.order_number != null ? `#${order.order_number}` : null);
+              if (name && existing.shopifyOrderName !== name) {
+                existing.shopifyOrderName = name;
+                await existing.save();
+              }
               results.skipped += 1;
               continue;
             }
@@ -208,6 +218,11 @@ export async function importAllShopifyOrders({ maxItems = Infinity } = {}) {
         try {
           const existing = await Order.findOne({ shopifyOrderId: String(order.id) });
           if (existing) {
+            const name = order.name || (order.order_number != null ? `#${order.order_number}` : null);
+            if (name && existing.shopifyOrderName !== name) {
+              existing.shopifyOrderName = name;
+              await existing.save();
+            }
             results.skipped += 1;
             continue;
           }
@@ -252,6 +267,11 @@ export async function importOpenShopifyOrders({ maxItems = Infinity } = {}) {
           try {
             const existing = await Order.findOne({ shopifyOrderId: String(order.id) });
             if (existing) {
+              const name = order.name || (order.order_number != null ? `#${order.order_number}` : null);
+              if (name && existing.shopifyOrderName !== name) {
+                existing.shopifyOrderName = name;
+                await existing.save();
+              }
               results.skipped += 1;
               continue;
             }
@@ -300,7 +320,11 @@ export async function ensureOrdersLoaded() {
     logger.warn({ err }, 'Startup order catch-up failed');
     return null;
   });
-  return { skipped: 'already_loaded', orders: existing, catchUp };
+  const names = await backfillShopifyOrderNames({ maxItems: 500 }).catch((err) => {
+    logger.warn({ err }, 'Shopify order-name backfill failed');
+    return null;
+  });
+  return { skipped: 'already_loaded', orders: existing, catchUp, names };
 }
 
 function mapShopifyCustomer(sc) {
@@ -380,6 +404,51 @@ export async function importAllShopifyCustomers({ maxItems = Infinity } = {}) {
   return results;
 }
 
+/**
+ * Backfill shopifyOrderName (#43899) for OMS orders missing it.
+ * Uses REST fields `name` / `order_number` — newest first, page_size via limit=250.
+ */
+export async function backfillShopifyOrderNames({ maxItems = 500 } = {}) {
+  if (!(await isShopifyConfigured())) {
+    return { skipped: 'not_configured' };
+  }
+
+  const missing = await Order.countDocuments({
+    orderSource: 'shopify',
+    $or: [{ shopifyOrderName: { $exists: false } }, { shopifyOrderName: null }, { shopifyOrderName: '' }],
+  });
+  if (!missing) return { fetched: 0, updated: 0, missing: 0 };
+
+  const results = { fetched: 0, updated: 0, missing };
+  await shopifyRestPaginated(
+    '/orders.json?status=any&limit=250&order=created_at%20desc&fields=id,name,order_number',
+    'orders',
+    {
+      maxItems,
+      onPage: async (orders) => {
+        for (const order of orders) {
+          results.fetched += 1;
+          const name =
+            (order.name && String(order.name).trim()) ||
+            (order.order_number != null ? `#${order.order_number}` : null);
+          if (!name) continue;
+          const res = await Order.updateOne(
+            {
+              shopifyOrderId: String(order.id),
+              $or: [{ shopifyOrderName: { $exists: false } }, { shopifyOrderName: null }, { shopifyOrderName: '' }],
+            },
+            { $set: { shopifyOrderName: name } }
+          );
+          if (res.modifiedCount) results.updated += 1;
+        }
+      },
+    }
+  );
+
+  logger.info(results, 'Shopify order names backfill complete');
+  return results;
+}
+
 export async function fullShopifySync({ importOrders = true, orderLimit = 50 } = {}) {
   await testShopifyConnection();
   const catalog = await syncCatalogFromShopify();
@@ -399,5 +468,6 @@ export default {
   importOpenShopifyOrders,
   importAllShopifyCustomers,
   ensureOrdersLoaded,
+  backfillShopifyOrderNames,
   fullShopifySync,
 };

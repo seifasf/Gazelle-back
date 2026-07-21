@@ -44,6 +44,8 @@ const verificationLogSchema = new mongoose.Schema(
 const orderSchema = new mongoose.Schema(
   {
     shopifyOrderId: { type: String, required: true, unique: true, index: true },
+    /** Human Shopify name e.g. "#43899" — preferred for UI; shopifyOrderId stays the Admin API id. */
+    shopifyOrderName: { type: String, trim: true, index: true },
     orderSource: { type: String, enum: ORDER_SOURCES, default: 'shopify', index: true },
     manualSource: { type: String, enum: MANUAL_ORDER_SOURCES },
     customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true },

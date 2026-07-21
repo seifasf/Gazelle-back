@@ -75,16 +75,19 @@ export async function buildBarcodeLabelHtml(variantId, copies = 1) {
   const n = Math.min(Math.max(Number(copies) || 1, 1), 200);
   const imgSrc = `data:image/png;base64,${png.toString('base64')}`;
 
-  const detailParts = [title, color, size ? `Size ${size}` : null].filter(Boolean);
-  const detailText = detailParts.join(' — ');
-
   const labels = Array.from({ length: n }, () => `
     <div class="label">
       <div class="barcode-wrap">
         <img class="barcode" src="${imgSrc}" alt="${escapeHtml(value)}" />
       </div>
       <div class="sku">${escapeHtml(sku)}</div>
-      <div class="title">${escapeHtml(detailText)}</div>
+      <div class="meta">
+        <div class="title">${escapeHtml(title || '')}</div>
+        <div class="attrs">
+          ${color ? `<span class="attr">${escapeHtml(color)}</span>` : ''}
+          ${size ? `<span class="attr">Size ${escapeHtml(String(size))}</span>` : ''}
+        </div>
+      </div>
     </div>
   `).join('');
 
@@ -141,21 +144,21 @@ export async function buildBarcodeLabelHtml(variantId, copies = 1) {
       justify-content: center;
       align-items: center;
       min-height: 0;
-      max-height: 22mm;
+      max-height: 17mm;
     }
     .barcode {
       width: 100%;
       height: 100%;
-      max-height: 21mm;
+      max-height: 16mm;
       object-fit: fill;
       image-rendering: pixelated;
       display: block;
     }
     .sku {
       flex: 0 0 auto;
-      margin-top: 0.6mm;
+      margin-top: 0.4mm;
       font-family: "Courier New", Courier, monospace;
-      font-size: 13pt;
+      font-size: 12pt;
       font-weight: 800;
       letter-spacing: 0.01em;
       line-height: 1.05;
@@ -163,18 +166,33 @@ export async function buildBarcodeLabelHtml(variantId, copies = 1) {
       word-break: break-all;
       text-transform: none;
     }
-    .title {
+    .meta {
       flex: 0 0 auto;
-      margin-top: 0.4mm;
+      margin-top: 0.3mm;
+      text-align: center;
+    }
+    .title {
       font-family: Arial, Helvetica, sans-serif;
-      font-size: 7pt;
-      font-weight: 500;
+      font-size: 10.5pt;
+      font-weight: 800;
       line-height: 1.1;
       max-width: 100%;
       overflow: hidden;
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .attrs {
+      margin-top: 0.2mm;
+      display: flex;
+      justify-content: center;
+      gap: 1.2mm;
+      flex-wrap: wrap;
+    }
+    .attr {
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 10pt;
+      font-weight: 800;
+      line-height: 1.1;
     }
     @media print {
       .toolbar { display: none !important; }
