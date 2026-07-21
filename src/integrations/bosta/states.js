@@ -38,6 +38,7 @@ export const RETURN_EXCEPTION_CODES = new Set([
 /** Shipment types that mean "out for return" when state is Picked up (41). */
 const RETURN_TYPES = new Set([
   'RTO',
+  'RETURN_TO_ORIGIN',
   'CRP',
   'CUSTOMER_RETURN_PICKUP',
   'EXCHANGE',
@@ -115,9 +116,22 @@ export function normalizeBostaType(type) {
 export function resolveInternalStatusForBosta(state, { type, exceptionCode } = {}) {
   const code = extractBostaStateCode(state);
   const typeToken = normalizeBostaType(type);
+  const isReturnType = typeToken && RETURN_TYPES.has(typeToken);
+
+  // Any mid-flight return shipment (RTO / CRP / Exchange) stays in the return lane.
+  if (isReturnType && code != null && ![BOSTA_STATE.DELIVERED, BOSTA_STATE.RETURNED_TO_BUSINESS, BOSTA_STATE.TERMINATED, BOSTA_STATE.RETURNED_TO_STOCK, BOSTA_STATE.AWAITING_YOUR_ACTION, BOSTA_STATE.CANCELED].includes(code)) {
+    if (code === BOSTA_STATE.EXCEPTION) {
+      const ex = exceptionCode != null ? Number(exceptionCode) : null;
+      if (ex != null && RETURN_EXCEPTION_CODES.has(ex)) return 'returning_to_origin';
+      return 'returning_to_origin';
+    }
+    if ([BOSTA_STATE.PICKED_UP, BOSTA_STATE.PICKING_UP_FROM_CONSIGNEE, BOSTA_STATE.PICKED_UP_FROM_CONSIGNEE, BOSTA_STATE.RECEIVED_AT_WAREHOUSE, BOSTA_STATE.IN_TRANSIT_BETWEEN_HUBS, BOSTA_STATE.ROUTE_ASSIGNED, BOSTA_STATE.ON_HOLD].includes(code)) {
+      return 'returning_to_origin';
+    }
+  }
 
   if (code === BOSTA_STATE.PICKED_UP) {
-    if (typeToken && RETURN_TYPES.has(typeToken)) return 'returning_to_origin';
+    if (isReturnType) return 'returning_to_origin';
     return 'in_transit';
   }
 
@@ -128,7 +142,7 @@ export function resolveInternalStatusForBosta(state, { type, exceptionCode } = {
   if (code === BOSTA_STATE.EXCEPTION) {
     const ex = exceptionCode != null ? Number(exceptionCode) : null;
     if (ex != null && RETURN_EXCEPTION_CODES.has(ex)) return 'returning_to_origin';
-    if (typeToken && RETURN_TYPES.has(typeToken)) return 'returning_to_origin';
+    if (isReturnType) return 'returning_to_origin';
     return 'failed_delivery';
   }
 

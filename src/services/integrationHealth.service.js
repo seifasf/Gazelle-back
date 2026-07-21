@@ -50,9 +50,12 @@ export async function getIntegrationHealth() {
       pollingThresholdHours: settings?.bostaPollingThresholdHours ?? 2,
     },
     paymob: {
-      configured: Boolean(config.PAYMOB_HMAC_SECRET),
+      configured: Boolean(config.PAYMOB_HMAC_SECRET || config.PAYMOB_API_KEY),
+      apiConfigured: Boolean(config.PAYMOB_API_KEY),
+      hmacConfigured: Boolean(config.PAYMOB_HMAC_SECRET),
       healthy: Boolean(paymobWebhookLast?.createdAt),
       lastWebhookAt: paymobWebhookLast?.createdAt || null,
+      webhookUrl: `${String(config.APP_URL || '').replace(/\/$/, '')}/webhooks/paymob`,
     },
     queues: {
       pendingVerification: pendingVerify,

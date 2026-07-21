@@ -235,7 +235,21 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
 
 async function executeDelivered(order, { source, actorUserId, note }, session) {
   const ledgerEntries = buildDeliveryEntries(order._id, order.items);
-  await applyLedgerEntries(ledgerEntries, session);
+  try {
+    await applyLedgerEntries(ledgerEntries, session);
+  } catch (err) {
+    // Historical Shopify imports / Bosta backfill often never reserved hold stock.
+    // Still mark delivered so COD + courier status stay truthful; log the inventory gap.
+    if (source === 'bosta_webhook' || source === 'shopify_import') {
+      const logger = (await import('../utils/logger.js')).default;
+      logger.warn(
+        { err: err.message, orderId: order._id, source },
+        'Delivery stock ledger skipped (insufficient stock) — status still applied'
+      );
+    } else {
+      throw err;
+    }
+  }
   await transitionOrder(order, 'delivered', { source, actorUserId, note }, session);
   await Customer.updateOne({ _id: order.customerId }, { $inc: { lifetimeDelivered: 1 } }, { session });
   const delivered = await Order.findById(order._id).session(session);

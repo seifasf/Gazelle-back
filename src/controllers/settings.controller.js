@@ -97,9 +97,31 @@ export async function forceShopifySync(req, res, next) {
 
 export async function forceBostaStatesSync(req, res, next) {
   try {
+    const { backfillBostaSince, syncOrderStatesFromBosta } = await import(
+      '../integrations/bosta/orderStates.service.js'
+    );
+    const { syncBostaReturns } = await import('../integrations/bosta/returns.service.js');
+
+    // { since: '2026-07-01' } → full ingest from that date (status + COD + returns).
+    if (req.body?.since || req.body?.from) {
+      const since = req.body.since || req.body.from;
+      const endDate = req.body.to || req.body.endDate || undefined;
+      const backfill = await backfillBostaSince({ since, endDate });
+      const returns = await syncBostaReturns({
+        from: new Date(since),
+        to: endDate ? new Date(endDate) : new Date(),
+        maxPages: 60,
+      }).catch((err) => ({ error: err.message }));
+      return res.json({ data: { backfill, returns } });
+    }
+
     const agenda = getAgenda();
     await agenda.now(JOB_NAMES.BOSTA_ORDER_STATES_SYNC, {});
-    res.json({ queued: true, job: JOB_NAMES.BOSTA_ORDER_STATES_SYNC });
+    // Also kick an immediate lightweight sync so Settings button feels live.
+    const quick = await syncOrderStatesFromBosta({ limit: 120 }).catch((err) => ({
+      error: err.message,
+    }));
+    res.json({ queued: true, job: JOB_NAMES.BOSTA_ORDER_STATES_SYNC, quick });
   } catch (err) {
     next(err);
   }

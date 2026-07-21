@@ -1,4 +1,5 @@
 import Order from '../../models/Order.js';
+import '../../models/Customer.js';
 import { bostaRequest, isBostaConfigured } from './client.js';
 import { getDelivery } from './shipments.service.js';
 import { processBostaStatusUpdate } from './tracking.service.js';
@@ -106,14 +107,15 @@ async function linkAndSyncOrder(order, delivery, note) {
     await order.save();
   }
 
-  const fresh = await resolveLiveDelivery(order, delivery);
-  const state = fresh?.state || fresh?.status || delivery.state;
+  // Prefer the search payload (already has state/type/cod) — avoid extra getDelivery round-trips.
+  const payload = delivery?.state ? delivery : await resolveLiveDelivery(order, delivery);
+  const state = payload?.state || payload?.status || delivery.state;
   if (!state) return { orderId: order._id, linked: true, synced: false, reason: 'no_state' };
 
   await processBostaStatusUpdate({
     deliveryId: order.bostaDeliveryId || deliveryId,
     state,
-    payload: fresh || delivery,
+    payload: payload || delivery,
     note,
   });
 
@@ -130,11 +132,18 @@ async function linkAndSyncOrder(order, delivery, note) {
 /**
  * Pull live Bosta states into OMS orders.
  * Matches carefully (COD + date / reference) and never reuses one Bosta delivery on two OMS orders.
+ *
+ * @param {{ limit?: number, since?: Date|string|null }} opts
+ *   since — when set, only OMS orders placed on/after this date (and prefer Bosta
+ *   deliveries created in the same window).
  */
-export async function syncOrderStatesFromBosta({ limit = 80 } = {}) {
+export async function syncOrderStatesFromBosta({ limit = 80, since = null } = {}) {
   if (!isBostaConfigured()) {
     return { skipped: 'bosta_not_configured' };
   }
+
+  const sinceDate = since ? new Date(since) : null;
+  const sinceOk = sinceDate && !Number.isNaN(sinceDate.getTime()) ? sinceDate : null;
 
   const results = {
     refreshed: 0,
@@ -143,6 +152,7 @@ export async function syncOrderStatesFromBosta({ limit = 80 } = {}) {
     unmatched: 0,
     errors: [],
     samples: [],
+    since: sinceOk ? sinceOk.toISOString() : null,
   };
 
   const usedDeliveryIds = new Set(
@@ -151,14 +161,17 @@ export async function syncOrderStatesFromBosta({ limit = 80 } = {}) {
     ).map(String)
   );
 
-  // 1) Refresh already-linked shipments via tracking number.
-  const linkedOrders = await Order.find({
+  const linkedFilter = {
     $or: [
       { bostaDeliveryId: { $exists: true, $ne: null } },
       { bostaTrackingNumber: { $exists: true, $ne: null } },
     ],
     internalStatus: { $nin: ['cancelled', 'returned_to_stock'] },
-  })
+  };
+  if (sinceOk) linkedFilter.placedAt = { $gte: sinceOk };
+
+  // 1) Refresh already-linked shipments via tracking number.
+  const linkedOrders = await Order.find(linkedFilter)
     .sort({ lastStatusUpdateAt: 1, updatedAt: 1 })
     .limit(limit)
     .select('_id bostaDeliveryId bostaTrackingNumber bostaShipmentStatus internalStatus');
@@ -183,7 +196,7 @@ export async function syncOrderStatesFromBosta({ limit = 80 } = {}) {
   }
 
   // 2) Link unlinked orders with high-confidence phone matches.
-  const unlinked = await Order.find({
+  const unlinkedFilter = {
     $or: [{ bostaDeliveryId: null }, { bostaDeliveryId: { $exists: false } }],
     shippingMethod: { $ne: 'pickup' },
     internalStatus: {
@@ -198,7 +211,10 @@ export async function syncOrderStatesFromBosta({ limit = 80 } = {}) {
         'delivered',
       ],
     },
-  })
+  };
+  if (sinceOk) unlinkedFilter.placedAt = { $gte: sinceOk };
+
+  const unlinked = await Order.find(unlinkedFilter)
     .sort({ placedAt: -1 })
     .limit(limit)
     .populate('customerId', 'phone')
@@ -250,4 +266,181 @@ export async function syncOrderStatesFromBosta({ limit = 80 } = {}) {
   return results;
 }
 
-export default { syncOrderStatesFromBosta };
+const BACKFILL_STATES = [
+  'Delivered',
+  'Returned to business',
+  'Terminated',
+  'Exception',
+  'Canceled',
+];
+
+/**
+ * Bulk ingest Bosta delivery states into OMS from a start date (e.g. 2026-07-01).
+ * Pages Bosta by dashboard state labels, matches Gazelle orders (ref / tracking / phone+COD+date),
+ * then applies the same path as webhooks so COD + status land correctly.
+ */
+export async function backfillBostaSince({
+  since = '2026-07-01',
+  endDate = null,
+  maxPagesPerState = 40,
+} = {}) {
+  if (!isBostaConfigured()) {
+    return { skipped: 'bosta_not_configured' };
+  }
+
+  const sinceDate = new Date(since);
+  if (Number.isNaN(sinceDate.getTime())) {
+    const err = new Error('Invalid since date');
+    err.statusCode = 400;
+    throw err;
+  }
+  const end = endDate ? new Date(endDate) : new Date();
+  const startYmd = sinceDate.toISOString().slice(0, 10);
+  const endYmd = end.toISOString().slice(0, 10);
+
+  const results = {
+    since: sinceDate.toISOString(),
+    end: end.toISOString(),
+    fetched: 0,
+    linked: 0,
+    synced: 0,
+    codStamped: 0,
+    unmatched: 0,
+    errors: [],
+  };
+
+  const usedDeliveryIds = new Set(
+    (await Order.find({ bostaDeliveryId: { $ne: null } }).distinct('bostaDeliveryId')).map(String)
+  );
+
+  const orders = await Order.find({
+    placedAt: { $gte: sinceDate },
+    shippingMethod: { $ne: 'pickup' },
+    internalStatus: { $ne: 'cancelled' },
+  })
+    .populate('customerId', 'phone')
+    .select(
+      '_id shopifyOrderId placedAt paymentMethod totalSellingPrice shippingFee shippingAddress internalStatus bostaDeliveryId bostaTrackingNumber bostaShipmentStatus bostaCollectedAmount customerId'
+    );
+
+  const byId = new Map(orders.map((o) => [String(o._id), o]));
+  const byShopify = new Map(
+    orders.filter((o) => o.shopifyOrderId).map((o) => [String(o.shopifyOrderId), o])
+  );
+  const byTracking = new Map(
+    orders.filter((o) => o.bostaTrackingNumber).map((o) => [String(o.bostaTrackingNumber), o])
+  );
+  const byDelivery = new Map(
+    orders.filter((o) => o.bostaDeliveryId).map((o) => [String(o.bostaDeliveryId), o])
+  );
+  const byPhone = new Map();
+  for (const o of orders) {
+    const ph = normalizePhone(o.shippingAddress?.phone || o.customerId?.phone);
+    if (!ph) continue;
+    if (!byPhone.has(ph)) byPhone.set(ph, []);
+    byPhone.get(ph).push(o);
+  }
+
+  const seenDelivery = new Set();
+
+  for (const stateLabel of BACKFILL_STATES) {
+    for (let page = 0; page < maxPagesPerState; page += 1) {
+      let list = [];
+      try {
+        const response = await bostaRequest('/deliveries/search', {
+          method: 'POST',
+          body: {
+            page,
+            limit: 50,
+            state: stateLabel,
+            startDate: startYmd,
+            endDate: endYmd,
+          },
+        });
+        list = response?.data?.deliveries || response?.deliveries || [];
+      } catch (err) {
+        results.errors.push({ state: stateLabel, page, error: err.message });
+        logger.warn({ err, state: stateLabel, page }, 'Bosta backfill page failed');
+        break;
+      }
+      if (!list.length) break;
+
+      for (const delivery of list) {
+        const deliveryId = String(delivery._id || delivery.id || '');
+        if (!deliveryId || seenDelivery.has(deliveryId)) continue;
+        seenDelivery.add(deliveryId);
+        results.fetched += 1;
+
+        const tracking =
+          delivery.trackingNumber != null ? String(delivery.trackingNumber) : null;
+        const ref = String(delivery.businessReference || '').trim();
+
+        let order =
+          byDelivery.get(deliveryId) ||
+          (tracking ? byTracking.get(tracking) : null) ||
+          (ref && byId.has(ref) ? byId.get(ref) : null) ||
+          (ref && byShopify.has(ref) ? byShopify.get(ref) : null) ||
+          null;
+
+        if (!order) {
+          const ph = normalizePhone(delivery.receiver?.phone);
+          const candidates = ph ? byPhone.get(ph) || [] : [];
+          let best = null;
+          let bestScore = -Infinity;
+          for (const c of candidates) {
+            if (c.bostaDeliveryId && usedDeliveryIds.has(String(c.bostaDeliveryId))) {
+              if (String(c.bostaDeliveryId) !== deliveryId) continue;
+            }
+            const score = scoreDeliveryMatch(c, delivery);
+            if (score > bestScore) {
+              bestScore = score;
+              best = c;
+            }
+          }
+          if (best && bestScore >= 55) order = best;
+        }
+
+        if (!order) {
+          results.unmatched += 1;
+          continue;
+        }
+
+        if (order.bostaDeliveryId && String(order.bostaDeliveryId) !== deliveryId) {
+          // Already linked to a different shipment — skip to avoid clobbering.
+          if (usedDeliveryIds.has(deliveryId)) {
+            results.unmatched += 1;
+            continue;
+          }
+        }
+
+        try {
+          usedDeliveryIds.add(deliveryId);
+          const beforeCod = order.bostaCollectedAmount || 0;
+          await linkAndSyncOrder(order, delivery, `Bosta backfill since ${startYmd}`);
+          results.linked += 1;
+          results.synced += 1;
+          const refreshed = await Order.findById(order._id)
+            .select('bostaCollectedAmount')
+            .lean();
+          if ((refreshed?.bostaCollectedAmount || 0) > beforeCod) results.codStamped += 1;
+        } catch (err) {
+          results.errors.push({ orderId: order._id, deliveryId, error: err.message });
+        }
+      }
+
+      if (list.length < 50) break;
+    }
+  }
+
+  // Also refresh every already-linked order in the window (catches mid-flight states).
+  const linkedRefresh = await syncOrderStatesFromBosta({
+    limit: Math.max(orders.filter((o) => o.bostaDeliveryId).length, 50),
+    since: sinceDate,
+  });
+  results.linkedRefresh = linkedRefresh;
+
+  logger.info(results, 'Bosta backfill since date finished');
+  return results;
+}
+
+export default { syncOrderStatesFromBosta, backfillBostaSince };

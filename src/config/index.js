@@ -21,6 +21,8 @@ const envSchema = z.object({
   BOSTA_API_KEY: z.string().optional(),
   BOSTA_API_BASE_URL: z.string().default('https://app.bosta.co/api/v2'),
   PAYMOB_API_KEY: z.string().optional(),
+  PAYMOB_PUBLIC_KEY: z.string().optional(),
+  PAYMOB_SECRET_KEY: z.string().optional(),
   PAYMOB_HMAC_SECRET: z.string().optional(),
   APP_URL: z.string().default('http://localhost:4000'),
   /** Comma-separated allowed origins for CORS (e.g. https://gazelle.onrender.com). Empty = allow all. */

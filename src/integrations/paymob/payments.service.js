@@ -56,6 +56,7 @@ function extractAmountEgp(payload) {
 
 function extractReceivedAt(payload) {
   const raw =
+    payload?.paid_at ||
     payload?.created_at ||
     payload?.createdAt ||
     payload?.transaction?.created_at ||

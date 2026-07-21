@@ -208,27 +208,10 @@ async function codCollectedForRange({ from, to }) {
     return { amount: bostaRow.amount ?? 0, count: bostaRow.count ?? 0, source: 'bosta', real: true };
   }
 
-  // Fallback: live Bosta delivered COD for the same date range only.
-  try {
-    const { sumDeliveredCod } = await import('../integrations/bosta/cod.service.js');
-    const live = await Promise.race([
-      sumDeliveredCod({ from, to, maxPages: 20 }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Bosta COD timeout')), 4000)),
-    ]);
-    if ((live?.count || 0) > 0) {
-      return {
-        amount: live.amount ?? 0,
-        count: live.count ?? 0,
-        source: 'bosta_api',
-        real: true,
-      };
-    }
-    return { amount: 0, count: 0, source: 'bosta_api', real: true };
-  } catch (err) {
-    logger.warn({ err }, 'Bosta COD for range skipped');
-  }
-
-  return { amount: null, count: 0, source: 'unavailable', real: false };
+  // Do NOT fall back to account-wide Bosta COD — that mixes WooCommerce / other
+  // channels on the same Bosta account and skews Gazelle dashboard numbers.
+  // COD is stamped onto OMS orders via webhooks + backfill (bostaCollected*).
+  return { amount: 0, count: 0, source: 'bosta', real: true };
 }
 
 /**
