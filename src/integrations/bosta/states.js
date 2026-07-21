@@ -30,19 +30,34 @@ export const BOSTA_STATE = {
   ON_HOLD: 105,
 };
 
+/** Return-exception NDR codes (business return attempt failed). */
+export const RETURN_EXCEPTION_CODES = new Set([
+  20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+]);
+
+/** Shipment types that mean "out for return" when state is Picked up (41). */
+const RETURN_TYPES = new Set([
+  'RTO',
+  'CRP',
+  'CUSTOMER_RETURN_PICKUP',
+  'EXCHANGE',
+  'SIGN_AND_RETURN',
+]);
+
 /** Built-in fallback when DB BostaStatusMapping has no row. */
 export const DEFAULT_STATE_TO_INTERNAL = {
   [BOSTA_STATE.PICKUP_REQUESTED]: 'picked_up_by_bosta',
   [BOSTA_STATE.WAITING_FOR_ROUTE]: 'picked_up_by_bosta',
   [BOSTA_STATE.ROUTE_ASSIGNED]: 'picked_up_by_bosta',
   [BOSTA_STATE.PICKED_UP_FROM_BUSINESS]: 'picked_up_by_bosta',
-  [BOSTA_STATE.PICKING_UP_FROM_CONSIGNEE]: 'in_transit',
-  [BOSTA_STATE.PICKED_UP_FROM_CONSIGNEE]: 'picked_up_by_bosta',
+  [BOSTA_STATE.PICKING_UP_FROM_CONSIGNEE]: 'returning_to_origin',
+  [BOSTA_STATE.PICKED_UP_FROM_CONSIGNEE]: 'returning_to_origin',
   [BOSTA_STATE.RECEIVED_AT_WAREHOUSE]: 'in_transit',
   [BOSTA_STATE.FULFILLED]: 'in_transit',
   [BOSTA_STATE.IN_TRANSIT_BETWEEN_HUBS]: 'in_transit',
   [BOSTA_STATE.PICKING_UP_CASH]: 'in_transit',
-  [BOSTA_STATE.PICKED_UP]: 'picked_up_by_bosta',
+  // 41 is type-dependent — see resolveInternalStatusForBosta(); fallback = out for delivery.
+  [BOSTA_STATE.PICKED_UP]: 'in_transit',
   [BOSTA_STATE.DELIVERED]: 'delivered',
   [BOSTA_STATE.RETURNED_TO_BUSINESS]: 'returned_awaiting_receipt',
   [BOSTA_STATE.EXCEPTION]: 'failed_delivery',
@@ -52,9 +67,11 @@ export const DEFAULT_STATE_TO_INTERNAL = {
   [BOSTA_STATE.AWAITING_YOUR_ACTION]: 'returned_awaiting_receipt',
   [BOSTA_STATE.LOST]: 'failed_delivery',
   [BOSTA_STATE.DAMAGED]: 'failed_delivery',
-  [BOSTA_STATE.ON_HOLD]: 'failed_delivery',
+  [BOSTA_STATE.ON_HOLD]: 'in_transit',
+  [BOSTA_STATE.INVESTIGATION]: 'failed_delivery',
+  [BOSTA_STATE.ARCHIVED]: 'returned_awaiting_receipt',
   // String aliases (legacy seed + webhook variants)
-  PICKED_UP: 'picked_up_by_bosta',
+  PICKED_UP: 'in_transit',
   IN_TRANSIT: 'in_transit',
   DELIVERED: 'delivered',
   FAILED: 'failed_delivery',
@@ -66,8 +83,57 @@ export const DEFAULT_STATE_TO_INTERNAL = {
   Terminated: 'returned_awaiting_receipt',
   Delivered: 'delivered',
   'In transit': 'in_transit',
-  'Picked up': 'picked_up_by_bosta',
+  'Picked up': 'in_transit',
 };
+
+export function normalizeBostaType(type) {
+  if (type == null || type === '') return null;
+  if (typeof type === 'string') return type.trim().toUpperCase().replace(/\s+/g, '_');
+  if (typeof type === 'number') {
+    // Common Bosta type codes: 10 SEND, 15 EXCHANGE, 20 CRP, 25 RTO, …
+    const byCode = {
+      10: 'SEND',
+      15: 'EXCHANGE',
+      20: 'CUSTOMER_RETURN_PICKUP',
+      25: 'RTO',
+      30: 'SIGN_AND_RETURN',
+    };
+    return byCode[type] || String(type);
+  }
+  if (typeof type === 'object') {
+    const value = type.value || type.name || type.label;
+    if (value) return normalizeBostaType(String(value));
+    if (type.code != null) return normalizeBostaType(type.code);
+  }
+  return null;
+}
+
+/**
+ * Map Bosta webhook/API state → Gazelle status using numeric codes + type
+ * (per Bosta webhook docs: state 41 means out-for-delivery vs out-for-return by type).
+ */
+export function resolveInternalStatusForBosta(state, { type, exceptionCode } = {}) {
+  const code = extractBostaStateCode(state);
+  const typeToken = normalizeBostaType(type);
+
+  if (code === BOSTA_STATE.PICKED_UP) {
+    if (typeToken && RETURN_TYPES.has(typeToken)) return 'returning_to_origin';
+    return 'in_transit';
+  }
+
+  if (code === BOSTA_STATE.PICKING_UP_FROM_CONSIGNEE || code === BOSTA_STATE.PICKED_UP_FROM_CONSIGNEE) {
+    return 'returning_to_origin';
+  }
+
+  if (code === BOSTA_STATE.EXCEPTION) {
+    const ex = exceptionCode != null ? Number(exceptionCode) : null;
+    if (ex != null && RETURN_EXCEPTION_CODES.has(ex)) return 'returning_to_origin';
+    if (typeToken && RETURN_TYPES.has(typeToken)) return 'returning_to_origin';
+    return 'failed_delivery';
+  }
+
+  return defaultInternalStatusForState(state);
+}
 
 export const RETURN_STATE_CODES = new Set([
   BOSTA_STATE.RETURNED_TO_BUSINESS,
@@ -167,11 +233,14 @@ export default {
   BOSTA_STATE,
   DEFAULT_STATE_TO_INTERNAL,
   RETURN_STATE_CODES,
+  RETURN_EXCEPTION_CODES,
   RETURN_SEARCH_STATES,
   extractBostaStateTokens,
   extractBostaStateCode,
   isReturnState,
   extractBostaReturnedAt,
   defaultInternalStatusForState,
+  resolveInternalStatusForBosta,
+  normalizeBostaType,
   parseBostaDate,
 };

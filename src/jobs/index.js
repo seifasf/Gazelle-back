@@ -118,8 +118,10 @@ export function registerJobs(agenda) {
   agenda.define(JOB_NAMES.CHECK_SLOW_MOVERS, async () => checkSlowMovers());
 
   agenda.define(JOB_NAMES.SHOPIFY_ORDERS_SYNC, async () => {
-    const since = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
-    const result = await importShopifyOrdersSince({ since, maxItems: 250 });
+    // Pull every order in the window (newest first). A low maxItems + asc sort
+    // previously left recent Shopify sales out of the OMS / dashboard.
+    const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+    const result = await importShopifyOrdersSince({ since });
     logger.info(result, 'Scheduled Shopify orders sync finished');
     return result;
   });

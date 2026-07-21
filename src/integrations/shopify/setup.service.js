@@ -101,7 +101,10 @@ export async function importRecentShopifyOrders({ limit = 50 } = {}) {
     throw err;
   }
 
-  const data = await shopifyRest(`/orders.json?status=any&limit=${limit}&order=created_at desc`);
+  // Newest first — Shopify Admin default; never pull a random/oldest page.
+  const data = await shopifyRest(
+    `/orders.json?status=any&limit=${limit}&order=created_at%20desc`
+  );
   const orders = data.orders || [];
   const results = { imported: 0, skipped: 0, errors: [] };
 
@@ -128,8 +131,12 @@ export async function importRecentShopifyOrders({ limit = 50 } = {}) {
 /**
  * Pull Shopify orders created since `since` (ISO date or Date).
  * Used by the live sync job so yesterday/today sales appear without manual import.
+ *
+ * IMPORTANT: sort `created_at desc` (newest first). With asc + a maxItems cap,
+ * Shopify returns the oldest page of the window and recent sales never land in OMS.
+ * Paginate the full window by default (maxItems = Infinity).
  */
-export async function importShopifyOrdersSince({ since, maxItems = 250 } = {}) {
+export async function importShopifyOrdersSince({ since, maxItems = Infinity } = {}) {
   if (!(await isShopifyConfigured())) {
     const err = new Error('Shopify credentials not configured');
     err.statusCode = 400;
@@ -146,8 +153,10 @@ export async function importShopifyOrdersSince({ since, maxItems = 250 } = {}) {
   const createdAtMin = encodeURIComponent(sinceDate.toISOString());
   const results = { fetched: 0, imported: 0, skipped: 0, errors: [], since: sinceDate.toISOString() };
 
+  // created_at_min + order=created_at desc: matches Shopify range-search guidance
+  // and guarantees the first pages are the most recent orders.
   await shopifyRestPaginated(
-    `/orders.json?status=any&created_at_min=${createdAtMin}&limit=250&order=created_at%20asc`,
+    `/orders.json?status=any&created_at_min=${createdAtMin}&limit=250&order=created_at%20desc`,
     'orders',
     {
       maxItems,
@@ -285,8 +294,9 @@ export async function ensureOrdersLoaded() {
   }
 
   // Catch up recent orders so dashboard stays live even if webhooks were missed.
-  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-  const catchUp = await importShopifyOrdersSince({ since, maxItems: 250 }).catch((err) => {
+  // 30 days + full pagination (newest first) so month-to-date matches Shopify.
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const catchUp = await importShopifyOrdersSince({ since }).catch((err) => {
     logger.warn({ err }, 'Startup order catch-up failed');
     return null;
   });

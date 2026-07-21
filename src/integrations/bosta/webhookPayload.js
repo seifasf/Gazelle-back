@@ -40,6 +40,18 @@ export function normalizeBostaWebhookPayload(raw) {
     raw.business_reference ??
     null;
 
+  // Doc fields: type, cod (Delivered only), timeStamp, exceptionCode, …
+  const type = payload.type ?? raw.type ?? null;
+  const cod = payload.cod ?? raw.cod ?? null;
+  const timeStamp = payload.timeStamp ?? payload.timestamp ?? raw.timeStamp ?? raw.timestamp ?? null;
+  const exceptionCode = payload.exceptionCode ?? payload.exception_code ?? raw.exceptionCode ?? null;
+  const exceptionReason =
+    payload.exceptionReason ?? payload.exception_reason ?? raw.exceptionReason ?? null;
+  const numberOfAttempts =
+    payload.numberOfAttempts ?? payload.number_of_attempts ?? raw.numberOfAttempts ?? null;
+  const isConfirmedDelivery =
+    payload.isConfirmedDelivery ?? payload.is_confirmed_delivery ?? raw.isConfirmedDelivery ?? null;
+
   // Keep identifiers on the payload so order matching stays consistent.
   const enriched = {
     ...payload,
@@ -47,6 +59,13 @@ export function normalizeBostaWebhookPayload(raw) {
     ...(trackingNumber != null ? { trackingNumber } : {}),
     ...(businessReference != null ? { businessReference: String(businessReference) } : {}),
     ...(state != null ? { state } : {}),
+    ...(type != null ? { type } : {}),
+    ...(cod != null ? { cod } : {}),
+    ...(timeStamp != null ? { timeStamp } : {}),
+    ...(exceptionCode != null ? { exceptionCode } : {}),
+    ...(exceptionReason != null ? { exceptionReason } : {}),
+    ...(numberOfAttempts != null ? { numberOfAttempts } : {}),
+    ...(isConfirmedDelivery != null ? { isConfirmedDelivery } : {}),
   };
 
   return {
@@ -55,6 +74,9 @@ export function normalizeBostaWebhookPayload(raw) {
     state,
     trackingNumber: trackingNumber != null ? String(trackingNumber) : null,
     businessReference: businessReference != null ? String(businessReference) : null,
+    type,
+    timeStamp,
+    exceptionCode,
   };
 }
 
