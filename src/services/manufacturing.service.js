@@ -26,44 +26,80 @@ function logoBase64Raw() {
   return null;
 }
 
+/** Write A,B,C… from a 0-based cells array (ExcelJS contiguous assignment). */
+function writeRow(sheet, rowNumber, cells) {
+  const row = sheet.getRow(rowNumber);
+  row.values = cells;
+  return row;
+}
+
+function money(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return 0;
+  return Math.round(v * 100) / 100;
+}
+
 function sizeSortKey(size) {
   const n = parseFloat(String(size ?? '').replace(',', '.'));
   return Number.isFinite(n) ? n : String(size ?? '');
 }
 
 function productDisplayTitle(item) {
-  return (
-    item.variantId?.productId?.title ||
-    item.title ||
-    item.variantId?.title ||
-    item.sku ||
-    'Product'
-  );
+  const fromProduct = item.variantId?.productId?.title;
+  if (fromProduct) return String(fromProduct).trim();
+  // Variant titles are often "41 / Brown" — strip size prefix for a cleaner group name.
+  const raw = String(item.title || item.variantId?.title || item.sku || 'Product').trim();
+  return raw.replace(/^\d+\s*\/\s*/i, '') || raw;
 }
 
+function itemColor(item) {
+  return item.color || item.variantId?.color || '—';
+}
+
+function itemSize(item) {
+  return item.size || item.variantId?.size || '—';
+}
+
+function itemSku(item) {
+  return item.sku || item.variantId?.sku || '—';
+}
+
+/**
+ * One block per product + color (factory style), with all sizes underneath.
+ * Grand total is always the sum of every PO line — grouping never drops lines.
+ */
 function groupPoItemsByProduct(items = []) {
   const groups = new Map();
   for (const item of items) {
     const productId = item.variantId?.productId?._id || item.variantId?.productId;
-    const key = productId ? String(productId) : `title:${productDisplayTitle(item)}`;
+    const color = itemColor(item);
+    const key = productId ? `${productId}::${color}` : `title:${productDisplayTitle(item)}::${color}`;
     if (!groups.has(key)) {
       groups.set(key, {
         key,
         title: productDisplayTitle(item),
+        color,
         imageUrl:
-          item.variantId?.productId?.imageUrl ||
           item.variantId?.imageUrl ||
+          item.variantId?.productId?.imageUrl ||
           item.imageUrl ||
           null,
         lines: [],
+        qty: 0,
+        total: 0,
       });
     }
-    groups.get(key).lines.push(item);
+    const g = groups.get(key);
+    g.lines.push(item);
+    const qty = Number(item.quantity) || 0;
+    const lineTotal = money(qty * (Number(item.unitCost) || 0));
+    g.qty += qty;
+    g.total = money(g.total + lineTotal);
   }
   for (const g of groups.values()) {
     g.lines.sort((a, b) => {
-      const sa = sizeSortKey(a.size || a.variantId?.size);
-      const sb = sizeSortKey(b.size || b.variantId?.size);
+      const sa = sizeSortKey(itemSize(a));
+      const sb = sizeSortKey(itemSize(b));
       if (typeof sa === 'number' && typeof sb === 'number') return sa - sb;
       return String(sa).localeCompare(String(sb), undefined, { numeric: true });
     });
@@ -71,19 +107,62 @@ function groupPoItemsByProduct(items = []) {
   return [...groups.values()];
 }
 
-async function fetchImageAsBase64(url) {
-  if (!url || typeof url !== 'string') return null;
+async function optimizeImageBuffer(buf) {
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!response.ok) return null;
-    const buf = Buffer.from(await response.arrayBuffer());
-    const ctype = response.headers.get('content-type') || '';
-    const extension = ctype.includes('jpeg') || ctype.includes('jpg') ? 'jpeg' : 'png';
-    return { base64: buf.toString('base64'), extension };
-  } catch (err) {
-    logger.warn({ err: err.message, url }, 'PO excel image fetch failed');
-    return null;
+    const sharp = (await import('sharp')).default;
+    // PNG + cell-anchored embeds survive WhatsApp → Excel open better than floating JPEGs.
+    const out = await sharp(buf)
+      .rotate()
+      .resize(140, 140, { fit: 'inside', withoutEnlargement: true })
+      .png({ compressionLevel: 8 })
+      .toBuffer();
+    return { base64: out.toString('base64'), extension: 'png' };
+  } catch {
+    if (buf.length > 350_000) return null;
+    return { base64: buf.toString('base64'), extension: 'png' };
   }
+}
+
+/**
+ * Embed image over a cell range (Place over cells). More portable than fractional
+ * floating anchors — WhatsApp / Sheets / older Excel often drop those.
+ */
+function embedSheetImage(sheet, workbook, img, { col, row, colSpan = 1, rowSpan = 1 }) {
+  if (!img?.base64) return false;
+  try {
+    const imageId = workbook.addImage({
+      base64: img.base64,
+      extension: img.extension === 'jpeg' || img.extension === 'jpg' ? 'jpeg' : 'png',
+    });
+    const startCol = col; // 0-based
+    const startRow = row; // 0-based
+    sheet.addImage(imageId, {
+      tl: { col: startCol, row: startRow },
+      br: { col: startCol + colSpan, row: startRow + rowSpan },
+      editAs: 'oneCell',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchImageAsBase64(url, cache = new Map()) {
+  if (!url || typeof url !== 'string') return null;
+  if (cache.has(url)) return cache.get(url);
+  const pending = (async () => {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(6000) });
+      if (!response.ok) return null;
+      const buf = Buffer.from(await response.arrayBuffer());
+      return optimizeImageBuffer(buf);
+    } catch (err) {
+      logger.warn({ err: err.message, url }, 'PO excel image fetch failed');
+      return null;
+    }
+  })();
+  cache.set(url, pending);
+  return pending;
 }
 
 function addDays(date, days) {
@@ -496,16 +575,23 @@ export async function exportPurchaseOrderExcel(id) {
   workbook.creator = 'Gazelle OMS';
   workbook.created = new Date();
   const sheet = workbook.addWorksheet('Factory order', {
-    pageSetup: { paperSize: 9, orientation: 'portrait', fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
+    pageSetup: {
+      paperSize: 9,
+      orientation: 'portrait',
+      fitToPage: true,
+      fitToWidth: 1,
+      fitToHeight: 0,
+    },
+    views: [{ state: 'normal', showGridLines: true }],
   });
 
   sheet.columns = [
-    { key: 'size', width: 12 },
-    { key: 'sku', width: 22 },
-    { key: 'color', width: 14 },
-    { key: 'qty', width: 10 },
-    { key: 'cost', width: 12 },
-    { key: 'total', width: 14 },
+    { width: 14 }, // A — size
+    { width: 24 }, // B — sku
+    { width: 14 }, // C — color
+    { width: 10 }, // D — qty
+    { width: 14 }, // E — unit cost
+    { width: 16 }, // F — line total
   ];
 
   const factoryName = po.factoryId?.name || '—';
@@ -517,16 +603,31 @@ export async function exportPurchaseOrderExcel(id) {
     ? new Date(po.createdAt).toISOString().slice(0, 10)
     : new Date().toISOString().slice(0, 10);
 
-  // Header — black logo (visible on white) + simple order meta (no Status / Expected).
-  sheet.getRow(1).height = 56;
+  const items = po.items || [];
+  // Authoritative totals from every line (same math as the old flat export).
+  let grandQty = 0;
+  let grandTotal = 0;
+  for (const item of items) {
+    const qty = Number(item.quantity) || 0;
+    grandQty += qty;
+    grandTotal = money(grandTotal + qty * (Number(item.unitCost) || 0));
+  }
+
+  const groups = groupPoItemsByProduct(items);
+
+  // Prefetch + compress unique product images in parallel (keeps the xlsx small/fast).
+  const imageCache = new Map();
+  await Promise.all(groups.map((g) => fetchImageAsBase64(g.imageUrl, imageCache)));
+
+  sheet.getRow(1).height = 88;
   try {
     const logoB64 = logoBase64Raw();
     if (logoB64) {
-      const logoId = workbook.addImage({ base64: logoB64, extension: 'png' });
-      sheet.addImage(logoId, {
-        tl: { col: 0, row: 0 },
-        ext: { width: 72, height: 72 },
-        editAs: 'oneCell',
+      embedSheetImage(sheet, workbook, { base64: logoB64, extension: 'png' }, {
+        col: 0,
+        row: 0,
+        colSpan: 1,
+        rowSpan: 1,
       });
     }
   } catch {
@@ -535,163 +636,170 @@ export async function exportPurchaseOrderExcel(id) {
 
   sheet.mergeCells('B1', 'F1');
   sheet.getCell('B1').value = 'GAZELLE — Factory production order';
-  sheet.getCell('B1').font = { bold: true, size: 16, color: { argb: 'FF111111' } };
+  sheet.getCell('B1').font = { bold: true, size: 18, color: { argb: 'FF111111' } };
   sheet.getCell('B1').alignment = { vertical: 'middle' };
 
-  sheet.getRow(3).values = ['Order #', po.poNumber, '', 'Date', issued];
-  sheet.getRow(4).values = ['Factory', factoryName];
+  writeRow(sheet, 3, ['Order #', po.poNumber, '', 'Date', issued]);
+  writeRow(sheet, 4, ['Factory', factoryName]);
   sheet.mergeCells('B4', 'F4');
-  sheet.getRow(5).values = ['Contact', factoryContact || '—'];
+  writeRow(sheet, 5, ['Contact', factoryContact || '—']);
   sheet.mergeCells('B5', 'F5');
   let metaRow = 5;
   if (po.notes) {
     metaRow = 6;
-    sheet.getRow(6).values = ['Notes', po.notes];
+    writeRow(sheet, 6, ['Notes', po.notes]);
     sheet.mergeCells('B6', 'F6');
   }
   for (const r of [3, 4, 5, 6]) {
-    if (sheet.getCell(`A${r}`).value) {
-      sheet.getCell(`A${r}`).font = { bold: true, color: { argb: 'FF555555' } };
+    if (sheet.getCell(r, 1).value) {
+      sheet.getCell(r, 1).font = { bold: true, color: { argb: 'FF555555' } };
     }
   }
 
-  const groups = groupPoItemsByProduct(po.items || []);
   let rowIdx = metaRow + 2;
-  let grandQty = 0;
-  let grandTotal = 0;
+  const fillYellow = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFF5C518' },
+  };
+  const fillMuted = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFEEEEEE' },
+  };
+  const fillTotal = {
+    type: 'pattern',
+    pattern: 'solid',
+    fgColor: { argb: 'FFFFF6D1' },
+  };
 
   for (const group of groups) {
-    // Product title
-    sheet.mergeCells(`A${rowIdx}`, `F${rowIdx}`);
-    sheet.getCell(`A${rowIdx}`).value = group.title;
-    sheet.getCell(`A${rowIdx}`).font = { bold: true, size: 14, color: { argb: 'FF111111' } };
-    sheet.getCell(`A${rowIdx}`).fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: 'FFF5C518' },
-    };
-    sheet.getRow(rowIdx).height = 24;
+    const title =
+      group.color && group.color !== '—'
+        ? `${group.title} — ${group.color}`
+        : group.title;
+
+    sheet.mergeCells(rowIdx, 1, rowIdx, 6);
+    sheet.getCell(rowIdx, 1).value = title;
+    sheet.getCell(rowIdx, 1).font = { bold: true, size: 14, color: { argb: 'FF111111' } };
+    sheet.getCell(rowIdx, 1).fill = fillYellow;
+    sheet.getRow(rowIdx).height = 26;
     rowIdx += 1;
 
-    // Big product image
-    const imgStartRow = rowIdx;
-    sheet.getRow(rowIdx).height = 18;
-    sheet.mergeCells(`A${rowIdx}`, `F${rowIdx + 7}`);
-    for (let i = 0; i < 8; i += 1) {
-      sheet.getRow(rowIdx + i).height = 18;
-    }
-    const img = await fetchImageAsBase64(group.imageUrl);
+    // Small product image (cell-anchored), then full-width size table underneath.
+    const imgRow = rowIdx;
+    sheet.getRow(imgRow).height = 72;
+    sheet.mergeCells(imgRow, 1, imgRow, 2);
+    const img = await fetchImageAsBase64(group.imageUrl, imageCache);
     if (img) {
-      try {
-        const imageId = workbook.addImage({
-          base64: img.base64,
-          extension: img.extension,
-        });
-        sheet.addImage(imageId, {
-          tl: { col: 0.15, row: imgStartRow - 1 + 0.1 },
-          ext: { width: 160, height: 160 },
-          editAs: 'oneCell',
-        });
-      } catch {
-        sheet.getCell(`A${imgStartRow}`).value = '(image unavailable)';
-        sheet.getCell(`A${imgStartRow}`).font = { italic: true, color: { argb: 'FF999999' } };
-      }
+      const ok = embedSheetImage(sheet, workbook, img, {
+        col: 0,
+        row: imgRow - 1,
+        colSpan: 1,
+        rowSpan: 1,
+      });
+      if (!ok) sheet.getCell(imgRow, 1).value = '(image)';
     } else {
-      sheet.getCell(`A${imgStartRow}`).value = '(no product image)';
-      sheet.getCell(`A${imgStartRow}`).font = { italic: true, color: { argb: 'FF999999' } };
+      sheet.getCell(imgRow, 1).value = '(no image)';
+      sheet.getCell(imgRow, 1).font = { italic: true, color: { argb: 'FF999999' } };
     }
-    rowIdx += 8;
-
-    // Size / SKU table
-    const headerRow = rowIdx;
-    sheet.getRow(headerRow).values = ['Size', 'SKU', 'Color', 'Qty', 'Unit cost', 'Line total'];
-    sheet.getRow(headerRow).font = { bold: true, color: { argb: 'FF111111' } };
-    sheet.getRow(headerRow).fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: 'FFEEEEEE' },
-    };
     rowIdx += 1;
 
-    let productQty = 0;
-    let productTotal = 0;
+    const tableStart = rowIdx;
+    writeRow(sheet, tableStart, ['Size', 'SKU', 'Color', 'Qty', 'Unit cost', 'Line total']);
+    sheet.getRow(tableStart).height = 22;
+    for (let c = 1; c <= 6; c += 1) {
+      sheet.getCell(tableStart, c).font = { bold: true, size: 12 };
+      sheet.getCell(tableStart, c).fill = fillMuted;
+      sheet.getCell(tableStart, c).alignment = { vertical: 'middle' };
+    }
+
+    let lineRow = tableStart + 1;
     for (const item of group.lines) {
       const qty = Number(item.quantity) || 0;
-      const unitCost = Number(item.unitCost) || 0;
-      const lineTotal = qty * unitCost;
-      productQty += qty;
-      productTotal += lineTotal;
-      grandQty += qty;
-      grandTotal += lineTotal;
-
-      sheet.getRow(rowIdx).values = [
-        item.size || item.variantId?.size || '—',
-        item.sku || item.variantId?.sku || '—',
-        item.color || item.variantId?.color || '—',
+      const unitCost = money(item.unitCost);
+      const lineTotal = money(qty * unitCost);
+      writeRow(sheet, lineRow, [
+        itemSize(item),
+        itemSku(item),
+        itemColor(item),
         qty,
         unitCost,
         lineTotal,
-      ];
-      sheet.getCell(`E${rowIdx}`).numFmt = '#,##0.00';
-      sheet.getCell(`F${rowIdx}`).numFmt = '#,##0.00';
-      rowIdx += 1;
+      ]);
+      sheet.getRow(lineRow).height = 20;
+      sheet.getCell(lineRow, 5).numFmt = '#,##0.00';
+      sheet.getCell(lineRow, 6).numFmt = '#,##0.00';
+      for (let c = 1; c <= 6; c += 1) {
+        sheet.getCell(lineRow, c).font = { size: 12 };
+        sheet.getCell(lineRow, c).alignment = { vertical: 'middle' };
+      }
+      const sizeNum = parseFloat(String(itemSize(item)).replace(',', '.'));
+      if (Number.isFinite(sizeNum)) sheet.getCell(lineRow, 1).value = sizeNum;
+      lineRow += 1;
     }
 
-    sheet.getRow(rowIdx).values = [
-      '',
-      '',
-      'Product total',
-      productQty,
-      '',
-      productTotal,
-    ];
-    sheet.getCell(`C${rowIdx}`).font = { bold: true };
-    sheet.getCell(`D${rowIdx}`).font = { bold: true };
-    sheet.getCell(`F${rowIdx}`).font = { bold: true };
-    sheet.getCell(`F${rowIdx}`).numFmt = '#,##0.00';
-    sheet.getCell(`C${rowIdx}`).fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: 'FFFFF6D1' },
-    };
-    sheet.getCell(`D${rowIdx}`).fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: 'FFFFF6D1' },
-    };
-    sheet.getCell(`F${rowIdx}`).fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: 'FFFFF6D1' },
-    };
-    rowIdx += 2;
+    writeRow(sheet, lineRow, ['', 'Product total', '', group.qty, '', group.total]);
+    sheet.getRow(lineRow).height = 22;
+    sheet.getCell(lineRow, 2).font = { bold: true, size: 12 };
+    sheet.getCell(lineRow, 4).font = { bold: true, size: 12 };
+    sheet.getCell(lineRow, 6).font = { bold: true, size: 12 };
+    sheet.getCell(lineRow, 6).numFmt = '#,##0.00';
+    for (const c of [2, 4, 6]) sheet.getCell(lineRow, c).fill = fillTotal;
+
+    rowIdx = lineRow + 2;
   }
 
-  sheet.getCell(`A${rowIdx}`).value = 'ORDER TOTAL';
-  sheet.getCell(`A${rowIdx}`).font = { bold: true, size: 12 };
-  sheet.mergeCells(`A${rowIdx}`, `B${rowIdx}`);
+  // Summary table — one row per product/color + grand total matching line math.
+  sheet.mergeCells(rowIdx, 1, rowIdx, 6);
+  sheet.getCell(rowIdx, 1).value = 'SUMMARY';
+  sheet.getCell(rowIdx, 1).font = { bold: true, size: 14 };
+  sheet.getCell(rowIdx, 1).fill = fillYellow;
   rowIdx += 1;
-  sheet.getRow(rowIdx).values = ['Products', groups.length, '', 'Units', grandQty];
+
+  writeRow(sheet, rowIdx, ['Product', 'Color', 'SKUs', 'Units', 'Total', '']);
+  sheet.getRow(rowIdx).height = 22;
+  for (let c = 1; c <= 5; c += 1) {
+    sheet.getCell(rowIdx, c).font = { bold: true, size: 12 };
+    sheet.getCell(rowIdx, c).fill = fillMuted;
+  }
   rowIdx += 1;
-  sheet.getRow(rowIdx).values = ['Currency', currency, '', 'Grand total', grandTotal];
-  sheet.getCell(`E${rowIdx}`).numFmt = '#,##0.00';
-  sheet.getCell(`D${rowIdx}`).font = { bold: true };
-  sheet.getCell(`E${rowIdx}`).font = { bold: true, size: 13 };
-  sheet.getCell(`D${rowIdx}`).fill = {
-    type: 'pattern',
-    pattern: 'solid',
-    fgColor: { argb: 'FFF5C518' },
-  };
-  sheet.getCell(`E${rowIdx}`).fill = {
-    type: 'pattern',
-    pattern: 'solid',
-    fgColor: { argb: 'FFF5C518' },
-  };
+
+  for (const group of groups) {
+    writeRow(sheet, rowIdx, [
+      group.title,
+      group.color,
+      group.lines.length,
+      group.qty,
+      group.total,
+    ]);
+    sheet.getRow(rowIdx).height = 20;
+    sheet.getCell(rowIdx, 5).numFmt = '#,##0.00';
+    for (let c = 1; c <= 5; c += 1) sheet.getCell(rowIdx, c).font = { size: 12 };
+    rowIdx += 1;
+  }
+
+  writeRow(sheet, rowIdx, ['GRAND TOTAL', '', items.length, grandQty, grandTotal]);
+  sheet.getRow(rowIdx).height = 24;
+  for (let c = 1; c <= 5; c += 1) {
+    sheet.getCell(rowIdx, c).font = { bold: true, size: 13 };
+    sheet.getCell(rowIdx, c).fill = fillYellow;
+  }
+  sheet.getCell(rowIdx, 5).numFmt = '#,##0.00';
+  rowIdx += 1;
+
+  writeRow(sheet, rowIdx, ['Currency', currency]);
+  if (po.totalCost != null && money(po.totalCost) !== grandTotal) {
+    rowIdx += 1;
+    writeRow(sheet, rowIdx, [
+      'Note',
+      `OMS stored total ${money(po.totalCost)} — Excel uses line sum ${grandTotal}`,
+    ]);
+  }
 
   rowIdx += 2;
-  sheet.getCell(`A${rowIdx}`).value = 'Prepared by Gazelle OMS for factory production';
-  sheet.getCell(`A${rowIdx}`).font = { italic: true, size: 9, color: { argb: 'FF999999' } };
-  sheet.mergeCells(`A${rowIdx}`, `F${rowIdx}`);
+  sheet.getCell(rowIdx, 1).value = 'Prepared by Gazelle OMS for factory production';
+  sheet.getCell(rowIdx, 1).font = { italic: true, size: 9, color: { argb: 'FF999999' } };
 
   const buffer = await workbook.xlsx.writeBuffer();
   return { buffer, filename: `${po.poNumber}-factory-order.xlsx` };
