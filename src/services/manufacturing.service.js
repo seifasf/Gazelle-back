@@ -107,19 +107,31 @@ function groupPoItemsByProduct(items = []) {
   return [...groups.values()];
 }
 
+/** Process-level caches — same PO re-export / same product photos stay instant. */
+let cachedLogoImg = undefined; // { base64, extension } | null
+const productImageCache = new Map(); // url -> { value, expires }
+const PRODUCT_IMAGE_TTL_MS = 45 * 60 * 1000;
+
+function getLogoImage() {
+  if (cachedLogoImg !== undefined) return cachedLogoImg;
+  const raw = logoBase64Raw();
+  cachedLogoImg = raw ? { base64: raw, extension: 'png' } : null;
+  return cachedLogoImg;
+}
+
 async function optimizeImageBuffer(buf) {
   try {
     const sharp = (await import('sharp')).default;
-    // PNG + cell-anchored embeds survive WhatsApp → Excel open better than floating JPEGs.
+    // Tiny JPEG keeps the .xlsx small → faster WhatsApp send + Excel open.
     const out = await sharp(buf)
       .rotate()
-      .resize(140, 140, { fit: 'inside', withoutEnlargement: true })
-      .png({ compressionLevel: 8 })
+      .resize(72, 72, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 55, mozjpeg: true })
       .toBuffer();
-    return { base64: out.toString('base64'), extension: 'png' };
+    return { base64: out.toString('base64'), extension: 'jpeg' };
   } catch {
-    if (buf.length > 350_000) return null;
-    return { base64: buf.toString('base64'), extension: 'png' };
+    if (buf.length > 80_000) return null;
+    return { base64: buf.toString('base64'), extension: 'jpeg' };
   }
 }
 
@@ -134,11 +146,9 @@ function embedSheetImage(sheet, workbook, img, { col, row, colSpan = 1, rowSpan 
       base64: img.base64,
       extension: img.extension === 'jpeg' || img.extension === 'jpg' ? 'jpeg' : 'png',
     });
-    const startCol = col; // 0-based
-    const startRow = row; // 0-based
     sheet.addImage(imageId, {
-      tl: { col: startCol, row: startRow },
-      br: { col: startCol + colSpan, row: startRow + rowSpan },
+      tl: { col, row },
+      br: { col: col + colSpan, row: row + rowSpan },
       editAs: 'oneCell',
     });
     return true;
@@ -147,22 +157,47 @@ function embedSheetImage(sheet, workbook, img, { col, row, colSpan = 1, rowSpan 
   }
 }
 
-async function fetchImageAsBase64(url, cache = new Map()) {
+async function fetchImageAsBase64(url, requestCache = new Map()) {
   if (!url || typeof url !== 'string') return null;
-  if (cache.has(url)) return cache.get(url);
+  if (requestCache.has(url)) return requestCache.get(url);
+
+  const hit = productImageCache.get(url);
+  if (hit && hit.expires > Date.now()) {
+    requestCache.set(url, Promise.resolve(hit.value));
+    return hit.value;
+  }
+
   const pending = (async () => {
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(6000) });
+      const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
       if (!response.ok) return null;
       const buf = Buffer.from(await response.arrayBuffer());
-      return optimizeImageBuffer(buf);
+      const optimized = await optimizeImageBuffer(buf);
+      if (optimized) {
+        productImageCache.set(url, {
+          value: optimized,
+          expires: Date.now() + PRODUCT_IMAGE_TTL_MS,
+        });
+      }
+      return optimized;
     } catch (err) {
       logger.warn({ err: err.message, url }, 'PO excel image fetch failed');
       return null;
     }
   })();
-  cache.set(url, pending);
+  requestCache.set(url, pending);
   return pending;
+}
+
+/** Fetch unique URLs with a hard budget so one slow CDN can't stall the export. */
+async function prefetchProductImages(urls, { budgetMs = 3500 } = {}) {
+  const unique = [...new Set(urls.filter(Boolean))];
+  const requestCache = new Map();
+  await Promise.race([
+    Promise.all(unique.map((url) => fetchImageAsBase64(url, requestCache))),
+    new Promise((resolve) => setTimeout(resolve, budgetMs)),
+  ]);
+  return requestCache;
 }
 
 function addDays(date, days) {
@@ -574,24 +609,18 @@ export async function exportPurchaseOrderExcel(id) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Gazelle OMS';
   workbook.created = new Date();
+  // Skip fitToPage — it makes Excel open slower on phones.
   const sheet = workbook.addWorksheet('Factory order', {
-    pageSetup: {
-      paperSize: 9,
-      orientation: 'portrait',
-      fitToPage: true,
-      fitToWidth: 1,
-      fitToHeight: 0,
-    },
     views: [{ state: 'normal', showGridLines: true }],
   });
 
   sheet.columns = [
-    { width: 14 }, // A — size
-    { width: 24 }, // B — sku
-    { width: 14 }, // C — color
-    { width: 10 }, // D — qty
-    { width: 14 }, // E — unit cost
-    { width: 16 }, // F — line total
+    { width: 14 },
+    { width: 24 },
+    { width: 14 },
+    { width: 10 },
+    { width: 14 },
+    { width: 16 },
   ];
 
   const factoryName = po.factoryId?.name || '—';
@@ -604,7 +633,6 @@ export async function exportPurchaseOrderExcel(id) {
     : new Date().toISOString().slice(0, 10);
 
   const items = po.items || [];
-  // Authoritative totals from every line (same math as the old flat export).
   let grandQty = 0;
   let grandTotal = 0;
   for (const item of items) {
@@ -615,23 +643,30 @@ export async function exportPurchaseOrderExcel(id) {
 
   const groups = groupPoItemsByProduct(items);
 
-  // Prefetch + compress unique product images in parallel (keeps the xlsx small/fast).
-  const imageCache = new Map();
-  await Promise.all(groups.map((g) => fetchImageAsBase64(g.imageUrl, imageCache)));
+  // Unique URLs only, hard 3.5s budget — export never waits forever on Shopify CDN.
+  const imageCache = await prefetchProductImages(
+    groups.map((g) => g.imageUrl),
+    { budgetMs: 3500 }
+  );
 
-  sheet.getRow(1).height = 88;
-  try {
-    const logoB64 = logoBase64Raw();
-    if (logoB64) {
-      embedSheetImage(sheet, workbook, { base64: logoB64, extension: 'png' }, {
-        col: 0,
-        row: 0,
-        colSpan: 1,
-        rowSpan: 1,
-      });
+  async function resolvedImg(url) {
+    if (!url) return null;
+    const pending = imageCache.get(url);
+    if (!pending) return null;
+    try {
+      return await Promise.race([
+        pending,
+        new Promise((resolve) => setTimeout(() => resolve(null), 400)),
+      ]);
+    } catch {
+      return null;
     }
-  } catch {
-    // logo optional
+  }
+
+  sheet.getRow(1).height = 72;
+  const logo = getLogoImage();
+  if (logo) {
+    embedSheetImage(sheet, workbook, logo, { col: 0, row: 0, colSpan: 1, rowSpan: 1 });
   }
 
   sheet.mergeCells('B1', 'F1');
@@ -672,6 +707,8 @@ export async function exportPurchaseOrderExcel(id) {
     pattern: 'solid',
     fgColor: { argb: 'FFFFF6D1' },
   };
+  const headerFont = { bold: true, size: 12 };
+  const bodyFont = { size: 12 };
 
   for (const group of groups) {
     const title =
@@ -680,89 +717,73 @@ export async function exportPurchaseOrderExcel(id) {
         : group.title;
 
     sheet.mergeCells(rowIdx, 1, rowIdx, 6);
-    sheet.getCell(rowIdx, 1).value = title;
-    sheet.getCell(rowIdx, 1).font = { bold: true, size: 14, color: { argb: 'FF111111' } };
-    sheet.getCell(rowIdx, 1).fill = fillYellow;
-    sheet.getRow(rowIdx).height = 26;
+    const titleCell = sheet.getCell(rowIdx, 1);
+    titleCell.value = title;
+    titleCell.font = { bold: true, size: 14, color: { argb: 'FF111111' } };
+    titleCell.fill = fillYellow;
+    sheet.getRow(rowIdx).height = 24;
     rowIdx += 1;
 
-    // Small product image (cell-anchored), then full-width size table underneath.
     const imgRow = rowIdx;
-    sheet.getRow(imgRow).height = 72;
-    sheet.mergeCells(imgRow, 1, imgRow, 2);
-    const img = await fetchImageAsBase64(group.imageUrl, imageCache);
+    sheet.getRow(imgRow).height = 48;
+    const img = await resolvedImg(group.imageUrl);
     if (img) {
-      const ok = embedSheetImage(sheet, workbook, img, {
+      embedSheetImage(sheet, workbook, img, {
         col: 0,
         row: imgRow - 1,
         colSpan: 1,
         rowSpan: 1,
       });
-      if (!ok) sheet.getCell(imgRow, 1).value = '(image)';
-    } else {
-      sheet.getCell(imgRow, 1).value = '(no image)';
-      sheet.getCell(imgRow, 1).font = { italic: true, color: { argb: 'FF999999' } };
     }
     rowIdx += 1;
 
     const tableStart = rowIdx;
     writeRow(sheet, tableStart, ['Size', 'SKU', 'Color', 'Qty', 'Unit cost', 'Line total']);
-    sheet.getRow(tableStart).height = 22;
-    for (let c = 1; c <= 6; c += 1) {
-      sheet.getCell(tableStart, c).font = { bold: true, size: 12 };
-      sheet.getCell(tableStart, c).fill = fillMuted;
-      sheet.getCell(tableStart, c).alignment = { vertical: 'middle' };
-    }
+    const headerRow = sheet.getRow(tableStart);
+    headerRow.height = 20;
+    headerRow.font = headerFont;
+    for (let c = 1; c <= 6; c += 1) sheet.getCell(tableStart, c).fill = fillMuted;
 
     let lineRow = tableStart + 1;
     for (const item of group.lines) {
       const qty = Number(item.quantity) || 0;
       const unitCost = money(item.unitCost);
       const lineTotal = money(qty * unitCost);
+      const sizeRaw = itemSize(item);
+      const sizeNum = parseFloat(String(sizeRaw).replace(',', '.'));
       writeRow(sheet, lineRow, [
-        itemSize(item),
+        Number.isFinite(sizeNum) ? sizeNum : sizeRaw,
         itemSku(item),
         itemColor(item),
         qty,
         unitCost,
         lineTotal,
       ]);
-      sheet.getRow(lineRow).height = 20;
+      sheet.getRow(lineRow).font = bodyFont;
       sheet.getCell(lineRow, 5).numFmt = '#,##0.00';
       sheet.getCell(lineRow, 6).numFmt = '#,##0.00';
-      for (let c = 1; c <= 6; c += 1) {
-        sheet.getCell(lineRow, c).font = { size: 12 };
-        sheet.getCell(lineRow, c).alignment = { vertical: 'middle' };
-      }
-      const sizeNum = parseFloat(String(itemSize(item)).replace(',', '.'));
-      if (Number.isFinite(sizeNum)) sheet.getCell(lineRow, 1).value = sizeNum;
       lineRow += 1;
     }
 
     writeRow(sheet, lineRow, ['', 'Product total', '', group.qty, '', group.total]);
-    sheet.getRow(lineRow).height = 22;
-    sheet.getCell(lineRow, 2).font = { bold: true, size: 12 };
-    sheet.getCell(lineRow, 4).font = { bold: true, size: 12 };
-    sheet.getCell(lineRow, 6).font = { bold: true, size: 12 };
+    sheet.getCell(lineRow, 2).font = headerFont;
+    sheet.getCell(lineRow, 4).font = headerFont;
+    sheet.getCell(lineRow, 6).font = headerFont;
     sheet.getCell(lineRow, 6).numFmt = '#,##0.00';
     for (const c of [2, 4, 6]) sheet.getCell(lineRow, c).fill = fillTotal;
 
     rowIdx = lineRow + 2;
   }
 
-  // Summary table — one row per product/color + grand total matching line math.
   sheet.mergeCells(rowIdx, 1, rowIdx, 6);
   sheet.getCell(rowIdx, 1).value = 'SUMMARY';
   sheet.getCell(rowIdx, 1).font = { bold: true, size: 14 };
   sheet.getCell(rowIdx, 1).fill = fillYellow;
   rowIdx += 1;
 
-  writeRow(sheet, rowIdx, ['Product', 'Color', 'SKUs', 'Units', 'Total', '']);
-  sheet.getRow(rowIdx).height = 22;
-  for (let c = 1; c <= 5; c += 1) {
-    sheet.getCell(rowIdx, c).font = { bold: true, size: 12 };
-    sheet.getCell(rowIdx, c).fill = fillMuted;
-  }
+  writeRow(sheet, rowIdx, ['Product', 'Color', 'SKUs', 'Units', 'Total']);
+  sheet.getRow(rowIdx).font = headerFont;
+  for (let c = 1; c <= 5; c += 1) sheet.getCell(rowIdx, c).fill = fillMuted;
   rowIdx += 1;
 
   for (const group of groups) {
@@ -773,14 +794,12 @@ export async function exportPurchaseOrderExcel(id) {
       group.qty,
       group.total,
     ]);
-    sheet.getRow(rowIdx).height = 20;
+    sheet.getRow(rowIdx).font = bodyFont;
     sheet.getCell(rowIdx, 5).numFmt = '#,##0.00';
-    for (let c = 1; c <= 5; c += 1) sheet.getCell(rowIdx, c).font = { size: 12 };
     rowIdx += 1;
   }
 
   writeRow(sheet, rowIdx, ['GRAND TOTAL', '', items.length, grandQty, grandTotal]);
-  sheet.getRow(rowIdx).height = 24;
   for (let c = 1; c <= 5; c += 1) {
     sheet.getCell(rowIdx, c).font = { bold: true, size: 13 };
     sheet.getCell(rowIdx, c).fill = fillYellow;
@@ -789,14 +808,6 @@ export async function exportPurchaseOrderExcel(id) {
   rowIdx += 1;
 
   writeRow(sheet, rowIdx, ['Currency', currency]);
-  if (po.totalCost != null && money(po.totalCost) !== grandTotal) {
-    rowIdx += 1;
-    writeRow(sheet, rowIdx, [
-      'Note',
-      `OMS stored total ${money(po.totalCost)} — Excel uses line sum ${grandTotal}`,
-    ]);
-  }
-
   rowIdx += 2;
   sheet.getCell(rowIdx, 1).value = 'Prepared by Gazelle OMS for factory production';
   sheet.getCell(rowIdx, 1).font = { italic: true, size: 9, color: { argb: 'FF999999' } };
