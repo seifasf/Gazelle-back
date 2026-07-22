@@ -11,14 +11,64 @@ import { stockIntake } from './order.service.js';
 import logger from '../utils/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const LOGO_PATH = resolve(__dirname, '../assets/gazelle-logo.png');
+/** Black mark on transparent — visible on white Excel sheets (white logo is invisible). */
+const LOGO_PATH = resolve(__dirname, '../assets/gazelle-logo-black.png');
+const LOGO_FALLBACK_PATH = resolve(__dirname, '../assets/gazelle-logo.png');
 
 function logoBase64Raw() {
-  try {
-    return readFileSync(LOGO_PATH).toString('base64');
-  } catch {
-    return null;
+  for (const path of [LOGO_PATH, LOGO_FALLBACK_PATH]) {
+    try {
+      return readFileSync(path).toString('base64');
+    } catch {
+      // try next
+    }
   }
+  return null;
+}
+
+function sizeSortKey(size) {
+  const n = parseFloat(String(size ?? '').replace(',', '.'));
+  return Number.isFinite(n) ? n : String(size ?? '');
+}
+
+function productDisplayTitle(item) {
+  return (
+    item.variantId?.productId?.title ||
+    item.title ||
+    item.variantId?.title ||
+    item.sku ||
+    'Product'
+  );
+}
+
+function groupPoItemsByProduct(items = []) {
+  const groups = new Map();
+  for (const item of items) {
+    const productId = item.variantId?.productId?._id || item.variantId?.productId;
+    const key = productId ? String(productId) : `title:${productDisplayTitle(item)}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        title: productDisplayTitle(item),
+        imageUrl:
+          item.variantId?.productId?.imageUrl ||
+          item.variantId?.imageUrl ||
+          item.imageUrl ||
+          null,
+        lines: [],
+      });
+    }
+    groups.get(key).lines.push(item);
+  }
+  for (const g of groups.values()) {
+    g.lines.sort((a, b) => {
+      const sa = sizeSortKey(a.size || a.variantId?.size);
+      const sb = sizeSortKey(b.size || b.variantId?.size);
+      if (typeof sa === 'number' && typeof sb === 'number') return sa - sb;
+      return String(sa).localeCompare(String(sb), undefined, { numeric: true });
+    });
+  }
+  return [...groups.values()];
 }
 
 async function fetchImageAsBase64(url) {
@@ -269,7 +319,11 @@ export async function getPurchaseOrder(id) {
   return PurchaseOrder.findById(id)
     .populate('factoryId')
     .populate('createdBy', 'name email')
-    .populate('items.variantId', 'sku title color size imageUrl realStock');
+    .populate({
+      path: 'items.variantId',
+      select: 'sku title color size imageUrl realStock productId',
+      populate: { path: 'productId', select: 'title imageUrl' },
+    });
 }
 
 async function enrichItems(items) {
@@ -441,100 +495,92 @@ export async function exportPurchaseOrderExcel(id) {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Gazelle OMS';
   workbook.created = new Date();
-  const sheet = workbook.addWorksheet('Quotation', {
+  const sheet = workbook.addWorksheet('Factory order', {
     pageSetup: { paperSize: 9, orientation: 'portrait', fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
   });
 
   sheet.columns = [
-    { key: 'img', width: 12 },
-    { key: 'a', width: 16 },
-    { key: 'b', width: 28 },
-    { key: 'c', width: 12 },
-    { key: 'd', width: 10 },
-    { key: 'e', width: 10 },
-    { key: 'f', width: 12 },
-    { key: 'g', width: 14 },
+    { key: 'size', width: 12 },
+    { key: 'sku', width: 22 },
+    { key: 'color', width: 14 },
+    { key: 'qty', width: 10 },
+    { key: 'cost', width: 12 },
+    { key: 'total', width: 14 },
   ];
 
-  // Brand logo via base64 (portable across deploy environments).
+  const factoryName = po.factoryId?.name || '—';
+  const factoryContact = [po.factoryId?.contactName, po.factoryId?.phone, po.factoryId?.email]
+    .filter(Boolean)
+    .join(' · ');
+  const currency = po.factoryId?.currency || po.items?.[0]?.currency || 'EGP';
+  const issued = po.createdAt
+    ? new Date(po.createdAt).toISOString().slice(0, 10)
+    : new Date().toISOString().slice(0, 10);
+
+  // Header — black logo (visible on white) + simple order meta (no Status / Expected).
+  sheet.getRow(1).height = 56;
   try {
     const logoB64 = logoBase64Raw();
     if (logoB64) {
-      const logoId = workbook.addImage({
-        base64: logoB64,
-        extension: 'png',
-      });
+      const logoId = workbook.addImage({ base64: logoB64, extension: 'png' });
       sheet.addImage(logoId, {
         tl: { col: 0, row: 0 },
-        ext: { width: 120, height: 48 },
+        ext: { width: 72, height: 72 },
+        editAs: 'oneCell',
       });
     }
   } catch {
     // logo optional
   }
 
-  sheet.mergeCells('C1', 'H1');
-  sheet.getCell('C1').value = 'GAZELLE — PRODUCTION QUOTATION';
-  sheet.getCell('C1').font = { bold: true, size: 16, color: { argb: 'FF1C1917' } };
-  sheet.getCell('C1').alignment = { vertical: 'middle' };
+  sheet.mergeCells('B1', 'F1');
+  sheet.getCell('B1').value = 'GAZELLE — Factory production order';
+  sheet.getCell('B1').font = { bold: true, size: 16, color: { argb: 'FF111111' } };
+  sheet.getCell('B1').alignment = { vertical: 'middle' };
 
-  sheet.mergeCells('C2', 'H2');
-  sheet.getCell('C2').value = 'Purchase / production order summary';
-  sheet.getCell('C2').font = { size: 11, color: { argb: 'FF6B6560' } };
-
-  const factoryName = po.factoryId?.name || '—';
-  const factoryContact = [po.factoryId?.contactName, po.factoryId?.phone, po.factoryId?.email].filter(Boolean).join(' · ');
-  const expected = po.expectedDeliveryDate
-    ? new Date(po.expectedDeliveryDate).toISOString().slice(0, 10)
-    : '—';
-  const currency = po.factoryId?.currency || po.items?.[0]?.currency || 'EGP';
-  const issued = po.createdAt ? new Date(po.createdAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
-
-  sheet.getRow(4).values = ['', 'Quotation #', po.poNumber, '', 'Date', issued];
-  sheet.getRow(5).values = ['', 'Factory', factoryName, '', 'Status', po.status || '—'];
-  sheet.getRow(6).values = ['', 'Contact', factoryContact || '—', '', 'Expected', expected];
-  sheet.getRow(7).values = ['', 'Notes', po.notes || '—'];
-  sheet.mergeCells('C7', 'H7');
-  for (const r of [4, 5, 6, 7]) {
-    sheet.getCell(`B${r}`).font = { bold: true, color: { argb: 'FF6B6560' } };
+  sheet.getRow(3).values = ['Order #', po.poNumber, '', 'Date', issued];
+  sheet.getRow(4).values = ['Factory', factoryName];
+  sheet.mergeCells('B4', 'F4');
+  sheet.getRow(5).values = ['Contact', factoryContact || '—'];
+  sheet.mergeCells('B5', 'F5');
+  let metaRow = 5;
+  if (po.notes) {
+    metaRow = 6;
+    sheet.getRow(6).values = ['Notes', po.notes];
+    sheet.mergeCells('B6', 'F6');
+  }
+  for (const r of [3, 4, 5, 6]) {
+    if (sheet.getCell(`A${r}`).value) {
+      sheet.getCell(`A${r}`).font = { bold: true, color: { argb: 'FF555555' } };
+    }
   }
 
-  const headerRow = 9;
-  sheet.getRow(headerRow).values = ['Image', 'SKU', 'Product', 'Color', 'Size', 'Qty', 'Unit cost', 'Line total'];
-  sheet.getRow(headerRow).font = { bold: true, color: { argb: 'FF1C1917' } };
-  sheet.getRow(headerRow).fill = {
-    type: 'pattern',
-    pattern: 'solid',
-    fgColor: { argb: 'FFF5C518' },
-  };
-  sheet.getRow(headerRow).border = {
-    bottom: { style: 'thin', color: { argb: 'FF1C1917' } },
-  };
-
-  let totalQty = 0;
+  const groups = groupPoItemsByProduct(po.items || []);
+  let rowIdx = metaRow + 2;
+  let grandQty = 0;
   let grandTotal = 0;
-  let rowIdx = headerRow + 1;
-  for (const item of po.items || []) {
-    const lineTotal = (Number(item.quantity) || 0) * (Number(item.unitCost) || 0);
-    totalQty += Number(item.quantity) || 0;
-    grandTotal += lineTotal;
-    const excelRow = sheet.getRow(rowIdx);
-    excelRow.values = [
-      '',
-      item.sku,
-      item.title || item.variantId?.title || '',
-      item.color || item.variantId?.color || '',
-      item.size || item.variantId?.size || '',
-      item.quantity,
-      Number(item.unitCost) || 0,
-      lineTotal,
-    ];
-    excelRow.height = 52;
-    sheet.getCell(`G${rowIdx}`).numFmt = '#,##0.00';
-    sheet.getCell(`H${rowIdx}`).numFmt = '#,##0.00';
 
-    const imageUrl = item.variantId?.imageUrl || item.imageUrl || null;
-    const img = await fetchImageAsBase64(imageUrl);
+  for (const group of groups) {
+    // Product title
+    sheet.mergeCells(`A${rowIdx}`, `F${rowIdx}`);
+    sheet.getCell(`A${rowIdx}`).value = group.title;
+    sheet.getCell(`A${rowIdx}`).font = { bold: true, size: 14, color: { argb: 'FF111111' } };
+    sheet.getCell(`A${rowIdx}`).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFF5C518' },
+    };
+    sheet.getRow(rowIdx).height = 24;
+    rowIdx += 1;
+
+    // Big product image
+    const imgStartRow = rowIdx;
+    sheet.getRow(rowIdx).height = 18;
+    sheet.mergeCells(`A${rowIdx}`, `F${rowIdx + 7}`);
+    for (let i = 0; i < 8; i += 1) {
+      sheet.getRow(rowIdx + i).height = 18;
+    }
+    const img = await fetchImageAsBase64(group.imageUrl);
     if (img) {
       try {
         const imageId = workbook.addImage({
@@ -542,47 +588,113 @@ export async function exportPurchaseOrderExcel(id) {
           extension: img.extension,
         });
         sheet.addImage(imageId, {
-          tl: { col: 0, row: rowIdx - 1 },
-          ext: { width: 56, height: 56 },
+          tl: { col: 0.15, row: imgStartRow - 1 + 0.1 },
+          ext: { width: 160, height: 160 },
           editAs: 'oneCell',
         });
       } catch {
-        // skip broken image
+        sheet.getCell(`A${imgStartRow}`).value = '(image unavailable)';
+        sheet.getCell(`A${imgStartRow}`).font = { italic: true, color: { argb: 'FF999999' } };
       }
+    } else {
+      sheet.getCell(`A${imgStartRow}`).value = '(no product image)';
+      sheet.getCell(`A${imgStartRow}`).font = { italic: true, color: { argb: 'FF999999' } };
+    }
+    rowIdx += 8;
+
+    // Size / SKU table
+    const headerRow = rowIdx;
+    sheet.getRow(headerRow).values = ['Size', 'SKU', 'Color', 'Qty', 'Unit cost', 'Line total'];
+    sheet.getRow(headerRow).font = { bold: true, color: { argb: 'FF111111' } };
+    sheet.getRow(headerRow).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFEEEEEE' },
+    };
+    rowIdx += 1;
+
+    let productQty = 0;
+    let productTotal = 0;
+    for (const item of group.lines) {
+      const qty = Number(item.quantity) || 0;
+      const unitCost = Number(item.unitCost) || 0;
+      const lineTotal = qty * unitCost;
+      productQty += qty;
+      productTotal += lineTotal;
+      grandQty += qty;
+      grandTotal += lineTotal;
+
+      sheet.getRow(rowIdx).values = [
+        item.size || item.variantId?.size || '—',
+        item.sku || item.variantId?.sku || '—',
+        item.color || item.variantId?.color || '—',
+        qty,
+        unitCost,
+        lineTotal,
+      ];
+      sheet.getCell(`E${rowIdx}`).numFmt = '#,##0.00';
+      sheet.getCell(`F${rowIdx}`).numFmt = '#,##0.00';
+      rowIdx += 1;
     }
 
-    rowIdx += 1;
+    sheet.getRow(rowIdx).values = [
+      '',
+      '',
+      'Product total',
+      productQty,
+      '',
+      productTotal,
+    ];
+    sheet.getCell(`C${rowIdx}`).font = { bold: true };
+    sheet.getCell(`D${rowIdx}`).font = { bold: true };
+    sheet.getCell(`F${rowIdx}`).font = { bold: true };
+    sheet.getCell(`F${rowIdx}`).numFmt = '#,##0.00';
+    sheet.getCell(`C${rowIdx}`).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFFF6D1' },
+    };
+    sheet.getCell(`D${rowIdx}`).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFFF6D1' },
+    };
+    sheet.getCell(`F${rowIdx}`).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFFF6D1' },
+    };
+    rowIdx += 2;
   }
 
-  const summaryStart = rowIdx + 1;
-  sheet.getCell(`B${summaryStart}`).value = 'ORDER SUMMARY';
-  sheet.getCell(`B${summaryStart}`).font = { bold: true, size: 12 };
-  sheet.mergeCells(`B${summaryStart}`, `D${summaryStart}`);
-
-  sheet.getRow(summaryStart + 1).values = ['', 'Line items', (po.items || []).length];
-  sheet.getRow(summaryStart + 2).values = ['', 'Total units', totalQty];
-  sheet.getRow(summaryStart + 3).values = ['', 'Currency', currency];
-  sheet.getRow(summaryStart + 4).values = ['', 'Grand total (EGP)', grandTotal];
-  sheet.getCell(`C${summaryStart + 4}`).numFmt = '#,##0.00';
-  sheet.getCell(`B${summaryStart + 4}`).font = { bold: true };
-  sheet.getCell(`C${summaryStart + 4}`).font = { bold: true, size: 13 };
-  sheet.getCell(`B${summaryStart + 4}`).fill = {
+  sheet.getCell(`A${rowIdx}`).value = 'ORDER TOTAL';
+  sheet.getCell(`A${rowIdx}`).font = { bold: true, size: 12 };
+  sheet.mergeCells(`A${rowIdx}`, `B${rowIdx}`);
+  rowIdx += 1;
+  sheet.getRow(rowIdx).values = ['Products', groups.length, '', 'Units', grandQty];
+  rowIdx += 1;
+  sheet.getRow(rowIdx).values = ['Currency', currency, '', 'Grand total', grandTotal];
+  sheet.getCell(`E${rowIdx}`).numFmt = '#,##0.00';
+  sheet.getCell(`D${rowIdx}`).font = { bold: true };
+  sheet.getCell(`E${rowIdx}`).font = { bold: true, size: 13 };
+  sheet.getCell(`D${rowIdx}`).fill = {
     type: 'pattern',
     pattern: 'solid',
-    fgColor: { argb: 'FFFFF6D1' },
+    fgColor: { argb: 'FFF5C518' },
   };
-  sheet.getCell(`C${summaryStart + 4}`).fill = {
+  sheet.getCell(`E${rowIdx}`).fill = {
     type: 'pattern',
     pattern: 'solid',
-    fgColor: { argb: 'FFFFF6D1' },
+    fgColor: { argb: 'FFF5C518' },
   };
 
-  sheet.getCell(`B${summaryStart + 6}`).value = 'Prepared by Gazelle OMS · Quotation for factory production';
-  sheet.getCell(`B${summaryStart + 6}`).font = { italic: true, size: 9, color: { argb: 'FF9A938B' } };
-  sheet.mergeCells(`B${summaryStart + 6}`, `H${summaryStart + 6}`);
+  rowIdx += 2;
+  sheet.getCell(`A${rowIdx}`).value = 'Prepared by Gazelle OMS for factory production';
+  sheet.getCell(`A${rowIdx}`).font = { italic: true, size: 9, color: { argb: 'FF999999' } };
+  sheet.mergeCells(`A${rowIdx}`, `F${rowIdx}`);
 
   const buffer = await workbook.xlsx.writeBuffer();
-  return { buffer, filename: `${po.poNumber}-quotation.xlsx` };
+  return { buffer, filename: `${po.poNumber}-factory-order.xlsx` };
 }
 
 export default {
