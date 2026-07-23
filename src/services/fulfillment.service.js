@@ -235,7 +235,11 @@ export async function getPickList() {
   })
     .sort({ placedAt: 1 })
     .populate('customerId', 'fullName phone riskFlag lifetimeCancelled')
-    .populate('items.variantId', 'sku title color size imageUrl');
+    .populate({
+      path: 'items.variantId',
+      select: 'sku title color size imageUrl productId',
+      populate: { path: 'productId', select: 'title' },
+    });
 }
 
 export async function getShipmentStatus(orderId) {

@@ -93,6 +93,9 @@ const orderSchema = new mongoose.Schema(
     totalCogsSnapshot: { type: Number, min: 0 },
     cancellationReason: String,
     isCreatorOrder: { type: Boolean, default: false },
+    /** Manual exchange shipment against a previous order — total is 0. */
+    isExchangeOrder: { type: Boolean, default: false, index: true },
+    exchangeFromOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', index: true },
     items: { type: [orderItemSchema], required: true, validate: [(v) => v.length > 0, 'Order must have items'] },
     verificationLog: [verificationLogSchema],
     placedAt: { type: Date, required: true },

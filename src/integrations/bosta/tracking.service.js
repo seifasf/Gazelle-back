@@ -148,25 +148,7 @@ async function transitionToward(orderId, fromStatus, toStatus, meta) {
   }
 
   const bridges = {
-    pending_verification: {
-      picked_up_by_bosta: ['verified_ready_for_shipping'],
-      in_transit: ['verified_ready_for_shipping', 'picked_up_by_bosta'],
-      delivered: ['verified_ready_for_shipping', 'picked_up_by_bosta', 'in_transit'],
-      failed_delivery: ['verified_ready_for_shipping', 'picked_up_by_bosta', 'in_transit'],
-      returning_to_origin: [
-        'verified_ready_for_shipping',
-        'picked_up_by_bosta',
-        'in_transit',
-        'failed_delivery',
-      ],
-      returned_awaiting_receipt: [
-        'verified_ready_for_shipping',
-        'picked_up_by_bosta',
-        'in_transit',
-        'failed_delivery',
-        'returning_to_origin',
-      ],
-    },
+    // pending_verification is intentionally omitted — humans must verify first.
     picked_up_by_bosta: {
       delivered: ['in_transit'],
       failed_delivery: ['in_transit'],
@@ -264,6 +246,22 @@ export async function processBostaStatusUpdate({ deliveryId, state, payload, not
   }
 
   if (order.internalStatus === internalStatus) {
+    return order;
+  }
+
+  // Call-center / stock must verify first. Never auto-skip pending_verification via Bosta
+  // (phone-match used to bridge → verified → in_transit from unrelated WooCommerce shipments).
+  if (order.internalStatus === 'pending_verification') {
+    logger.info(
+      {
+        orderId: order._id,
+        deliveryId,
+        state: stateLabel,
+        internalStatus,
+        type: normalizeBostaType(type),
+      },
+      'Ignoring Bosta status while order is still pending_verification'
+    );
     return order;
   }
 

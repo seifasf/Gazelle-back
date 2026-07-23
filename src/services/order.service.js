@@ -489,10 +489,29 @@ export async function createManualOrder({
   note,
   actorUserId,
   isCreatorOrder = false,
+  isExchangeOrder = false,
+  exchangeFromOrderId = null,
 }) {
   const ref = `MAN-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const exchange = Boolean(isExchangeOrder);
+
+  if (exchange && !exchangeFromOrderId) {
+    const err = new Error('Select the previous order this exchange replaces');
+    err.statusCode = 400;
+    throw err;
+  }
 
   const manualOrder = await withTransaction(async (session) => {
+    let priorOrder = null;
+    if (exchange) {
+      priorOrder = await Order.findById(exchangeFromOrderId).session(session);
+      if (!priorOrder) {
+        const err = new Error('Previous exchange order not found');
+        err.statusCode = 404;
+        throw err;
+      }
+    }
+
     let customerDoc = await Customer.findOne({ phone: customer.phone }).session(session);
     if (!customerDoc) {
       [customerDoc] = await Customer.create(
@@ -527,15 +546,17 @@ export async function createManualOrder({
         variantId: variant._id,
         sku: variant.sku,
         quantity: item.quantity,
-        unitSellingPrice: item.unitSellingPrice ?? variant.sellingPrice,
+        unitSellingPrice: exchange ? 0 : (item.unitSellingPrice ?? variant.sellingPrice),
         unitCogs: variant.cogs,
       });
     }
 
-    const total = totalSellingPrice ?? orderItems.reduce(
-      (sum, i) => sum + i.unitSellingPrice * i.quantity,
-      0
-    );
+    const total = exchange
+      ? 0
+      : totalSellingPrice ?? orderItems.reduce(
+          (sum, i) => sum + i.unitSellingPrice * i.quantity,
+          0
+        );
 
     const finalShippingAddress =
       shippingMethod === 'pickup'
@@ -546,6 +567,10 @@ export async function createManualOrder({
             fullName: shippingAddress?.fullName || customer.fullName,
           };
 
+    const exchangeNote = priorOrder
+      ? `Exchange for ${priorOrder.shopifyOrderName || priorOrder.shopifyOrderId || priorOrder._id}`
+      : null;
+
     const [order] = await Order.create(
       [{
         shopifyOrderId: ref,
@@ -553,18 +578,23 @@ export async function createManualOrder({
         manualSource,
         shippingMethod: shippingMethod || 'bosta',
         paymentMethod: paymentMethod || 'cod',
-        shippingFee: shippingFee ?? 0,
+        shippingFee: exchange ? 0 : (shippingFee ?? 0),
         onlinePaymentReference: paymentMethod === 'online' ? ref : undefined,
         customerId: customerDoc._id,
         shippingAddress: finalShippingAddress,
         internalStatus: 'pending_verification',
         isCreatorOrder: Boolean(isCreatorOrder),
+        isExchangeOrder: exchange,
+        exchangeFromOrderId: exchange ? priorOrder._id : undefined,
         totalSellingPrice: total,
         totalCogsSnapshot: orderItems.reduce((s, i) => s + (i.unitCogs || 0) * i.quantity, 0),
         items: orderItems,
         placedAt: new Date(),
         assignedOrdersManagerId: actorUserId,
-        verificationLog: note ? [{ outcome: 'confirmed', note, actorUserId }] : [],
+        verificationLog: [
+          ...(note ? [{ outcome: 'confirmed', note, actorUserId }] : []),
+          ...(exchangeNote ? [{ outcome: 'confirmed', note: exchangeNote, actorUserId }] : []),
+        ],
       }],
       { session }
     );
@@ -576,14 +606,16 @@ export async function createManualOrder({
         toStatus: 'pending_verification',
         source: 'user_action',
         actorUserId,
-        note: `Manual order from ${manualSource}`,
+        note: exchange
+          ? `Exchange order from ${manualSource} (for ${priorOrder.shopifyOrderName || priorOrder.shopifyOrderId})`
+          : `Manual order from ${manualSource}`,
       },
       session
     );
 
     await Customer.updateOne({ _id: customerDoc._id }, { $inc: { lifetimeOrders: 1 } }, { session });
 
-    return Order.findById(order._id).session(session).populate('customerId');
+    return Order.findById(order._id).session(session).populate('customerId').populate('exchangeFromOrderId', 'shopifyOrderId shopifyOrderName internalStatus');
   });
 
   await notifyNewOrder(manualOrder, { source: 'manual' });

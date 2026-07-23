@@ -18,7 +18,18 @@ function deliveryCod(delivery) {
   return Number(delivery?.cod?.amount ?? delivery?.codAmount ?? 0) || 0;
 }
 
+/** Foreign channels (old Woo store, etc.) must never auto-link onto Gazelle Shopify orders. */
+function isForeignBostaDelivery(delivery) {
+  const src = String(delivery?.creationSrc || delivery?.source || '').toUpperCase();
+  if (src === 'WOOCOMMERCE' || src === 'WOO') return true;
+  const ref = String(delivery?.businessReference || '').trim().toLowerCase();
+  if (ref.startsWith('woocommerce') || ref.startsWith('woo_') || ref.startsWith('woo-')) return true;
+  return false;
+}
+
 function scoreDeliveryMatch(order, delivery) {
+  if (isForeignBostaDelivery(delivery)) return -999;
+
   let score = 0;
   const ref = String(delivery.businessReference || '').trim();
   const orderId = String(order._id);
@@ -196,12 +207,12 @@ export async function syncOrderStatesFromBosta({ limit = 80, since = null } = {}
   }
 
   // 2) Link unlinked orders with high-confidence phone matches.
+  // Skip pending_verification — Bosta must not attach/advance until a human verifies.
   const unlinkedFilter = {
     $or: [{ bostaDeliveryId: null }, { bostaDeliveryId: { $exists: false } }],
     shippingMethod: { $ne: 'pickup' },
     internalStatus: {
       $in: [
-        'pending_verification',
         'verified_ready_for_shipping',
         'picked_up_by_bosta',
         'in_transit',
