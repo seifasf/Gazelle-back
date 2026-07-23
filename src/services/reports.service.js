@@ -7,6 +7,7 @@ import Employee from '../models/Employee.js';
 import '../models/Customer.js';
 import * as kpiService from './kpi.service.js';
 import logger from '../utils/logger.js';
+import { ORDERS_PLACED_FROM_YMD } from '../constants/index.js';
 
 /** Business calendar for Gazelle (Egypt). */
 const BUSINESS_TZ = 'Africa/Cairo';
@@ -74,6 +75,36 @@ function endOfBusinessDay(ymdOrDate) {
 
 function nowDate() {
   return new Date();
+}
+
+/**
+ * Clamp a dashboard range so order-based metrics start at ORDERS_PLACED_FROM_YMD.
+ * Money KPIs keep the original `range` unchanged.
+ */
+function ordersMetricsRange(range) {
+  const floorYmd = ORDERS_PLACED_FROM_YMD;
+  const fromYmd = range?.fromYmd || formatYmdInTz(range.from);
+  const toYmd = range?.toYmd || formatYmdInTz(range.to);
+  const clampedFromYmd = fromYmd < floorYmd ? floorYmd : fromYmd;
+  if (clampedFromYmd > toYmd) {
+    // Selected window is entirely before cutover — empty order window.
+    return {
+      ...range,
+      from: startOfBusinessDay(floorYmd),
+      to: startOfBusinessDay(floorYmd),
+      fromYmd: floorYmd,
+      toYmd: floorYmd,
+      empty: true,
+    };
+  }
+  return {
+    ...range,
+    from: startOfBusinessDay(clampedFromYmd),
+    to: range.to,
+    fromYmd: clampedFromYmd,
+    toYmd,
+    empty: false,
+  };
 }
 
 function listYmdInclusive(fromYmd, toYmd) {
@@ -183,15 +214,15 @@ async function paymobReceivedForRange({ from, to }) {
 }
 
 async function codCollectedForRange({ from, to }) {
-  // Sync Delivered COD from Bosta into OMS, then sum Gazelle-linked stamps only.
+  // Prefer live aggregate when sync finishes; raise timeout so Cairo-week COD can refresh.
   try {
     const { isBostaConfigured, syncAndSumDeliveredCod } = await import(
       '../integrations/bosta/cod.service.js'
     );
     if (isBostaConfigured()) {
       const live = await Promise.race([
-        syncAndSumDeliveredCod({ from, to, maxPages: 40 }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Bosta COD timeout')), 18000)),
+        syncAndSumDeliveredCod({ from, to, maxPages: 60 }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Bosta COD timeout')), 45000)),
       ]);
       return live;
     }
@@ -225,9 +256,10 @@ async function codCollectedForRange({ from, to }) {
 }
 
 /**
- * Outstanding COD for the admin-selected days only:
+ * Outstanding COD for the admin-selected days only (Bosta COD shipments):
  * - delivered in range and still unpaid, or
  * - still with courier and placed in range.
+ * Excludes customer pickup / local courier (no Bosta cash cycle).
  */
 async function codLeftToCollect({ from, to }) {
   const [row] = await Order.aggregate([
@@ -235,6 +267,13 @@ async function codLeftToCollect({ from, to }) {
       $match: {
         $or: [{ paymentMethod: 'cod' }, { paymentMethod: { $exists: false } }, { paymentMethod: null }],
         $and: [
+          {
+            $or: [
+              { shippingMethod: 'bosta' },
+              { shippingMethod: { $exists: false } },
+              { shippingMethod: null },
+            ],
+          },
           {
             $or: [
               {
@@ -288,14 +327,16 @@ async function bostaReturnCountForRange({ from, to }) {
 
     const bosta = await bostaReturnsForRange({ from, to });
     return {
-      count: bosta.count ?? 0,
-      amount: bosta.amount ?? 0,
+      count: bosta.linkedCount ?? 0,
+      accountCount: bosta.count ?? 0,
+      amount: bosta.linkedAmount ?? 0,
       linkedCount: bosta.linkedCount ?? 0,
+      linkedRtoCount: bosta.linkedRtoCount ?? 0,
       source: 'bosta',
     };
   } catch (err) {
     logger.warn({ err }, 'Bosta return count failed');
-    return { count: 0, amount: 0, linkedCount: 0, source: 'bosta' };
+    return { count: 0, accountCount: 0, amount: 0, linkedCount: 0, linkedRtoCount: 0, source: 'bosta' };
   }
 }
 
@@ -778,6 +819,8 @@ async function returnsAnalyticsForRange({ from, to }) {
 /** Short in-memory cache so dashboard refreshes feel instant. */
 const dashboardCache = new Map();
 const DASHBOARD_CACHE_TTL_MS = 45_000;
+const dashboardCoreCache = new Map();
+const dashboardMoneyCache = new Map();
 const dashboardSummaryCache = new Map();
 const dashboardDetailsCache = new Map();
 
@@ -798,52 +841,27 @@ function setBoundedCache(cache, key, data) {
   }
 }
 
-async function buildDashboardSummary(range, preset) {
-  const [
-    ordersByStatus,
-    deliveredLifetime,
-    totalClosed,
-    payment,
-    paymobReceived,
-    codCollected,
-    leftToCollect,
-    bostaReturns,
-    deliveredInRange,
-    gazelleReturnCount,
-  ] = await Promise.all([
+async function buildDashboardCore(range, preset) {
+  const orderRange = ordersMetricsRange(range);
+  const emptyPayment = {
+    totalCount: 0,
+    totals: { revenueExclShipping: 0, revenueInclShipping: 0, shippingFeeTotal: 0 },
+    cod: { count: 0, revenueExclShipping: 0, revenueInclShipping: 0, percentByCount: 0 },
+    online: { count: 0, revenueExclShipping: 0, revenueInclShipping: 0, percentByCount: 0 },
+  };
+
+  const [ordersByStatus, deliveredLifetime, totalClosed, payment] = await Promise.all([
     Order.aggregate([{ $group: { _id: '$internalStatus', count: { $sum: 1 } } }]),
     Order.countDocuments({ internalStatus: 'delivered' }),
     Order.countDocuments({ closedAt: { $exists: true } }),
-    paymentSplitForRange(range),
-    paymobReceivedForRange(range),
-    codCollectedForRange(range),
-    codLeftToCollect(range),
-    bostaReturnCountForRange(range),
-    deliveredCountForRange(range),
-    gazelleReturnCountForRange(range),
+    orderRange.empty ? Promise.resolve(emptyPayment) : paymentSplitForRange(orderRange),
   ]);
 
   const statusMap = Object.fromEntries(ordersByStatus.map((s) => [s._id, s.count]));
   const deliverySuccessRate =
     totalClosed > 0 ? Math.round((deliveredLifetime / totalClosed) * 100) : null;
-
   const revenueExclShipping = payment?.totals?.revenueExclShipping ?? 0;
   const ordersPlaced = payment?.totalCount ?? 0;
-  const returnCount = bostaReturns.count ?? 0;
-  const returns = {
-    amount: bostaReturns.amount ?? 0,
-    count: returnCount,
-    bostaCount: returnCount,
-    bostaAmount: bostaReturns.amount ?? 0,
-    byType: {},
-    gazelleCount: gazelleReturnCount,
-  };
-
-  // Executive return rate: Bosta returns ÷ delivered in range.
-  const returnRate =
-    deliveredInRange > 0
-      ? pct(returnCount, deliveredInRange)
-      : null;
 
   return {
     ordersByStatus: statusMap,
@@ -857,8 +875,42 @@ async function buildDashboardSummary(range, preset) {
       fromYmd: range.fromYmd,
       toYmd: range.toYmd,
       timezone: BUSINESS_TZ,
+      ordersFromYmd: orderRange.fromYmd,
+      ordersToYmd: orderRange.toYmd,
     },
     payment,
+    ordersPlaced,
+    revenueToday: revenueExclShipping,
+    revenueCustom: revenueExclShipping,
+  };
+}
+
+async function buildDashboardMoney(range) {
+  const [paymobReceived, codCollected, leftToCollect, bostaReturns, deliveredInRange, gazelleReturnCount] =
+    await Promise.all([
+      paymobReceivedForRange(range),
+      codCollectedForRange(range),
+      codLeftToCollect(range),
+      bostaReturnCountForRange(range),
+      deliveredCountForRange(range),
+      gazelleReturnCountForRange(range),
+    ]);
+
+  const returnCount = bostaReturns.count ?? 0;
+  const returns = {
+    amount: bostaReturns.amount ?? 0,
+    count: returnCount,
+    bostaCount: returnCount,
+    accountCount: bostaReturns.accountCount ?? returnCount,
+    bostaAmount: bostaReturns.amount ?? 0,
+    byType: {},
+    gazelleCount: gazelleReturnCount,
+  };
+
+  const returnRate =
+    deliveredInRange > 0 ? pct(returnCount, deliveredInRange) : null;
+
+  return {
     paymobReceived,
     codCollected,
     leftToCollect,
@@ -868,21 +920,34 @@ async function buildDashboardSummary(range, preset) {
       returns: returnCount,
       orders: deliveredInRange,
       delivered: deliveredInRange,
+      accountReturns: bostaReturns.accountCount ?? returnCount,
       warehouseConfirms: gazelleReturnCount,
-      source: 'bosta',
+      source: 'bosta_linked',
       real: true,
     },
-    ordersPlaced,
-    revenueToday: revenueExclShipping,
-    revenueCustom: revenueExclShipping,
   };
 }
 
+async function buildDashboardSummary(range, preset) {
+  const [core, money] = await Promise.all([
+    buildDashboardCore(range, preset),
+    buildDashboardMoney(range),
+  ]);
+  return { ...core, ...money };
+}
+
 async function buildDashboardDetails(range) {
+  const orderRange = ordersMetricsRange(range);
   const [dailyBreakdown, topProducts, orderMix, returnsAnalytics] = await Promise.all([
-    dailyBreakdownForRange(range),
-    topProductsForRange(range),
-    orderMixForRange(range),
+    orderRange.empty ? Promise.resolve([]) : dailyBreakdownForRange(orderRange),
+    orderRange.empty ? Promise.resolve([]) : topProductsForRange(orderRange),
+    orderRange.empty
+      ? Promise.resolve({
+          payment: { codPercent: 0, onlinePercent: 0 },
+          channel: { chatPercent: 0, onlineStorePercent: 0 },
+        })
+      : orderMixForRange(orderRange),
+    // Money / returns analytics stay on the full selected range
     returnsAnalyticsForRange(range),
   ]);
 
@@ -906,6 +971,46 @@ async function buildDashboardDetails(range) {
       range: { from: range.from, to: range.to },
     },
   };
+}
+
+export async function getDashboardCore(query = {}) {
+  const cacheKey = dashboardCacheKey(query);
+  const cached = dashboardCoreCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < DASHBOARD_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  const preset = query?.preset || 'day';
+  const range = rangeForPreset({
+    preset,
+    date: query?.date,
+    from: query?.from,
+    to: query?.to,
+  });
+
+  const result = await buildDashboardCore(range, preset);
+  setBoundedCache(dashboardCoreCache, cacheKey, result);
+  return result;
+}
+
+export async function getDashboardMoney(query = {}) {
+  const cacheKey = dashboardCacheKey(query);
+  const cached = dashboardMoneyCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < DASHBOARD_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  const preset = query?.preset || 'day';
+  const range = rangeForPreset({
+    preset,
+    date: query?.date,
+    from: query?.from,
+    to: query?.to,
+  });
+
+  const result = await buildDashboardMoney(range);
+  setBoundedCache(dashboardMoneyCache, cacheKey, result);
+  return result;
 }
 
 export async function getDashboardSummary(query = {}) {
@@ -1250,6 +1355,8 @@ export async function getTopSellersByUnits({ month, limit = 40 } = {}) {
 
 export default {
   getDashboardStats,
+  getDashboardCore,
+  getDashboardMoney,
   getDashboardSummary,
   getDashboardDetails,
   getProfitabilityReport,

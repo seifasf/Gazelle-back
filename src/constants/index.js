@@ -58,6 +58,13 @@ export const MANUAL_ORDER_SOURCES = [
 
 export const SHIPPING_METHODS = ['bosta', 'local_shipping', 'pickup'];
 
+/**
+ * OMS order cutover (Cairo calendar day).
+ * Order lists + order-based dashboard tiles only include orders placed on/after this day.
+ * Money KPIs (COD, Paymob, Bosta returns) keep the admin-selected full date range.
+ */
+export const ORDERS_PLACED_FROM_YMD = '2026-07-20';
+
 export const JOB_NAMES = {
   PROCESS_SHOPIFY_WEBHOOK: 'process-shopify-webhook',
   PROCESS_BOSTA_WEBHOOK: 'process-bosta-webhook',

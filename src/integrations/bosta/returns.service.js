@@ -245,9 +245,10 @@ export async function bostaReturnsForRange({ from, to }) {
 
   for (const row of rows) {
     const code = row.typeCode;
-    if (code === 20) byType.rto += 1;
-    else if (code === 25) byType.customer_return += 1;
-    else if (code === 30) byType.exchange += 1;
+    // Bosta type codes: 10 SEND, 15 EXCHANGE, 20 CRP, 25 RTO
+    if (code === 25 || /return to origin|rto/i.test(String(row.typeValue || ''))) byType.rto += 1;
+    else if (code === 20 || /customer return/i.test(String(row.typeValue || ''))) byType.customer_return += 1;
+    else if (code === 15 || code === 30 || /exchange/i.test(String(row.typeValue || ''))) byType.exchange += 1;
     else if (code === 10) byType.send += 1;
     else byType.other += 1;
 
@@ -255,10 +256,22 @@ export async function bostaReturnsForRange({ from, to }) {
     if (row.orderId) linkedCount += 1;
   }
 
+  const linkedRows = rows.filter((r) => r.orderId);
+  const linkedRto = linkedRows.filter(
+    (r) =>
+      r.typeCode === 25 ||
+      /return to origin|rto/i.test(String(r.typeValue || '')) ||
+      r.typeCode === 20 ||
+      /customer return/i.test(String(r.typeValue || ''))
+  ).length;
+
   return {
     count: rows.length,
-    amount,
+    /** Gazelle-linked returns only — use for executive return rate (same Bosta account may hold other shops). */
     linkedCount,
+    linkedRtoCount: linkedRto,
+    amount,
+    linkedAmount: linkedRows.reduce((s, r) => s + (r.codAmount || 0), 0),
     byType,
     rows,
   };

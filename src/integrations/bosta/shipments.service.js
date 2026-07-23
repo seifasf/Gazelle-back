@@ -11,6 +11,111 @@ function splitName(fullName) {
   };
 }
 
+/**
+ * Build Bosta package description (وصف الشحنة) with product name, SKU, size, color.
+ * Prefer keeping every line intact; only soft-truncate if very long.
+ */
+function buildPackageDescription(order, variantsById = new Map()) {
+  const ref =
+    order.shopifyOrderName ||
+    (order.shopifyOrderId ? `#${order.shopifyOrderId}` : null) ||
+    `Order ${order._id}`;
+
+  const lines = [];
+  for (const item of order.items || []) {
+    const variant =
+      (item.variantId && typeof item.variantId === 'object' && (item.variantId.sku || item.variantId.title)
+        ? item.variantId
+        : null) ||
+      variantsById.get(String(item.variantId?._id || item.variantId)) ||
+      {};
+    const name =
+      variant.productTitle ||
+      (variant.productId && typeof variant.productId === 'object' ? variant.productId.title : null) ||
+      variant.title ||
+      item.title ||
+      '';
+    const sku = variant.sku || item.sku || '';
+    const size = variant.size != null && variant.size !== '' ? `Size ${variant.size}` : '';
+    const color = variant.color || '';
+    const qty = item.quantity || 1;
+    const bits = [name, sku, size, color].filter(Boolean);
+    const label = bits.length ? bits.join(' · ') : sku || 'item';
+    lines.push(`${label} x${qty}`);
+  }
+
+  const itemsText = lines.join(' | ');
+  const full = itemsText ? `${ref} | ${itemsText}` : String(ref);
+  // Soft limit — Bosta accepts ~200+; avoid cutting mid-SKU when possible
+  if (full.length <= 400) return full;
+  return `${full.slice(0, 397)}…`;
+}
+
+async function loadVariantsForOrder(order) {
+  const map = new Map();
+  const idsToFetch = [];
+
+  for (const item of order.items || []) {
+    const v = item.variantId;
+    if (!v) continue;
+    // Populated variant doc (has sku/title). Plain ObjectId is also typeof 'object'.
+    const isPopulatedDoc =
+      typeof v === 'object' &&
+      v._bsontype !== 'ObjectId' &&
+      !(v instanceof Buffer) &&
+      (v.sku != null || v.title != null || (v._id && (v.color != null || v.size != null || v.productId)));
+    if (isPopulatedDoc) {
+      map.set(String(v._id), v);
+    } else {
+      idsToFetch.push(String(v._id || v));
+    }
+  }
+
+  if (idsToFetch.length) {
+    const Variant = (await import('../../models/Variant.js')).default;
+    const Product = (await import('../../models/Product.js')).default;
+    const variants = await Variant.find({ _id: { $in: [...new Set(idsToFetch)] } })
+      .select('sku title color size productId imageUrl')
+      .lean();
+    const productIds = [...new Set(variants.map((v) => String(v.productId)).filter(Boolean))];
+    const products = productIds.length
+      ? await Product.find({ _id: { $in: productIds } }).select('title').lean()
+      : [];
+    const productTitleById = Object.fromEntries(products.map((p) => [String(p._id), p.title]));
+    for (const v of variants) {
+      const pt = productTitleById[String(v.productId)] || v.title;
+      map.set(String(v._id), {
+        ...v,
+        productTitle: pt,
+        title: pt,
+      });
+    }
+  }
+
+  // Resolve product titles for already-populated variants that only have productId
+  const needProduct = [];
+  for (const v of map.values()) {
+    if (v.productId && typeof v.productId !== 'object' && !v.productTitle) {
+      needProduct.push(String(v.productId));
+    }
+  }
+  if (needProduct.length) {
+    const Product = (await import('../../models/Product.js')).default;
+    const products = await Product.find({ _id: { $in: [...new Set(needProduct)] } })
+      .select('title')
+      .lean();
+    const titles = Object.fromEntries(products.map((p) => [String(p._id), p.title]));
+    for (const [id, v] of map) {
+      const pt =
+        (v.productId && typeof v.productId === 'object' ? v.productId.title : null) ||
+        titles[String(v.productId)];
+      if (pt) map.set(id, { ...v, productTitle: pt, title: pt });
+    }
+  }
+
+  return map;
+}
+
 function compactCity(value) {
   return String(value || '')
     .toLowerCase()
@@ -121,12 +226,16 @@ export async function createDelivery(order, customer) {
   };
 
   const webhookUrl = bostaWebhookUrl(config.APP_URL);
+  const variantsById = await loadVariantsForOrder(order);
+  const itemsCount = (order.items || []).reduce((s, i) => s + (i.quantity || 0), 0);
+  const description = buildPackageDescription(order, variantsById);
+
   const payload = {
     type: 10,
     specs: {
       packageDetails: {
-        itemsCount: (order.items || []).reduce((s, i) => s + (i.quantity || 0), 0),
-        description: `Order ${order.shopifyOrderId}`,
+        itemsCount,
+        description,
       },
     },
     receiver: {
@@ -137,6 +246,7 @@ export async function createDelivery(order, customer) {
     dropOffAddress,
     businessReference: order._id.toString(),
     cod: codAmount,
+    notes: description,
   };
 
   // Bosta rejects localhost webhook URLs — only send public ones (Render/prod).
@@ -160,6 +270,46 @@ export async function createDelivery(order, customer) {
     }
     throw err;
   }
+}
+
+/**
+ * Update وصف الشحنة on an existing Bosta delivery (v0 PUT — v2 has no update route).
+ */
+export async function updateDeliveryPackageDescription(deliveryId, order) {
+  const id = String(deliveryId || '').trim();
+  if (!id || !order) return null;
+
+  const variantsById = await loadVariantsForOrder(order);
+  const itemsCount = (order.items || []).reduce((s, i) => s + (i.quantity || 0), 0);
+  const description = buildPackageDescription(order, variantsById);
+  const body = {
+    specs: { packageDetails: { itemsCount, description } },
+    notes: description,
+  };
+
+  const base = (config.BOSTA_API_BASE_URL || 'https://app.bosta.co/api/v2').replace(/\/api\/v2\/?$/, '');
+  const url = `${base}/api/v0/deliveries/${encodeURIComponent(id)}`;
+  const response = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      Authorization: config.BOSTA_API_KEY,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
+  if (!response.ok) {
+    const err = new Error(data.message || `Bosta delivery update failed: ${response.status}`);
+    err.statusCode = response.status;
+    throw err;
+  }
+  return { description, data };
 }
 
 export async function getDelivery(deliveryIdOrTracking) {
@@ -187,47 +337,73 @@ export async function getDelivery(deliveryIdOrTracking) {
 }
 
 /**
- * Print Air Waybill (بوليصة) — official Bosta SDK path:
- * GET /deliveries/awb?ids=<deliveryId>
- * Returns a PDF URL string or object with url.
+ * Print Air Waybill (بوليصة).
+ * Bosta v2 path that works: GET /deliveries/mass-awb?ids=<deliveryId>
+ * Response `data` is a base64-encoded PDF (string starting with JVBERi…).
+ * Legacy SDK path GET /deliveries/awb is v1-only and 404s on v2.
  */
-export async function getAwb(deliveryId) {
+export async function getAwb(deliveryId, trackingNumber) {
   const id = String(deliveryId || '').trim();
-  if (!id) {
+  const tracking = String(trackingNumber || '').trim();
+  if (!id && !tracking) {
     const err = new Error('Missing Bosta delivery id');
     err.statusCode = 400;
     throw err;
   }
 
-  const response = await bostaRequest('/deliveries/awb', {
-    method: 'GET',
-    query: { ids: id },
-  });
-  const raw = response?.data ?? response;
-  return normalizeAwbPayload(raw, id);
+  const attempts = [];
+  if (id) attempts.push({ label: 'mass-awb-id', path: '/deliveries/mass-awb', query: { ids: id } });
+  if (tracking) attempts.push({ label: 'mass-awb-tracking', path: '/deliveries/mass-awb', query: { ids: tracking } });
+  // Fallbacks for older API shapes
+  if (id) attempts.push({ label: 'awb-query', path: '/deliveries/awb', query: { ids: id } });
+  if (id) attempts.push({ label: 'awb-by-id', path: `/deliveries/${encodeURIComponent(id)}/awb` });
+
+  let lastErr;
+  for (const attempt of attempts) {
+    try {
+      const response = await bostaRequest(attempt.path, {
+        method: 'GET',
+        query: attempt.query,
+      });
+      const raw = response?.data ?? response;
+      const normalized = normalizeAwbPayload(raw, id || tracking);
+      if (normalized.url) return normalized;
+      lastErr = new Error('Bosta AWB response had no PDF');
+    } catch (err) {
+      lastErr = err;
+      // Try next variant on 404 / not-found; rethrow hard failures
+      if (err.statusCode && err.statusCode !== 404 && err.statusCode !== 400) throw err;
+    }
+  }
+
+  const err = new Error(lastErr?.message || 'Failed to print Bosta AWB');
+  err.statusCode = lastErr?.statusCode || 502;
+  throw err;
 }
 
 function normalizeAwbPayload(raw, deliveryId) {
   if (typeof raw === 'string') {
-    if (/^https?:\/\//i.test(raw) || raw.startsWith('data:')) {
-      return { url: raw, deliveryId };
+    const trimmed = raw.trim();
+    if (/^https?:\/\//i.test(trimmed) || trimmed.startsWith('data:')) {
+      return { url: trimmed, deliveryId };
     }
-    // Some responses return bare base64 PDF
-    if (raw.length > 100 && !raw.includes(' ')) {
-      return { url: `data:application/pdf;base64,${raw}`, deliveryId };
+    // mass-awb returns raw base64 PDF (JVBERi0… = %PDF)
+    if (trimmed.length > 100) {
+      return { url: `data:application/pdf;base64,${trimmed}`, deliveryId };
     }
-    return { url: raw, deliveryId };
+    return { url: trimmed, deliveryId };
   }
   if (raw && typeof raw === 'object') {
-    const url =
-      raw.url ||
-      raw.awbUrl ||
-      raw.pdfUrl ||
-      raw.data?.url ||
-      (typeof raw.data === 'string' ? raw.data : null);
-    return { url: url || null, deliveryId, ...raw };
+    const nested = raw.url || raw.awbUrl || raw.pdfUrl || raw.data?.url;
+    if (nested) return { url: nested, deliveryId };
+    if (typeof raw.data === 'string' && raw.data.length > 100) {
+      const d = raw.data.trim();
+      if (/^https?:\/\//i.test(d) || d.startsWith('data:')) return { url: d, deliveryId };
+      return { url: `data:application/pdf;base64,${d}`, deliveryId };
+    }
+    return { url: null, deliveryId, ...raw };
   }
   return { url: null, deliveryId, raw };
 }
 
-export default { createDelivery, getDelivery, getAwb };
+export default { createDelivery, getDelivery, getAwb, updateDeliveryPackageDescription };

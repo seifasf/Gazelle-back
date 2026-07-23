@@ -16,6 +16,8 @@ router.get(
 router.use(adminOnly);
 
 router.get('/dashboard', reportsController.dashboard);
+router.get('/dashboard/core', reportsController.dashboardCore);
+router.get('/dashboard/money', reportsController.dashboardMoney);
 router.get('/dashboard/summary', reportsController.dashboardSummary);
 router.get('/dashboard/details', reportsController.dashboardDetails);
 router.get('/profitability', reportsController.profitability);

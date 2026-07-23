@@ -9,6 +9,7 @@ router.use(authenticate, sanitizeFinancialResponse);
 
 router.get('/catalog', requireRoles('admin', 'stock_manager', 'orders_manager'), inventoryController.listCatalog);
 router.get('/catalog/filters', requireRoles('admin', 'stock_manager', 'orders_manager'), inventoryController.catalogFilters);
+router.post('/catalog/export-stock', requireRoles('admin', 'stock_manager'), inventoryController.exportCatalogStock);
 router.get('/variants/lookup', requireRoles('admin', 'stock_manager', 'orders_manager'), inventoryController.lookupVariantBySku);
 router.get(
   '/variants/lookup-family',
@@ -17,6 +18,7 @@ router.get(
 );
 router.post('/stock-intake', requireRoles('admin', 'stock_manager'), inventoryController.stockIntake);
 router.post('/stock-intake/batch', requireRoles('admin', 'stock_manager'), inventoryController.stockIntakeBatch);
+router.post('/stock-set/batch', requireRoles('admin', 'stock_manager'), inventoryController.stockSetBatch);
 // Orders managers need variant lists for exchanges during verification.
 router.get('/variants', requireRoles('admin', 'stock_manager', 'orders_manager'), inventoryController.listVariants);
 router.get('/variants/:id', requireRoles('admin', 'stock_manager', 'orders_manager'), inventoryController.getVariant);

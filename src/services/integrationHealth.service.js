@@ -5,10 +5,16 @@ import { getShopifyStatus } from '../integrations/shopify/setup.service.js';
 import { isBostaConfigured } from '../integrations/bosta/client.js';
 import { bostaWebhookUrl } from '../integrations/bosta/webhookPayload.js';
 import { config } from '../config/index.js';
+import { ORDERS_PLACED_FROM_YMD } from '../constants/index.js';
+
+function ordersCutoff() {
+  return new Date(`${ORDERS_PLACED_FROM_YMD}T00:00:00+03:00`);
+}
 
 export async function getIntegrationHealth() {
   const settings = await Settings.findOne({ key: 'global' });
   const shopify = await getShopifyStatus();
+  const since = ordersCutoff();
 
   const [
     shopifyWebhookLast,
@@ -24,10 +30,13 @@ export async function getIntegrationHealth() {
     WebhookReceipt.findOne({ source: 'bosta' }).sort({ createdAt: -1 }).select('createdAt processedAt error'),
     WebhookReceipt.countDocuments({ source: 'bosta', error: { $exists: true, $ne: null } }),
     WebhookReceipt.findOne({ source: 'paymob' }).sort({ createdAt: -1 }).select('createdAt'),
-    Order.countDocuments({ bostaShipmentStatus: 'failed' }),
-    Order.countDocuments({ internalStatus: 'pending_verification' }),
-    Order.countDocuments({ internalStatus: 'verified_ready_for_shipping' }),
-    Order.countDocuments({ internalStatus: { $in: ['picked_up_by_bosta', 'in_transit'] } }),
+    Order.countDocuments({ bostaShipmentStatus: 'failed', placedAt: { $gte: since } }),
+    Order.countDocuments({ internalStatus: 'pending_verification', placedAt: { $gte: since } }),
+    Order.countDocuments({ internalStatus: 'verified_ready_for_shipping', placedAt: { $gte: since } }),
+    Order.countDocuments({
+      internalStatus: { $in: ['picked_up_by_bosta', 'in_transit'] },
+      placedAt: { $gte: since },
+    }),
   ]);
 
   return {

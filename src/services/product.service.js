@@ -399,6 +399,64 @@ export async function getStockQueueCounts() {
   return { lowStock, discrepancies };
 }
 
+export async function exportCatalogStockExcel({ productIds = [] } = {}) {
+  const ExcelJS = (await import('exceljs')).default;
+  const { workbookBuffer, styleHeaderRow } = await import('../utils/excelExport.js');
+
+  const ids = [...new Set((productIds || []).map(String).filter(Boolean))];
+  if (!ids.length) {
+    const err = new Error('Select at least one product to export');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const products = await Product.find({ _id: { $in: ids } }).sort({ title: 1 }).lean();
+  const variants = await Variant.find({ productId: { $in: products.map((p) => p._id) } })
+    .sort({ color: 1, size: 1 })
+    .lean();
+
+  const byProduct = new Map();
+  for (const v of variants) {
+    const key = String(v.productId);
+    if (!byProduct.has(key)) byProduct.set(key, []);
+    byProduct.get(key).push(v);
+  }
+
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Stock');
+  sheet.columns = [
+    { header: 'Product', key: 'product', width: 36 },
+    { header: 'SKU', key: 'sku', width: 22 },
+    { header: 'Color', key: 'color', width: 14 },
+    { header: 'Size', key: 'size', width: 10 },
+    { header: 'Warehouse', key: 'realStock', width: 12 },
+    { header: 'On hold', key: 'onHoldStock', width: 10 },
+    { header: 'Shopify mirror', key: 'onlineStock', width: 14 },
+    { header: 'Low threshold', key: 'lowStockThreshold', width: 14 },
+  ];
+  styleHeaderRow(sheet);
+
+  for (const product of products) {
+    const list = byProduct.get(String(product._id)) || [];
+    for (const v of list) {
+      sheet.addRow({
+        product: product.title,
+        sku: v.sku,
+        color: v.color || '',
+        size: v.size ?? '',
+        realStock: v.realStock ?? 0,
+        onHoldStock: v.onHoldStock ?? 0,
+        onlineStock: v.onlineStock ?? 0,
+        lowStockThreshold: v.lowStockThreshold ?? '',
+      });
+    }
+  }
+
+  const buffer = await workbookBuffer(workbook);
+  const stamp = new Date().toISOString().slice(0, 10);
+  return { buffer, filename: `gazelle-stock-selected-${stamp}.xlsx` };
+}
+
 export default {
   listVariants,
   getVariantById,
@@ -411,4 +469,5 @@ export default {
   listCatalog,
   getCatalogFilterOptions,
   getStockQueueCounts,
+  exportCatalogStockExcel,
 };

@@ -5,7 +5,11 @@ import bwipjs from 'bwip-js';
 import { barcodeValueForVariant } from './barcode.service.js';
 import Order from '../models/Order.js';
 import Variant from '../models/Variant.js';
-import { createDelivery, getAwb } from '../integrations/bosta/shipments.service.js';
+import {
+  createDelivery,
+  getAwb,
+  updateDeliveryPackageDescription,
+} from '../integrations/bosta/shipments.service.js';
 import orderService from '../services/order.service.js';
 import logger from '../utils/logger.js';
 
@@ -79,6 +83,15 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
       order.assignedStockManagerId = actorUserId;
     }
     await order.save();
+    // Refresh وصف الشحنة with product name / SKU / size / color before AWB print
+    try {
+      await updateDeliveryPackageDescription(order.bostaDeliveryId, order);
+    } catch (err) {
+      logger.warn(
+        { err: err.message, orderId, deliveryId: order.bostaDeliveryId },
+        'Could not refresh Bosta package description'
+      );
+    }
     return {
       deliveryId: order.bostaDeliveryId,
       trackingNumber: order.bostaTrackingNumber,
@@ -122,7 +135,7 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
  */
 export async function prepareAwbForOrder(orderId, actorUserId) {
   const shipment = await ensureBostaDeliveryForOrder(orderId, actorUserId);
-  const awb = await getAwb(shipment.deliveryId);
+  const awb = await getAwb(shipment.deliveryId, shipment.trackingNumber);
   return {
     url: awb?.url || null,
     deliveryId: shipment.deliveryId,
@@ -214,7 +227,12 @@ export async function pickAndPackOrder(orderId, actorUserId) {
 }
 
 export async function getPickList() {
-  return Order.find({ internalStatus: 'verified_ready_for_shipping' })
+  const { ORDERS_PLACED_FROM_YMD } = await import('../constants/index.js');
+  const cutoff = new Date(`${ORDERS_PLACED_FROM_YMD}T00:00:00+03:00`);
+  return Order.find({
+    internalStatus: 'verified_ready_for_shipping',
+    placedAt: { $gte: cutoff },
+  })
     .sort({ placedAt: 1 })
     .populate('customerId', 'fullName phone riskFlag lifetimeCancelled')
     .populate('items.variantId', 'sku title color size imageUrl');
@@ -253,7 +271,7 @@ export async function getAwbForOrder(orderId) {
     err.statusCode = 404;
     throw err;
   }
-  const awb = await getAwb(order.bostaDeliveryId);
+  const awb = await getAwb(order.bostaDeliveryId, order.bostaTrackingNumber);
   return {
     url: awb?.url || null,
     deliveryId: order.bostaDeliveryId,

@@ -14,7 +14,7 @@ import {
   buildManualAdjustmentEntry,
   buildStockIntakeEntries,
 } from './inventory.service.js';
-import { TERMINAL_ORDER_STATUSES, ORDER_STATUSES } from '../constants/index.js';
+import { TERMINAL_ORDER_STATUSES, ORDER_STATUSES, ORDERS_PLACED_FROM_YMD } from '../constants/index.js';
 import { getAgenda } from '../config/agenda.js';
 import { JOB_NAMES } from '../constants/index.js';
 import {
@@ -590,8 +590,21 @@ export async function createManualOrder({
   return manualOrder;
 }
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function ordersPlacedFromCutoff() {
+  // Cairo midnight for ORDERS_PLACED_FROM_YMD (Egypt is UTC+2 / +3 — use +03:00 bound).
+  const ymd = ORDERS_PLACED_FROM_YMD;
+  return new Date(`${ymd}T00:00:00+03:00`);
+}
+
 export async function getOrderStateCounts() {
-  const pipeline = [{ $group: { _id: '$internalStatus', count: { $sum: 1 } } }];
+  const pipeline = [
+    { $match: { placedAt: { $gte: ordersPlacedFromCutoff() } } },
+    { $group: { _id: '$internalStatus', count: { $sum: 1 } } },
+  ];
   const rows = await Order.aggregate(pipeline);
   const counts = Object.fromEntries(ORDER_STATUSES.map((s) => [s, 0]));
   for (const row of rows) {
@@ -601,12 +614,11 @@ export async function getOrderStateCounts() {
   return counts;
 }
 
-function escapeRegex(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 export async function listOrders({ status, search, orderSource, shippingMethod, limit = 50, skip = 0, sort = { placedAt: -1 } }) {
-  const filter = {};
+  const filter = {
+    // Hide pre-cutover orders from queues / lists; money KPIs still use full ranges.
+    placedAt: { $gte: ordersPlacedFromCutoff() },
+  };
   if (status) {
     const statuses = typeof status === 'string' && status.includes(',')
       ? status.split(',').map((s) => s.trim())

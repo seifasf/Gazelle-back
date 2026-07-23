@@ -20,6 +20,24 @@ export async function dashboardSummary(req, res, next) {
   }
 }
 
+export async function dashboardCore(req, res, next) {
+  try {
+    const stats = await reportsService.getDashboardCore(req.query);
+    res.json({ data: stats });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function dashboardMoney(req, res, next) {
+  try {
+    const stats = await reportsService.getDashboardMoney(req.query);
+    res.json({ data: stats });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function dashboardDetails(req, res, next) {
   try {
     const stats = await reportsService.getDashboardDetails(req.query);
@@ -86,6 +104,8 @@ export async function topSellers(req, res, next) {
 
 export default {
   dashboard,
+  dashboardCore,
+  dashboardMoney,
   dashboardSummary,
   dashboardDetails,
   profitability,
