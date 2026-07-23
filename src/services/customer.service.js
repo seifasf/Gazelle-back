@@ -63,6 +63,7 @@ export async function getCustomerShopifyOrders(customerId) {
       );
       const orders = (data.orders || []).map((o) => ({
         shopifyOrderId: String(o.id),
+        shopifyOrderName: o.name,
         name: o.name,
         totalPrice: parseFloat(o.total_price) || 0,
         currency: o.currency,
@@ -72,6 +73,23 @@ export async function getCustomerShopifyOrders(customerId) {
         createdAt: o.created_at,
         lineItemCount: (o.line_items || []).reduce((s, li) => s + (li.quantity || 0), 0),
       }));
+      // Enrich with Gazelle Bosta tracking when we have a matching local order
+      const local = await Order.find({ customerId })
+        .select('shopifyOrderId shopifyOrderName bostaTrackingNumber internalStatus')
+        .lean();
+      const byShopifyId = new Map(local.map((lo) => [String(lo.shopifyOrderId), lo]));
+      const byName = new Map(
+        local.filter((lo) => lo.shopifyOrderName).map((lo) => [String(lo.shopifyOrderName), lo])
+      );
+      for (const row of orders) {
+        const match = byShopifyId.get(row.shopifyOrderId) || byName.get(row.name);
+        if (match) {
+          row._id = match._id;
+          row.bostaTrackingNumber = match.bostaTrackingNumber || null;
+          row.internalStatus = match.internalStatus;
+          row.shopifyOrderName = match.shopifyOrderName || row.name;
+        }
+      }
       return { source: 'shopify', orders };
     } catch (err) {
       logger.warn({ err, customerId }, 'Shopify customer order history fetch failed — using local');
@@ -80,12 +98,15 @@ export async function getCustomerShopifyOrders(customerId) {
 
   const local = await Order.find({ customerId })
     .sort({ placedAt: -1 })
-    .select('shopifyOrderId internalStatus totalSellingPrice placedAt');
+    .select('shopifyOrderId shopifyOrderName bostaTrackingNumber internalStatus totalSellingPrice placedAt');
   return {
     source: 'local',
     orders: local.map((o) => ({
+      _id: o._id,
       shopifyOrderId: o.shopifyOrderId,
-      name: `#${o.shopifyOrderId}`,
+      shopifyOrderName: o.shopifyOrderName,
+      name: o.shopifyOrderName || (o.shopifyOrderId?.startsWith('MAN-') ? o.shopifyOrderId : `#${o.shopifyOrderId}`),
+      bostaTrackingNumber: o.bostaTrackingNumber || null,
       totalPrice: o.totalSellingPrice,
       internalStatus: o.internalStatus,
       createdAt: o.placedAt,
@@ -104,7 +125,7 @@ export async function getCustomerById(customerId) {
   const orders = await Order.find({ customerId })
     .sort({ placedAt: -1 })
     .limit(20)
-    .select('shopifyOrderId internalStatus totalSellingPrice placedAt deliveredAt');
+    .select('shopifyOrderId shopifyOrderName bostaTrackingNumber internalStatus totalSellingPrice placedAt deliveredAt');
 
   const deliveryReliabilityScore =
     customer.lifetimeOrders > 0

@@ -8,6 +8,7 @@ import Variant from '../models/Variant.js';
 import {
   createDelivery,
   getAwb,
+  getDelivery,
   updateDeliveryPackageDescription,
 } from '../integrations/bosta/shipments.service.js';
 import orderService from '../services/order.service.js';
@@ -23,6 +24,41 @@ function getLogoBase64() {
   } catch {
     return null;
   }
+}
+
+function isForeignBostaDelivery(delivery) {
+  const src = String(delivery?.creationSrc || delivery?.source || '').toUpperCase();
+  if (src === 'WOOCOMMERCE' || src === 'WOO') return true;
+  const ref = String(delivery?.businessReference || '').trim().toLowerCase();
+  if (ref.startsWith('woocommerce') || ref.startsWith('woo_') || ref.startsWith('woo-')) return true;
+  return false;
+}
+
+/** True when Bosta businessReference belongs to this Gazelle order. */
+function deliveryBelongsToOrder(delivery, order) {
+  if (!delivery || !order) return false;
+  if (isForeignBostaDelivery(delivery)) return false;
+  const ref = String(delivery.businessReference || '').trim();
+  if (!ref) return false;
+  if (ref === String(order._id)) return true;
+  if (order.shopifyOrderId && ref === String(order.shopifyOrderId)) return true;
+  return false;
+}
+
+async function clearWrongBostaLink(order, reason) {
+  const previous = {
+    deliveryId: order.bostaDeliveryId,
+    tracking: order.bostaTrackingNumber,
+  };
+  order.bostaDeliveryId = undefined;
+  order.bostaTrackingNumber = undefined;
+  order.bostaShipmentStatus = 'none';
+  order.bostaShipmentError = null;
+  await order.save();
+  logger.warn(
+    { orderId: order._id, ...previous, reason },
+    'Cleared wrong / foreign Bosta link from order'
+  );
 }
 
 export async function checkStockAvailability(order) {
@@ -74,30 +110,59 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
 
   assertBostaShipable(order);
 
-  if (order.bostaDeliveryId) {
-    if (order.bostaShipmentStatus !== 'created') {
-      order.bostaShipmentStatus = 'created';
-      order.bostaShipmentError = null;
-    }
-    if (actorUserId && !order.assignedStockManagerId) {
-      order.assignedStockManagerId = actorUserId;
-    }
-    await order.save();
-    // Refresh وصف الشحنة with product name / SKU / size / color before AWB print
+  if (order.bostaDeliveryId || order.bostaTrackingNumber) {
+    // Reject WooCommerce / phone-match leftovers — create a real Gazelle delivery instead.
+    let live = null;
     try {
-      await updateDeliveryPackageDescription(order.bostaDeliveryId, order);
+      live = await getDelivery(order.bostaDeliveryId || order.bostaTrackingNumber);
     } catch (err) {
       logger.warn(
         { err: err.message, orderId, deliveryId: order.bostaDeliveryId },
-        'Could not refresh Bosta package description'
+        'Could not fetch linked Bosta delivery — will clear and recreate'
       );
     }
-    return {
-      deliveryId: order.bostaDeliveryId,
-      trackingNumber: order.bostaTrackingNumber,
-      orderId,
-      created: false,
-    };
+
+    if (!live || !deliveryBelongsToOrder(live, order)) {
+      await clearWrongBostaLink(
+        order,
+        live
+          ? `foreign/mismatched ref=${live.businessReference || ''} src=${live.creationSrc || ''}`
+          : 'linked delivery not found'
+      );
+    } else {
+      if (order.bostaShipmentStatus !== 'created') {
+        order.bostaShipmentStatus = 'created';
+        order.bostaShipmentError = null;
+      }
+      if (actorUserId && !order.assignedStockManagerId) {
+        order.assignedStockManagerId = actorUserId;
+      }
+      // Keep tracking in sync with live Bosta
+      const liveTracking =
+        live.trackingNumber != null ? String(live.trackingNumber) : order.bostaTrackingNumber;
+      const liveId = String(live._id || live.id || order.bostaDeliveryId);
+      if (liveTracking && order.bostaTrackingNumber !== liveTracking) {
+        order.bostaTrackingNumber = liveTracking;
+      }
+      if (liveId && order.bostaDeliveryId !== liveId) {
+        order.bostaDeliveryId = liveId;
+      }
+      await order.save();
+      try {
+        await updateDeliveryPackageDescription(order.bostaDeliveryId, order);
+      } catch (err) {
+        logger.warn(
+          { err: err.message, orderId, deliveryId: order.bostaDeliveryId },
+          'Could not refresh Bosta package description'
+        );
+      }
+      return {
+        deliveryId: order.bostaDeliveryId,
+        trackingNumber: order.bostaTrackingNumber,
+        orderId,
+        created: false,
+      };
+    }
   }
 
   order.bostaShipmentStatus = 'creating';

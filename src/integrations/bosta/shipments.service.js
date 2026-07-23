@@ -232,6 +232,7 @@ export async function createDelivery(order, customer) {
 
   const payload = {
     type: 10,
+    allowToOpenPackage: true, // فتح الشحنة = نعم
     specs: {
       packageDetails: {
         itemsCount,
@@ -283,6 +284,7 @@ export async function updateDeliveryPackageDescription(deliveryId, order) {
   const itemsCount = (order.items || []).reduce((s, i) => s + (i.quantity || 0), 0);
   const description = buildPackageDescription(order, variantsById);
   const body = {
+    allowToOpenPackage: true,
     specs: { packageDetails: { itemsCount, description } },
     notes: description,
   };
