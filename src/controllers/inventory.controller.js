@@ -246,6 +246,17 @@ export async function getVariantBarcodeLabels(req, res, next) {
   }
 }
 
+export async function getBarcodeLabelsBatch(req, res, next) {
+  try {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    const html = await barcodeService.buildBarcodeLabelsBatchHtml(items);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export default {
   listVariants,
   getVariant,
@@ -264,4 +275,5 @@ export default {
   exportCatalogStock,
   getVariantBarcodePng,
   getVariantBarcodeLabels,
+  getBarcodeLabelsBatch,
 };

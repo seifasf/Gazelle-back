@@ -32,6 +32,11 @@ router.get(
   requireRoles('admin', 'stock_manager'),
   inventoryController.getVariantBarcodeLabels
 );
+router.post(
+  '/barcode-labels/batch',
+  requireRoles('admin', 'stock_manager'),
+  inventoryController.getBarcodeLabelsBatch
+);
 router.get('/variants/:id/ledger', requireRoles('admin', 'stock_manager'), inventoryController.getLedger);
 router.post(
   '/variants/:id/adjust',

@@ -52,8 +52,8 @@ export async function getVariantBarcodePng(variantId) {
   }
 
   const value = barcodeValueForVariant(variant);
-  // Dense, tall bars sized for the full 58×40mm sticker width.
-  const png = await renderCode128Png(value, { scale: 5, height: 18, includetext: false });
+  // Tall, wide bars — fill sticker width and stay crisp when scaled.
+  const png = await renderCode128Png(value, { scale: 6, height: 22, includetext: false });
   return {
     png,
     value,
@@ -66,16 +66,48 @@ export async function getVariantBarcodePng(variantId) {
 
 /**
  * Printable sticker sheet HTML (opens in browser → Print).
- * Layout matches warehouse labels: barcode on top, SKU, then product name.
+ * Layout: big centered barcode, then SKU + product.
  * Physical size: 5.8 cm wide × 4 cm tall.
  * copies = how many identical labels (usually = units restocked).
  */
 export async function buildBarcodeLabelHtml(variantId, copies = 1) {
-  const { png, value, sku, size, color, title } = await getVariantBarcodePng(variantId);
+  const label = await getVariantBarcodePng(variantId);
   const n = Math.min(Math.max(Number(copies) || 1, 1), 200);
-  const imgSrc = `data:image/png;base64,${png.toString('base64')}`;
+  return buildLabelSheetHtml([
+    { ...label, copies: n },
+  ]);
+}
 
-  const labels = Array.from({ length: n }, () => `
+/**
+ * Multiple SKUs in one print sheet.
+ * items: [{ variantId, copies }]
+ */
+export async function buildBarcodeLabelsBatchHtml(items = []) {
+  const rows = [];
+  let total = 0;
+  for (const item of items) {
+    const copies = Math.min(Math.max(Number(item.copies) || 1, 1), 200);
+    if (total + copies > 500) break;
+    const label = await getVariantBarcodePng(item.variantId);
+    rows.push({ ...label, copies });
+    total += copies;
+  }
+  if (!rows.length) {
+    const err = new Error('No barcode labels to print');
+    err.statusCode = 400;
+    throw err;
+  }
+  return buildLabelSheetHtml(rows);
+}
+
+function buildLabelSheetHtml(labelRows) {
+  const totalCopies = labelRows.reduce((s, r) => s + (r.copies || 1), 0);
+  const skuSummary = labelRows.map((r) => `${r.copies}× ${r.sku}`).join(', ');
+
+  const labels = labelRows
+    .flatMap(({ png, value, sku, size, color, title, copies }) => {
+      const imgSrc = `data:image/png;base64,${png.toString('base64')}`;
+      return Array.from({ length: copies }, () => `
     <div class="label">
       <div class="barcode-wrap">
         <img class="barcode" src="${imgSrc}" alt="${escapeHtml(value)}" />
@@ -89,13 +121,15 @@ export async function buildBarcodeLabelHtml(variantId, copies = 1) {
         </div>
       </div>
     </div>
-  `).join('');
+  `);
+    })
+    .join('');
 
   return `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Barcode labels — ${escapeHtml(sku)}</title>
+  <title>Barcode labels</title>
   <style>
     @page {
       size: ${LABEL_WIDTH_MM}mm ${LABEL_HEIGHT_MM}mm;
@@ -113,6 +147,7 @@ export async function buildBarcodeLabelHtml(variantId, copies = 1) {
       margin: 12px;
       font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif;
       width: auto;
+      max-width: 90vw;
     }
     .toolbar button {
       font-size: 14px; padding: 8px 14px; cursor: pointer;
@@ -125,12 +160,12 @@ export async function buildBarcodeLabelHtml(variantId, copies = 1) {
     .label {
       width: ${LABEL_WIDTH_MM}mm;
       height: ${LABEL_HEIGHT_MM}mm;
-      padding: 1.5mm 1.8mm 1.2mm;
+      padding: 1mm 1.2mm 1mm;
       border: 0.2mm solid #ccc;
       display: flex;
       flex-direction: column;
-      align-items: stretch;
-      justify-content: space-between;
+      align-items: center;
+      justify-content: flex-start;
       text-align: center;
       overflow: hidden;
       page-break-inside: avoid;
@@ -143,46 +178,54 @@ export async function buildBarcodeLabelHtml(variantId, copies = 1) {
       display: flex;
       justify-content: center;
       align-items: center;
-      min-height: 0;
-      max-height: 17mm;
+      min-height: 20mm;
+      max-height: 24mm;
+      margin: 0 auto;
     }
     .barcode {
       width: 100%;
-      height: 100%;
-      max-height: 16mm;
-      object-fit: fill;
+      max-width: 100%;
+      height: auto;
+      max-height: 22mm;
+      object-fit: contain;
+      object-position: center;
       image-rendering: pixelated;
       display: block;
+      margin: 0 auto;
     }
     .sku {
       flex: 0 0 auto;
-      margin-top: 0.4mm;
+      width: 100%;
+      margin-top: 0.5mm;
       font-family: "Courier New", Courier, monospace;
-      font-size: 12pt;
-      font-weight: 800;
-      letter-spacing: 0.01em;
+      font-size: 13pt;
+      font-weight: 900;
+      letter-spacing: 0.02em;
       line-height: 1.05;
+      text-align: center;
       max-width: 100%;
       word-break: break-all;
       text-transform: none;
     }
     .meta {
       flex: 0 0 auto;
-      margin-top: 0.3mm;
+      width: 100%;
+      margin-top: 0.2mm;
       text-align: center;
     }
     .title {
       font-family: Arial, Helvetica, sans-serif;
-      font-size: 10.5pt;
+      font-size: 9.5pt;
       font-weight: 800;
       line-height: 1.1;
       max-width: 100%;
       overflow: hidden;
       white-space: nowrap;
       text-overflow: ellipsis;
+      text-align: center;
     }
     .attrs {
-      margin-top: 0.2mm;
+      margin-top: 0.15mm;
       display: flex;
       justify-content: center;
       gap: 1.2mm;
@@ -190,7 +233,7 @@ export async function buildBarcodeLabelHtml(variantId, copies = 1) {
     }
     .attr {
       font-family: Arial, Helvetica, sans-serif;
-      font-size: 10pt;
+      font-size: 9.5pt;
       font-weight: 800;
       line-height: 1.1;
     }
@@ -220,7 +263,7 @@ export async function buildBarcodeLabelHtml(variantId, copies = 1) {
   <div class="toolbar">
     <button onclick="window.print()">Print labels</button>
     <span style="margin-left:8px;color:#666;font-size:13px">
-      ${n} × ${escapeHtml(sku)} · sticker ${LABEL_WIDTH_MM / 10}×${LABEL_HEIGHT_MM / 10} cm
+      ${totalCopies} sticker${totalCopies === 1 ? '' : 's'} · ${escapeHtml(skuSummary)} · ${LABEL_WIDTH_MM / 10}×${LABEL_HEIGHT_MM / 10} cm
     </span>
   </div>
   <div class="sheet">${labels}</div>
@@ -242,6 +285,7 @@ export default {
   renderCode128Png,
   getVariantBarcodePng,
   buildBarcodeLabelHtml,
+  buildBarcodeLabelsBatchHtml,
   LABEL_WIDTH_MM,
   LABEL_HEIGHT_MM,
 };
