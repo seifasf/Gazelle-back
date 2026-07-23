@@ -7,13 +7,26 @@ export function isBostaConfigured() {
   return Boolean(config.BOSTA_API_KEY);
 }
 
-export async function bostaRequest(path, { method = 'GET', body } = {}) {
+export async function bostaRequest(path, { method = 'GET', body, query } = {}) {
   if (!config.BOSTA_API_KEY) {
     throw new Error('Bosta API key not configured');
   }
 
   const base = config.BOSTA_API_BASE_URL || DEFAULT_BASE;
-  const url = `${base}${path}`;
+  let url = `${base}${path}`;
+  if (query && typeof query === 'object') {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(query)) {
+      if (value == null) continue;
+      if (Array.isArray(value)) {
+        for (const item of value) params.append(key, String(item));
+      } else {
+        params.set(key, String(value));
+      }
+    }
+    const qs = params.toString();
+    if (qs) url += (url.includes('?') ? '&' : '?') + qs;
+  }
 
   const response = await fetch(url, {
     method,

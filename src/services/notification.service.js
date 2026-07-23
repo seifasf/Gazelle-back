@@ -107,6 +107,40 @@ export async function notifyDiscrepancy(variant, { expected, actual } = {}) {
 }
 
 /**
+ * Urgent: warehouse realStock crossed below zero — open stock needs a factory PO.
+ * Dedupes unread alerts for the same variant within 24h.
+ */
+export async function notifyFactoryRestockNeeded(variantId, { orderId, realStock } = {}) {
+  try {
+    const variant = await Variant.findById(variantId);
+    if (!variant) return null;
+
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const recent = await Notification.findOne({
+      variantId,
+      type: 'factory_restock_needed',
+      createdAt: { $gte: since },
+    });
+    if (recent) return null;
+
+    const stock = realStock ?? variant.realStock;
+    return createNotification({
+      type: 'factory_restock_needed',
+      roles: ['admin', 'stock_manager'],
+      severity: 'danger',
+      title: `Factory restock needed — ${variant.sku}`,
+      body: `${variant.title || variant.sku} is at ${stock} in warehouse. Create a factory purchase order.`,
+      link: '/manufacturing',
+      orderId: orderId || undefined,
+      variantId: variant._id,
+    });
+  } catch (err) {
+    logger.warn({ err, variantId }, 'Factory restock notification failed');
+    return null;
+  }
+}
+
+/**
  * Emit a low/out-of-stock notification for a variant if it has crossed its
  * threshold. De-duplicates against any recent unread alert for the same variant
  * so we don't spam on every decrement.
@@ -115,6 +149,12 @@ export async function notifyLowStockIfNeeded(variantId) {
   try {
     const variant = await Variant.findById(variantId);
     if (!variant) return null;
+
+    // Negatives get the urgent factory restock path instead of a soft low-stock ping.
+    if (variant.realStock < 0) {
+      return notifyFactoryRestockNeeded(variantId, { realStock: variant.realStock });
+    }
+
     const threshold = variant.lowStockThreshold ?? 5;
     if (variant.realStock > threshold) return null;
 
@@ -192,6 +232,7 @@ export default {
   notifyFailedDelivery,
   notifyReturnToOrigin,
   notifyDiscrepancy,
+  notifyFactoryRestockNeeded,
   notifyLowStockIfNeeded,
   checkVariantsLowStock,
   listForUser,

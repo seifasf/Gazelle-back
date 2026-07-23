@@ -1,6 +1,7 @@
 import Variant from '../models/Variant.js';
 import InventoryLedger from '../models/InventoryLedger.js';
 import { LEDGER_TYPES } from '../constants/index.js';
+import logger from '../utils/logger.js';
 
 const STOCK_FIELD_MAP = {
   on_hold_reserve: 'onHoldStock',
@@ -14,6 +15,8 @@ const STOCK_FIELD_MAP = {
 /**
  * Apply a single ledger entry and update the corresponding variant stock field.
  * Must be called within an active MongoDB session/transaction.
+ *
+ * Open stock: realStock may go negative. onHoldStock still cannot go below 0.
  */
 async function applyLedgerEntry(entry, session) {
   const { variantId, ledgerType, quantityDelta, orderId, reasonCode, actorUserId, shopifySyncStatus } =
@@ -31,10 +34,11 @@ async function applyLedgerEntry(entry, session) {
     throw err;
   }
 
-  const newValue = variant[stockField] + quantityDelta;
-  if ((stockField === 'onHoldStock' || stockField === 'realStock') && newValue < 0) {
+  const previous = variant[stockField] ?? 0;
+  const newValue = previous + quantityDelta;
+  if (stockField === 'onHoldStock' && newValue < 0) {
     const err = new Error(
-      `Stock would go negative: ${stockField}=${variant[stockField]} delta=${quantityDelta}`
+      `Stock would go negative: ${stockField}=${previous} delta=${quantityDelta}`
     );
     err.statusCode = 409;
     throw err;
@@ -57,21 +61,61 @@ async function applyLedgerEntry(entry, session) {
 
   await Variant.updateOne({ _id: variantId }, { $inc: { [stockField]: quantityDelta } }, { session });
 
-  return ledgerDoc[0];
+  return {
+    ledger: ledgerDoc[0],
+    variantId,
+    stockField,
+    previous,
+    next: newValue,
+    orderId: orderId || null,
+  };
 }
 
 /**
  * Apply multiple ledger entries atomically within a transaction session.
- * @param {Array} entries - ledger entry objects
- * @param {import('mongoose').ClientSession} session
- * @returns {Promise<Array>} created ledger documents
+ * @returns {Promise<Array>} created ledger documents (same shape as before for callers)
  */
 export async function applyLedgerEntries(entries, session) {
   const results = [];
+  const negativeCrossings = [];
+
   for (const entry of entries) {
-    results.push(await applyLedgerEntry(entry, session));
+    const applied = await applyLedgerEntry(entry, session);
+    results.push(applied.ledger);
+
+    if (
+      applied.stockField === 'realStock' &&
+      applied.previous >= 0 &&
+      applied.next < 0
+    ) {
+      negativeCrossings.push({
+        variantId: applied.variantId,
+        realStock: applied.next,
+        orderId: applied.orderId,
+      });
+    }
   }
+
+  // Fire notifications after the transaction commits (callers schedule via returned meta).
+  // Attach for order.service to flush post-commit.
+  results._negativeCrossings = negativeCrossings;
   return results;
+}
+
+/** Flush factory-restock alerts after a successful transaction. */
+export async function notifyNegativeStockCrossings(crossings = []) {
+  if (!crossings.length) return;
+  try {
+    const { notifyFactoryRestockNeeded } = await import('./notification.service.js');
+    for (const c of crossings) {
+      await notifyFactoryRestockNeeded(c.variantId, {
+        orderId: c.orderId,
+        realStock: c.realStock,
+      });
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Factory restock notify failed');
+  }
 }
 
 /**
@@ -109,49 +153,28 @@ export function buildDeliveryEntries(orderId, items) {
 }
 
 /**
- * Pre-delivery cancel / failed delivery: release hold + queue online restore.
+ * Pre-delivery cancel / failed delivery: release hold only.
+ * Shopify inventory is brand-owned — OMS does not restore online stock.
  */
 export function buildPreDeliveryReleaseEntries(orderId, items) {
-  const entries = [];
-  for (const item of items) {
-    entries.push({
-      variantId: item.variantId,
-      orderId,
-      ledgerType: 'on_hold_release',
-      quantityDelta: -item.quantity,
-    });
-    entries.push({
-      variantId: item.variantId,
-      orderId,
-      ledgerType: 'online_stock_increment_api',
-      quantityDelta: item.quantity,
-      shopifySyncStatus: 'pending',
-    });
-  }
-  return entries;
+  return items.map((item) => ({
+    variantId: item.variantId,
+    orderId,
+    ledgerType: 'on_hold_release',
+    quantityDelta: -item.quantity,
+  }));
 }
 
 /**
- * Post-delivery return: increment real + online restore.
+ * Post-delivery return: increment warehouse real stock only.
  */
 export function buildPostDeliveryReturnEntries(orderId, items) {
-  const entries = [];
-  for (const item of items) {
-    entries.push({
-      variantId: item.variantId,
-      orderId,
-      ledgerType: 'real_stock_increment_return',
-      quantityDelta: item.quantity,
-    });
-    entries.push({
-      variantId: item.variantId,
-      orderId,
-      ledgerType: 'online_stock_increment_api',
-      quantityDelta: item.quantity,
-      shopifySyncStatus: 'pending',
-    });
-  }
-  return entries;
+  return items.map((item) => ({
+    variantId: item.variantId,
+    orderId,
+    ledgerType: 'real_stock_increment_return',
+    quantityDelta: item.quantity,
+  }));
 }
 
 /**
@@ -168,27 +191,17 @@ export function buildManualAdjustmentEntry({ variantId, quantityDelta, reasonCod
 }
 
 /**
- * Admin stock intake: positive real stock + optional Shopify online sync.
+ * Admin stock intake: warehouse real stock only (never pushes to Shopify).
  */
-export function buildStockIntakeEntries({ variantId, quantityDelta, reasonCode, actorUserId, syncToShopify }) {
-  const entries = [
+export function buildStockIntakeEntries({ variantId, quantityDelta, reasonCode, actorUserId }) {
+  return [
     buildManualAdjustmentEntry({ variantId, quantityDelta, reasonCode, actorUserId }),
   ];
-  if (syncToShopify && quantityDelta > 0) {
-    entries.push({
-      variantId,
-      ledgerType: 'online_stock_increment_api',
-      quantityDelta,
-      reasonCode: reasonCode || 'stock_intake',
-      actorUserId,
-      shopifySyncStatus: 'pending',
-    });
-  }
-  return entries;
 }
 
 export default {
   applyLedgerEntries,
+  notifyNegativeStockCrossings,
   buildHoldReserveEntries,
   buildDeliveryEntries,
   buildPreDeliveryReleaseEntries,

@@ -28,13 +28,12 @@ export async function getVariant(req, res, next) {
 
 export async function adjustStock(req, res, next) {
   try {
-    const { quantityDelta, reasonCode, syncToShopify } = req.body;
+    const { quantityDelta, reasonCode } = req.body;
     const result = await orderService.manualStockAdjustment({
       variantId: req.params.id,
       quantityDelta,
       reasonCode,
       actorUserId: req.user._id,
-      syncToShopify: syncToShopify === true,
     });
     res.json({ data: result });
   } catch (err) {
@@ -44,14 +43,13 @@ export async function adjustStock(req, res, next) {
 
 export async function stockIntake(req, res, next) {
   try {
-    const { variantId, quantity, reasonCode, note, syncToShopify } = req.body;
+    const { variantId, quantity, reasonCode, note } = req.body;
     const result = await orderService.stockIntake({
       variantId,
       quantity,
       reasonCode,
       note,
       actorUserId: req.user._id,
-      syncToShopify: syncToShopify !== false,
     });
     res.json({ data: result });
   } catch (err) {
@@ -81,7 +79,7 @@ export async function lookupVariantFamilyBySku(req, res, next) {
 
 export async function stockIntakeBatch(req, res, next) {
   try {
-    const { items, reasonCode, note, syncToShopify } = req.body || {};
+    const { items, reasonCode, note } = req.body || {};
     if (!Array.isArray(items) || !items.length) {
       return res.status(400).json({ error: 'items array is required' });
     }
@@ -96,7 +94,6 @@ export async function stockIntakeBatch(req, res, next) {
         reasonCode,
         note,
         actorUserId: req.user._id,
-        syncToShopify: syncToShopify !== false,
       });
       results.push({
         variantId: item.variantId,
@@ -110,6 +107,37 @@ export async function stockIntakeBatch(req, res, next) {
     }
 
     res.json({ data: { results, count: results.length } });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** Set absolute warehouse realStock for many variants (no Shopify write). */
+export async function stockSetBatch(req, res, next) {
+  try {
+    const { items, reasonCode } = req.body || {};
+    const data = await orderService.setRealStockBatch({
+      items,
+      reasonCode: reasonCode || 'stock_count',
+      actorUserId: req.user._id,
+    });
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function importRealStockExcel(req, res, next) {
+  try {
+    if (!req.file?.buffer) {
+      return res.status(400).json({ error: 'Excel file required (field: file)' });
+    }
+    const { importRealStockFromExcelBuffer } = await import('../services/stockImport.service.js');
+    const report = await importRealStockFromExcelBuffer(req.file.buffer, {
+      actorUserId: req.user._id,
+      apply: req.body?.apply !== 'false' && req.body?.apply !== false,
+    });
+    res.json({ data: report });
   } catch (err) {
     next(err);
   }
@@ -212,6 +240,8 @@ export default {
   adjustStock,
   stockIntake,
   stockIntakeBatch,
+  stockSetBatch,
+  importRealStockExcel,
   lookupVariantBySku,
   lookupVariantFamilyBySku,
   getLedger,

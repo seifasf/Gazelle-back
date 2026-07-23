@@ -6,6 +6,7 @@ import { withTransaction } from '../utils/transaction.js';
 import { assertTransition, isTerminalStatus } from './orderStateMachine.js';
 import {
   applyLedgerEntries,
+  notifyNegativeStockCrossings,
   buildHoldReserveEntries,
   buildDeliveryEntries,
   buildPreDeliveryReleaseEntries,
@@ -73,7 +74,9 @@ async function transitionOrder(order, toStatus, meta, session) {
 }
 
 async function enqueueShopifySync(ledgerDocs) {
-  const pending = ledgerDocs.filter(
+  // Open-stock mode: OMS does not push inventory to Shopify (brand-owned).
+  // Kept as a no-op-safe helper for any leftover pending online ledger rows.
+  const pending = (ledgerDocs || []).filter(
     (doc) => doc.ledgerType === 'online_stock_increment_api' && doc.shopifySyncStatus === 'pending'
   );
   if (pending.length === 0) return;
@@ -86,6 +89,11 @@ async function enqueueShopifySync(ledgerDocs) {
   } catch {
     // Agenda may not be initialized in tests
   }
+}
+
+async function afterLedgerApplied(ledgerDocs) {
+  await notifyNegativeStockCrossings(ledgerDocs?._negativeCrossings || []);
+  await enqueueShopifySync(ledgerDocs);
 }
 
 export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCogsSnapshot, shippingMethod }) {
@@ -198,45 +206,49 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
 
     await recordCustomerCancellation(order.customerId, session);
 
-    await enqueueShopifySync(ledgerDocs);
     newlyCancelled = true;
-    return Order.findById(orderId).session(session);
+    return { order: await Order.findById(orderId).session(session), ledgerDocs };
   });
+
+  await afterLedgerApplied(cancelled?.ledgerDocs);
+
+  const cancelledOrder = cancelled?.order || cancelled;
 
   // Cancel on Shopify after OMS commit (skip when Shopify already cancelled / manual orders).
   if (
     newlyCancelled &&
     source !== 'shopify_webhook' &&
-    cancelled?.orderSource === 'shopify' &&
-    cancelled?.shopifyOrderId
+    cancelledOrder?.orderSource === 'shopify' &&
+    cancelledOrder?.shopifyOrderId
   ) {
     try {
       const { cancelShopifyOrder } = await import('../integrations/shopify/mutations/orderCancel.js');
       await cancelShopifyOrder({
-        shopifyOrderId: cancelled.shopifyOrderId,
+        shopifyOrderId: cancelledOrder.shopifyOrderId,
         reason,
         staffNote: cancelNote || reason,
         notifyCustomer: false,
-        refund: cancelled.paymentMethod === 'online',
+        refund: cancelledOrder.paymentMethod === 'online',
       });
     } catch (err) {
       // OMS cancel already succeeded — surface Shopify failure without rolling back.
       const logger = (await import('../utils/logger.js')).default;
       logger.error(
-        { err: err?.message || err, orderId: String(cancelled._id), shopifyOrderId: cancelled.shopifyOrderId },
+        { err: err?.message || err, orderId: String(cancelledOrder._id), shopifyOrderId: cancelledOrder.shopifyOrderId },
         'Failed to cancel order on Shopify after OMS cancel'
       );
-      cancelled.shopifyCancelWarning = err?.message || 'Failed to cancel on Shopify';
+      cancelledOrder.shopifyCancelWarning = err?.message || 'Failed to cancel on Shopify';
     }
   }
 
-  return cancelled;
+  return cancelledOrder;
 }
 
 async function executeDelivered(order, { source, actorUserId, note }, session) {
   const ledgerEntries = buildDeliveryEntries(order._id, order.items);
+  let ledgerDocs = [];
   try {
-    await applyLedgerEntries(ledgerEntries, session);
+    ledgerDocs = await applyLedgerEntries(ledgerEntries, session);
   } catch (err) {
     // Historical Shopify imports / Bosta backfill often never reserved hold stock.
     // Still mark delivered so COD + courier status stay truthful; log the inventory gap.
@@ -255,6 +267,7 @@ async function executeDelivered(order, { source, actorUserId, note }, session) {
   const delivered = await Order.findById(order._id).session(session);
   // Best-effort accounting — must not block delivery.
   await recordDeliveryJournal(delivered, actorUserId);
+  delivered._ledgerDocs = ledgerDocs;
   return delivered;
 }
 
@@ -271,13 +284,14 @@ export async function markDelivered(orderId, source, actorUserId, note, existing
 
   if (existingSession) return run(existingSession);
   const delivered = await withTransaction(run);
-  // Delivery decrements warehouse stock — flag anything that dropped low.
+  await afterLedgerApplied(delivered?._ledgerDocs);
+  // Delivery decrements warehouse stock — flag anything that dropped low / negative.
   await checkVariantsLowStock((delivered?.items || []).map((i) => i.variantId));
   return delivered;
 }
 
 export async function confirmReturnedToStock(orderId, actorUserId, note) {
-  return withTransaction(async (session) => {
+  const result = await withTransaction(async (session) => {
     const order = await Order.findById(orderId).session(session);
     if (!order) {
       const err = new Error('Order not found');
@@ -291,7 +305,7 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
       throw err;
     }
 
-    // Post-delivery return vs RTO (never delivered)
+    // Post-delivery return vs RTO (never delivered) — warehouse only, no Shopify push.
     const ledgerDocs = await applyLedgerEntries(
       order.deliveredAt
         ? buildPostDeliveryReturnEntries(order._id, order.items)
@@ -312,9 +326,11 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
       { session }
     );
 
-    await enqueueShopifySync(ledgerDocs);
-    return Order.findById(orderId).session(session);
+    return { order: await Order.findById(orderId).session(session), ledgerDocs };
   });
+
+  await afterLedgerApplied(result.ledgerDocs);
+  return result.order;
 }
 
 export async function transitionOrderStatus(orderId, toStatus, meta) {
@@ -334,9 +350,16 @@ export async function transitionOrderStatus(orderId, toStatus, meta) {
     return Order.findById(orderId).session(session);
   });
 
-  if (toStatus === 'failed_delivery') await notifyFailedDelivery(updated);
-  else if (toStatus === 'returning_to_origin') await notifyReturnToOrigin(updated);
-  else if (toStatus === 'delivered') await checkVariantsLowStock((updated?.items || []).map((i) => i.variantId));
+  if (toStatus === 'delivered') {
+    await afterLedgerApplied(updated?._ledgerDocs);
+  }
+  if (toStatus === 'verified_ready_for_shipping') await notifyOrderVerified(updated);
+  else if (toStatus === 'failed_delivery') await notifyFailedDelivery(updated);
+  else if (toStatus === 'returned_awaiting_receipt' || toStatus === 'returning_to_origin') {
+    await notifyReturnToOrigin(updated);
+  } else if (toStatus === 'delivered') {
+    await checkVariantsLowStock((updated?.items || []).map((i) => i.variantId));
+  }
 
   return updated;
 }
@@ -346,22 +369,24 @@ export async function reserveStockForOrder(orderId, items, session) {
   return applyLedgerEntries(entries, session);
 }
 
-export async function manualStockAdjustment({ variantId, quantityDelta, reasonCode, actorUserId, syncToShopify = false }) {
-  return withTransaction(async (session) => {
-    const entries = syncToShopify && quantityDelta > 0
-      ? buildStockIntakeEntries({ variantId, quantityDelta, reasonCode, actorUserId, syncToShopify: true })
-      : [buildManualAdjustmentEntry({ variantId, quantityDelta, reasonCode, actorUserId })];
+export async function manualStockAdjustment({ variantId, quantityDelta, reasonCode, actorUserId }) {
+  const result = await withTransaction(async (session) => {
+    const entries = buildStockIntakeEntries({
+      variantId,
+      quantityDelta,
+      reasonCode,
+      actorUserId,
+    });
     const ledgerDocs = await applyLedgerEntries(entries, session);
     const variant = await Variant.findById(variantId).session(session);
-    await enqueueShopifySync(ledgerDocs);
-    return { variant, ledger: ledgerDocs[0], shopifySyncQueued: ledgerDocs.some((d) => d.shopifySyncStatus === 'pending') };
-  }).then(async (result) => {
-    await checkVariantsLowStock([variantId]);
-    return result;
+    return { variant, ledger: ledgerDocs[0], ledgerDocs, shopifySyncQueued: false };
   });
+  await afterLedgerApplied(result.ledgerDocs);
+  await checkVariantsLowStock([variantId]);
+  return result;
 }
 
-export async function stockIntake({ variantId, quantity, reasonCode, note, actorUserId, syncToShopify = true }) {
+export async function stockIntake({ variantId, quantity, reasonCode, note, actorUserId }) {
   if (quantity <= 0) {
     const err = new Error('Stock intake quantity must be positive');
     err.statusCode = 400;
@@ -372,8 +397,84 @@ export async function stockIntake({ variantId, quantity, reasonCode, note, actor
     quantityDelta: quantity,
     reasonCode: reasonCode || 'restock',
     actorUserId,
-    syncToShopify,
   });
+}
+
+/**
+ * Set absolute warehouse realStock for many variants (open-stock count / Excel import).
+ * Never writes to Shopify.
+ */
+export async function setRealStockBatch({ items, reasonCode = 'stock_count', actorUserId }) {
+  if (!Array.isArray(items) || !items.length) {
+    const err = new Error('items array is required');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const results = [];
+  const allCrossings = [];
+
+  for (const item of items) {
+    const variantId = item.variantId;
+    const target = Number(item.realStock ?? item.target ?? item.quantity);
+    if (!variantId || !Number.isFinite(target)) continue;
+
+    const outcome = await withTransaction(async (session) => {
+      const variant = await Variant.findById(variantId).session(session);
+      if (!variant) {
+        const err = new Error(`Variant not found: ${variantId}`);
+        err.statusCode = 404;
+        throw err;
+      }
+      const current = variant.realStock ?? 0;
+      const delta = target - current;
+      if (delta === 0) {
+        return { variantId, sku: variant.sku, previous: current, realStock: current, changed: false };
+      }
+      const ledgerDocs = await applyLedgerEntries(
+        [
+          buildManualAdjustmentEntry({
+            variantId,
+            quantityDelta: delta,
+            reasonCode,
+            actorUserId,
+          }),
+        ],
+        session
+      );
+      const updated = await Variant.findById(variantId).session(session);
+      return {
+        variantId,
+        sku: updated.sku,
+        previous: current,
+        realStock: updated.realStock,
+        changed: true,
+        ledgerDocs,
+      };
+    });
+
+    if (outcome.ledgerDocs?._negativeCrossings?.length) {
+      allCrossings.push(...outcome.ledgerDocs._negativeCrossings);
+    }
+    results.push({
+      variantId: outcome.variantId,
+      sku: outcome.sku,
+      previous: outcome.previous,
+      realStock: outcome.realStock,
+      changed: outcome.changed,
+    });
+  }
+
+  await notifyNegativeStockCrossings(allCrossings);
+  await checkVariantsLowStock(results.map((r) => r.variantId));
+
+  if (!results.length) {
+    const err = new Error('No valid stock set rows');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  return { results, count: results.length };
 }
 
 export async function createManualOrder({
@@ -682,6 +783,7 @@ export default {
   reserveStockForOrder,
   manualStockAdjustment,
   stockIntake,
+  setRealStockBatch,
   createManualOrder,
   getOrderStateCounts,
   getOrderById,

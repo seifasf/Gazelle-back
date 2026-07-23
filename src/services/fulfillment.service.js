@@ -41,12 +41,26 @@ export async function checkStockAvailability(order) {
   return warnings;
 }
 
+function assertBostaShipable(order) {
+  if (order.shippingMethod === 'pickup' || order.shippingMethod === 'local_shipping') {
+    const err = new Error('This order does not use Bosta shipping');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!order.shippingAddress?.line1 || !String(order.shippingAddress?.city || '').trim()) {
+    const err = new Error(
+      'Order is missing street or city. Open the order, fix the shipping address, then retry.'
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
 /**
- * Create the Bosta delivery and move the order to picked_up_by_bosta.
- * Used synchronously from pick-pack so stock managers get immediate feedback
- * (Agenda queue alone can stall on free-tier / cold hosts).
+ * Create the Bosta delivery if missing (or retry after failure).
+ * Does NOT change internalStatus — used for print-policy-before-confirm.
  */
-export async function createBostaShipmentForOrder(orderId, actorUserId) {
+export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
   const order = await Order.findById(orderId).populate('customerId');
   if (!order) {
     const err = new Error('Order not found');
@@ -54,18 +68,23 @@ export async function createBostaShipmentForOrder(orderId, actorUserId) {
     throw err;
   }
 
-  if (order.shippingMethod === 'pickup' || order.shippingMethod === 'local_shipping') {
-    const err = new Error('This order does not use Bosta shipping');
-    err.statusCode = 400;
-    throw err;
-  }
+  assertBostaShipable(order);
 
-  if (!order.shippingAddress?.line1 || !String(order.shippingAddress?.city || '').trim()) {
-    const err = new Error(
-      'Order is missing street or city. Open the order, fix the shipping address, then retry.'
-    );
-    err.statusCode = 400;
-    throw err;
+  if (order.bostaDeliveryId) {
+    if (order.bostaShipmentStatus !== 'created') {
+      order.bostaShipmentStatus = 'created';
+      order.bostaShipmentError = null;
+    }
+    if (actorUserId && !order.assignedStockManagerId) {
+      order.assignedStockManagerId = actorUserId;
+    }
+    await order.save();
+    return {
+      deliveryId: order.bostaDeliveryId,
+      trackingNumber: order.bostaTrackingNumber,
+      orderId,
+      created: false,
+    };
   }
 
   order.bostaShipmentStatus = 'creating';
@@ -83,16 +102,11 @@ export async function createBostaShipmentForOrder(orderId, actorUserId) {
     order.bostaShipmentStatus = 'created';
     await order.save();
 
-    await orderService.transitionOrderStatus(orderId, 'picked_up_by_bosta', {
-      source: 'system',
-      actorUserId,
-      note: 'Bosta shipment created',
-    });
-
     return {
       deliveryId,
       trackingNumber,
       orderId,
+      created: true,
     };
   } catch (error) {
     order.bostaShipmentStatus = 'failed';
@@ -101,6 +115,41 @@ export async function createBostaShipmentForOrder(orderId, actorUserId) {
     logger.error({ err: error.message, orderId }, 'Bosta shipment create failed');
     throw error;
   }
+}
+
+/**
+ * Ensure Bosta delivery exists, then fetch the AWB (بوليصة) PDF URL.
+ */
+export async function prepareAwbForOrder(orderId, actorUserId) {
+  const shipment = await ensureBostaDeliveryForOrder(orderId, actorUserId);
+  const awb = await getAwb(shipment.deliveryId);
+  return {
+    url: awb?.url || null,
+    deliveryId: shipment.deliveryId,
+    trackingNumber: shipment.trackingNumber,
+    orderId,
+    created: shipment.created,
+  };
+}
+
+/**
+ * Create the Bosta delivery (if needed) and move the order to picked_up_by_bosta.
+ * Used by pick-pack and the Agenda job.
+ */
+export async function createBostaShipmentForOrder(orderId, actorUserId) {
+  const shipment = await ensureBostaDeliveryForOrder(orderId, actorUserId);
+
+  await orderService.transitionOrderStatus(orderId, 'picked_up_by_bosta', {
+    source: 'system',
+    actorUserId,
+    note: shipment.created ? 'Bosta shipment created' : 'Bosta shipment confirmed for pickup',
+  });
+
+  return {
+    deliveryId: shipment.deliveryId,
+    trackingNumber: shipment.trackingNumber,
+    orderId,
+  };
 }
 
 export async function pickAndPackOrder(orderId, actorUserId) {
@@ -145,7 +194,7 @@ export async function pickAndPackOrder(orderId, actorUserId) {
     return { queued: false, localShipping: true, orderId, stockWarnings };
   }
 
-  // Bosta — create shipment now so the stock manager sees success/failure immediately.
+  // Bosta — reuse delivery from print-policy step when present; otherwise create + transition.
   try {
     const shipment = await createBostaShipmentForOrder(orderId, actorUserId);
     return {
@@ -204,7 +253,13 @@ export async function getAwbForOrder(orderId) {
     err.statusCode = 404;
     throw err;
   }
-  return getAwb(order.bostaDeliveryId);
+  const awb = await getAwb(order.bostaDeliveryId);
+  return {
+    url: awb?.url || null,
+    deliveryId: order.bostaDeliveryId,
+    trackingNumber: order.bostaTrackingNumber,
+    ...awb,
+  };
 }
 
 export async function buildOrderSheet(orderId) {
@@ -273,6 +328,8 @@ export async function buildOrderSheet(orderId) {
 
 export default {
   pickAndPackOrder,
+  ensureBostaDeliveryForOrder,
+  prepareAwbForOrder,
   createBostaShipmentForOrder,
   getPickList,
   getShipmentStatus,

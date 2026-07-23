@@ -52,6 +52,20 @@ export function registerJobs(agenda) {
   });
 
   agenda.define(JOB_NAMES.SHOPIFY_OUTBOUND_INVENTORY, async (job) => {
+    // Open-stock mode: OMS never pushes warehouse stock to Shopify unless policy=full.
+    try {
+      await assertShopifyInventoryWriteAllowed();
+    } catch {
+      const { ledgerId } = job.attrs.data || {};
+      if (ledgerId) {
+        await InventoryLedger.updateOne(
+          { _id: ledgerId, shopifySyncStatus: 'pending' },
+          { $set: { shopifySyncStatus: 'skipped_policy' } }
+        );
+      }
+      return;
+    }
+
     const { ledgerId } = job.attrs.data;
     const ledger = await InventoryLedger.findById(ledgerId);
     if (!ledger || ledger.shopifySyncStatus === 'synced') return;
@@ -62,8 +76,6 @@ export function registerJobs(agenda) {
     const settings = await Settings.findOne({ key: 'global' });
     const locationId = settings?.shopifyLocationId || config.SHOPIFY_LOCATION_ID;
     if (!locationId) throw new Error('Shopify location ID not configured');
-
-    await assertShopifyInventoryWriteAllowed();
 
     try {
       await inventoryAdjustQuantities({

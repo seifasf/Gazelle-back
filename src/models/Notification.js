@@ -10,6 +10,7 @@ export const NOTIFICATION_TYPES = [
   'return_to_origin',
   'low_stock',
   'out_of_stock',
+  'factory_restock_needed',
   'discrepancy',
   'stock_intake',
   'general',

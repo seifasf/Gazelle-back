@@ -186,9 +186,48 @@ export async function getDelivery(deliveryIdOrTracking) {
   }
 }
 
+/**
+ * Print Air Waybill (بوليصة) — official Bosta SDK path:
+ * GET /deliveries/awb?ids=<deliveryId>
+ * Returns a PDF URL string or object with url.
+ */
 export async function getAwb(deliveryId) {
-  const response = await bostaRequest(`/deliveries/${deliveryId}/awb`);
-  return response?.data || response;
+  const id = String(deliveryId || '').trim();
+  if (!id) {
+    const err = new Error('Missing Bosta delivery id');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const response = await bostaRequest('/deliveries/awb', {
+    method: 'GET',
+    query: { ids: id },
+  });
+  const raw = response?.data ?? response;
+  return normalizeAwbPayload(raw, id);
+}
+
+function normalizeAwbPayload(raw, deliveryId) {
+  if (typeof raw === 'string') {
+    if (/^https?:\/\//i.test(raw) || raw.startsWith('data:')) {
+      return { url: raw, deliveryId };
+    }
+    // Some responses return bare base64 PDF
+    if (raw.length > 100 && !raw.includes(' ')) {
+      return { url: `data:application/pdf;base64,${raw}`, deliveryId };
+    }
+    return { url: raw, deliveryId };
+  }
+  if (raw && typeof raw === 'object') {
+    const url =
+      raw.url ||
+      raw.awbUrl ||
+      raw.pdfUrl ||
+      raw.data?.url ||
+      (typeof raw.data === 'string' ? raw.data : null);
+    return { url: url || null, deliveryId, ...raw };
+  }
+  return { url: null, deliveryId, raw };
 }
 
 export default { createDelivery, getDelivery, getAwb };

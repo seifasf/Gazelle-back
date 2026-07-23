@@ -45,6 +45,15 @@ export async function pickAndPack(req, res, next) {
   }
 }
 
+export async function prepareAwb(req, res, next) {
+  try {
+    const awb = await fulfillmentService.prepareAwbForOrder(req.params.id, req.user._id);
+    res.json({ data: awb });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getAwb(req, res, next) {
   try {
     const awb = await fulfillmentService.getAwbForOrder(req.params.id);
@@ -92,6 +101,7 @@ export default {
   exportWarehouseReview,
   getPickList,
   pickAndPack,
+  prepareAwb,
   getAwb,
   getShipmentStatus,
   checkStock,

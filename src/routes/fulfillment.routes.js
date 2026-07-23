@@ -11,6 +11,7 @@ router.get('/warehouse-review', requireRoles('admin', 'stock_manager'), fulfillm
 router.get('/warehouse-review/export', requireRoles('admin', 'stock_manager'), fulfillmentController.exportWarehouseReview);
 router.get('/pick-list', requireRoles('admin', 'stock_manager'), fulfillmentController.getPickList);
 router.post('/:id/pick-pack', requireRoles('admin', 'stock_manager'), fulfillmentController.pickAndPack);
+router.post('/:id/prepare-awb', requireRoles('admin', 'stock_manager'), fulfillmentController.prepareAwb);
 // Read-only shipment status for orders managers (order detail integrations panel).
 router.get(
   '/:id/shipment-status',

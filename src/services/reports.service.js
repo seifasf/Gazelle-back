@@ -156,8 +156,8 @@ async function paymobReceivedForRange({ from, to }) {
     );
     if (isPaymobApiConfigured()) {
       const live = await Promise.race([
-        syncAndSumPaymobReceived({ from, to, maxPages: 60 }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Paymob API timeout')), 20000)),
+        syncAndSumPaymobReceived({ from, to, maxPages: 80 }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Paymob API timeout')), 45000)),
       ]);
       return live;
     }
