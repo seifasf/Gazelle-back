@@ -54,14 +54,26 @@ async function stampOrderFromDelivery(delivery, { from, to } = {}) {
   if (from && collectedAt < from) return null;
   if (to && collectedAt > to) return null;
 
+  const src = String(delivery?.creationSrc || delivery?.source || '').toUpperCase();
+  if (src === 'WOOCOMMERCE' || src === 'WOO') return null;
+  const refLower = String(delivery.businessReference || '').trim().toLowerCase();
+  if (
+    refLower.startsWith('woocommerce') ||
+    refLower.startsWith('woo_') ||
+    refLower.startsWith('woo-')
+  ) {
+    return null;
+  }
+
   const deliveryId = delivery._id || delivery.id;
   const tracking = delivery.trackingNumber != null ? String(delivery.trackingNumber) : null;
   const ref = String(delivery.businessReference || '').trim();
+  // Match only by existing Gazelle link or Mongo businessReference — never by Shopify id
+  // (that re-links WooCommerce shipments onto OMS orders).
   const or = [];
   if (deliveryId) or.push({ bostaDeliveryId: String(deliveryId) });
   if (tracking) or.push({ bostaTrackingNumber: tracking });
   if (ref && /^[a-f\d]{24}$/i.test(ref)) or.push({ _id: ref });
-  if (ref && /^\d+$/.test(ref)) or.push({ shopifyOrderId: ref });
   if (!or.length) return null;
 
   const result = await Order.updateOne(
@@ -81,8 +93,6 @@ async function stampOrderFromDelivery(delivery, { from, to } = {}) {
       $set: {
         bostaCollectedAmount: cod,
         bostaCollectedAt: collectedAt,
-        ...(deliveryId ? { bostaDeliveryId: String(deliveryId) } : {}),
-        ...(tracking ? { bostaTrackingNumber: tracking } : {}),
       },
     }
   );

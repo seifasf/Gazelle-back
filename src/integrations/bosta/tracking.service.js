@@ -14,6 +14,21 @@ import {
 } from './states.js';
 import { canTransition } from '../../services/orderStateMachine.js';
 
+/** Foreign channels (old Woo store, etc.) must never drive Gazelle order status. */
+function isForeignBostaDelivery(delivery) {
+  const src = String(delivery?.creationSrc || delivery?.source || '').toUpperCase();
+  if (src === 'WOOCOMMERCE' || src === 'WOO') return true;
+  const ref = String(
+    delivery?.businessReference || delivery?.business_reference || ''
+  )
+    .trim()
+    .toLowerCase();
+  if (ref.startsWith('woocommerce') || ref.startsWith('woo_') || ref.startsWith('woo-')) {
+    return true;
+  }
+  return false;
+}
+
 function asFiniteNumber(v) {
   if (v == null) return null;
   if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -119,19 +134,13 @@ async function findOrderForBostaPayload({ deliveryId, payload }) {
     if (byTracking) return byTracking;
   }
 
+  // Gazelle creates use businessReference = Mongo order._id only.
+  // Do NOT match by shopifyOrderId — WooCommerce / old-plugin shipments reuse
+  // numeric Shopify ids and would hijack OMS status after verify.
   const ref = String(payload?.businessReference || payload?.business_reference || '').trim();
-  if (ref) {
-    if (/^[a-f\d]{24}$/i.test(ref)) {
-      const byRef = await Order.findById(ref);
-      if (byRef) return byRef;
-    }
-    // Older / plugin shipments may use Shopify order id as business reference.
-    const byShopify = await Order.findOne({ shopifyOrderId: ref });
-    if (byShopify) return byShopify;
-    if (/^\d+$/.test(ref)) {
-      const byShopifyNum = await Order.findOne({ shopifyOrderId: String(ref) });
-      if (byShopifyNum) return byShopifyNum;
-    }
+  if (ref && /^[a-f\d]{24}$/i.test(ref)) {
+    const byRef = await Order.findById(ref);
+    if (byRef) return byRef;
   }
 
   return null;
@@ -152,19 +161,20 @@ async function transitionToward(orderId, fromStatus, toStatus, meta) {
     picked_up_by_bosta: {
       delivered: ['in_transit'],
       failed_delivery: ['in_transit'],
-      returning_to_origin: ['in_transit', 'failed_delivery'],
-      returned_awaiting_receipt: ['in_transit', 'failed_delivery', 'returning_to_origin'],
+      // Prefer RTO path without forcing failed_delivery (clean returns).
+      returning_to_origin: ['in_transit'],
+      returned_awaiting_receipt: ['in_transit', 'returning_to_origin'],
     },
     in_transit: {
-      returning_to_origin: ['failed_delivery'],
-      returned_awaiting_receipt: ['failed_delivery', 'returning_to_origin'],
+      returning_to_origin: [],
+      returned_awaiting_receipt: ['returning_to_origin'],
     },
     verified_ready_for_shipping: {
       in_transit: ['picked_up_by_bosta'],
       delivered: ['picked_up_by_bosta', 'in_transit'],
       failed_delivery: ['picked_up_by_bosta', 'in_transit'],
-      returning_to_origin: ['picked_up_by_bosta', 'in_transit', 'failed_delivery'],
-      returned_awaiting_receipt: ['picked_up_by_bosta', 'in_transit', 'failed_delivery', 'returning_to_origin'],
+      returning_to_origin: ['picked_up_by_bosta', 'in_transit'],
+      returned_awaiting_receipt: ['picked_up_by_bosta', 'in_transit', 'returning_to_origin'],
     },
     delivered: {
       returned_awaiting_receipt: ['returning_to_origin'],
@@ -203,15 +213,70 @@ export async function processBostaStatusUpdate({ deliveryId, state, payload, not
     return null;
   }
 
-  // Attach delivery id / tracking if we matched via businessReference or tracking only.
-  const updates = {};
-  if (deliveryId && !order.bostaDeliveryId) updates.bostaDeliveryId = String(deliveryId);
+  if (isForeignBostaDelivery(payload)) {
+    logger.warn(
+      {
+        orderId: order._id,
+        deliveryId,
+        creationSrc: payload?.creationSrc || payload?.source,
+        businessReference: payload?.businessReference || payload?.business_reference,
+      },
+      'Ignoring foreign Bosta delivery update'
+    );
+    return order;
+  }
+
+  const incomingId = deliveryId ? String(deliveryId) : null;
+  const linkedId = order.bostaDeliveryId ? String(order.bostaDeliveryId) : null;
   const tracking =
     payload?.trackingNumber != null
       ? String(payload.trackingNumber)
       : payload?.tracking_number != null
         ? String(payload.tracking_number)
         : null;
+
+  // Order already has a Gazelle link — never apply another delivery's status.
+  if (linkedId && incomingId && linkedId !== incomingId) {
+    logger.warn(
+      { orderId: order._id, linkedId, incomingId },
+      'Ignoring Bosta update for non-linked delivery'
+    );
+    return order;
+  }
+  if (
+    order.bostaTrackingNumber &&
+    tracking &&
+    String(order.bostaTrackingNumber) !== tracking &&
+    (!incomingId || !linkedId || linkedId !== incomingId)
+  ) {
+    logger.warn(
+      {
+        orderId: order._id,
+        linkedTracking: order.bostaTrackingNumber,
+        incomingTracking: tracking,
+      },
+      'Ignoring Bosta update for mismatched tracking'
+    );
+    return order;
+  }
+
+  // Call-center / stock must verify first. Never attach or advance while pending.
+  if (order.internalStatus === 'pending_verification') {
+    logger.info(
+      {
+        orderId: order._id,
+        deliveryId,
+        state: extractBostaStateTokens(state).join('/') || String(state),
+        type: normalizeBostaType(payload?.type ?? null),
+      },
+      'Ignoring Bosta status while order is still pending_verification'
+    );
+    return order;
+  }
+
+  // Attach delivery id / tracking only after verify, and only when still unlinked.
+  const updates = {};
+  if (incomingId && !order.bostaDeliveryId) updates.bostaDeliveryId = incomingId;
   if (tracking && !order.bostaTrackingNumber) updates.bostaTrackingNumber = tracking;
   if (Object.keys(updates).length) {
     Object.assign(order, updates);
@@ -246,22 +311,6 @@ export async function processBostaStatusUpdate({ deliveryId, state, payload, not
   }
 
   if (order.internalStatus === internalStatus) {
-    return order;
-  }
-
-  // Call-center / stock must verify first. Never auto-skip pending_verification via Bosta
-  // (phone-match used to bridge → verified → in_transit from unrelated WooCommerce shipments).
-  if (order.internalStatus === 'pending_verification') {
-    logger.info(
-      {
-        orderId: order._id,
-        deliveryId,
-        state: stateLabel,
-        internalStatus,
-        type: normalizeBostaType(type),
-      },
-      'Ignoring Bosta status while order is still pending_verification'
-    );
     return order;
   }
 

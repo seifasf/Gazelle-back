@@ -34,15 +34,37 @@ function isForeignBostaDelivery(delivery) {
   return false;
 }
 
-/** True when Bosta businessReference belongs to this Gazelle order. */
+/** True when Bosta delivery belongs to this Gazelle order. */
 function deliveryBelongsToOrder(delivery, order) {
   if (!delivery || !order) return false;
   if (isForeignBostaDelivery(delivery)) return false;
   const ref = String(delivery.businessReference || '').trim();
-  if (!ref) return false;
-  if (ref === String(order._id)) return true;
-  if (order.shopifyOrderId && ref === String(order.shopifyOrderId)) return true;
+  if (ref) {
+    if (ref === String(order._id)) return true;
+    // Legacy Gazelle creates may have used Shopify id; accept only if not foreign.
+    if (order.shopifyOrderId && ref === String(order.shopifyOrderId)) return true;
+    return false;
+  }
+  // Missing businessReference: keep only if id/tracking already match this order
+  // (do not clear+recreate a valid Gazelle AWB just because GET omitted the ref).
+  const liveId = String(delivery._id || delivery.id || '');
+  const liveTracking =
+    delivery.trackingNumber != null ? String(delivery.trackingNumber) : '';
+  if (order.bostaDeliveryId && liveId && String(order.bostaDeliveryId) === liveId) {
+    return true;
+  }
+  if (
+    order.bostaTrackingNumber &&
+    liveTracking &&
+    String(order.bostaTrackingNumber) === liveTracking
+  ) {
+    return true;
+  }
   return false;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function clearWrongBostaLink(order, reason) {
@@ -112,12 +134,29 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
 
   if (order.bostaDeliveryId || order.bostaTrackingNumber) {
     // Reject WooCommerce / phone-match leftovers — create a real Gazelle delivery instead.
+    // Prefer tracking lookup: GET /deliveries/:id often 404s on Bosta v2 for valid API shipments.
     let live = null;
-    try {
-      live = await getDelivery(order.bostaDeliveryId || order.bostaTrackingNumber);
-    } catch (err) {
+    const lookupKeys = [
+      order.bostaTrackingNumber,
+      order.bostaDeliveryId,
+    ].filter(Boolean).map(String);
+    const tried = new Set();
+    for (const key of lookupKeys) {
+      if (tried.has(key)) continue;
+      tried.add(key);
+      try {
+        live = await getDelivery(key);
+        if (live) break;
+      } catch (err) {
+        logger.warn(
+          { err: err.message, orderId, key },
+          'Could not fetch linked Bosta delivery key'
+        );
+      }
+    }
+    if (!live) {
       logger.warn(
-        { err: err.message, orderId, deliveryId: order.bostaDeliveryId },
+        { orderId, deliveryId: order.bostaDeliveryId, tracking: order.bostaTrackingNumber },
         'Could not fetch linked Bosta delivery — will clear and recreate'
       );
     }
@@ -165,20 +204,67 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
     }
   }
 
-  order.bostaShipmentStatus = 'creating';
-  order.bostaShipmentError = null;
-  if (actorUserId) order.assignedStockManagerId = actorUserId;
-  await order.save();
+  // Atomic claim — prevents double-create from concurrent print/pick-pack/jobs.
+  const claimed = await Order.findOneAndUpdate(
+    {
+      _id: orderId,
+      $and: [
+        {
+          $or: [{ bostaDeliveryId: null }, { bostaDeliveryId: { $exists: false } }],
+        },
+        {
+          $or: [
+            { bostaShipmentStatus: { $nin: ['creating'] } },
+            { bostaShipmentStatus: null },
+            { bostaShipmentStatus: { $exists: false } },
+          ],
+        },
+      ],
+    },
+    {
+      $set: {
+        bostaShipmentStatus: 'creating',
+        bostaShipmentError: null,
+        ...(actorUserId ? { assignedStockManagerId: actorUserId } : {}),
+      },
+    },
+    { new: true }
+  ).populate('customerId');
+
+  if (!claimed) {
+    for (let i = 0; i < 10; i += 1) {
+      await sleep(500);
+      const fresh = await Order.findById(orderId).select(
+        'bostaDeliveryId bostaTrackingNumber bostaShipmentStatus bostaShipmentError'
+      );
+      if (fresh?.bostaDeliveryId) {
+        return {
+          deliveryId: fresh.bostaDeliveryId,
+          trackingNumber: fresh.bostaTrackingNumber,
+          orderId,
+          created: false,
+        };
+      }
+      if (fresh?.bostaShipmentStatus === 'failed') {
+        const err = new Error(fresh.bostaShipmentError || 'Bosta shipment create failed');
+        err.statusCode = 502;
+        throw err;
+      }
+    }
+    const err = new Error('Bosta delivery is already being created — retry in a moment');
+    err.statusCode = 409;
+    throw err;
+  }
 
   try {
-    const result = await createDelivery(order, order.customerId);
+    const result = await createDelivery(claimed, claimed.customerId);
     const deliveryId = result._id || result.id || result.data?._id;
     const trackingNumber = result.trackingNumber || result.tracking_number;
 
-    order.bostaDeliveryId = deliveryId;
-    order.bostaTrackingNumber = trackingNumber;
-    order.bostaShipmentStatus = 'created';
-    await order.save();
+    claimed.bostaDeliveryId = deliveryId;
+    claimed.bostaTrackingNumber = trackingNumber;
+    claimed.bostaShipmentStatus = 'created';
+    await claimed.save();
 
     return {
       deliveryId,
@@ -187,9 +273,9 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
       created: true,
     };
   } catch (error) {
-    order.bostaShipmentStatus = 'failed';
-    order.bostaShipmentError = error.message;
-    await order.save();
+    claimed.bostaShipmentStatus = 'failed';
+    claimed.bostaShipmentError = error.message;
+    await claimed.save();
     logger.error({ err: error.message, orderId }, 'Bosta shipment create failed');
     throw error;
   }

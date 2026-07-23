@@ -103,9 +103,43 @@ async function resolveLiveDelivery(order, fallbackDelivery) {
 }
 
 async function linkAndSyncOrder(order, delivery, note) {
+  if (isForeignBostaDelivery(delivery)) {
+    logger.warn(
+      { orderId: order._id, deliveryId: delivery?._id || delivery?.id },
+      'Refusing to link foreign Bosta delivery'
+    );
+    return { orderId: order._id, linked: false, synced: false, reason: 'foreign' };
+  }
+  if (order.internalStatus === 'pending_verification') {
+    return { orderId: order._id, linked: false, synced: false, reason: 'pending_verification' };
+  }
+
   const deliveryId = String(delivery._id || delivery.id);
   const tracking =
-    delivery.trackingNumber != null ? String(delivery.trackingNumber) : order.bostaTrackingNumber;
+    delivery.trackingNumber != null ? String(delivery.trackingNumber) : null;
+
+  if (order.bostaDeliveryId && String(order.bostaDeliveryId) !== deliveryId) {
+    logger.warn(
+      { orderId: order._id, linked: order.bostaDeliveryId, candidate: deliveryId },
+      'Refusing to link — order already has a different Bosta delivery'
+    );
+    return { orderId: order._id, linked: false, synced: false, reason: 'already_linked' };
+  }
+  if (
+    order.bostaTrackingNumber &&
+    tracking &&
+    String(order.bostaTrackingNumber) !== tracking
+  ) {
+    logger.warn(
+      {
+        orderId: order._id,
+        linkedTracking: order.bostaTrackingNumber,
+        candidateTracking: tracking,
+      },
+      'Refusing to link — tracking mismatch'
+    );
+    return { orderId: order._id, linked: false, synced: false, reason: 'tracking_mismatch' };
+  }
 
   const updates = {};
   if (!order.bostaDeliveryId) updates.bostaDeliveryId = deliveryId;
@@ -208,8 +242,12 @@ export async function syncOrderStatesFromBosta({ limit = 80, since = null } = {}
 
   // 2) Link unlinked orders with high-confidence phone matches.
   // Skip pending_verification — Bosta must not attach/advance until a human verifies.
+  // Require BOTH id and tracking empty to avoid split-brain (tracking set, id from another shipment).
   const unlinkedFilter = {
-    $or: [{ bostaDeliveryId: null }, { bostaDeliveryId: { $exists: false } }],
+    $and: [
+      { $or: [{ bostaDeliveryId: null }, { bostaDeliveryId: { $exists: false } }] },
+      { $or: [{ bostaTrackingNumber: null }, { bostaTrackingNumber: { $exists: false } }] },
+    ],
     shippingMethod: { $ne: 'pickup' },
     internalStatus: {
       $in: [
@@ -335,9 +373,6 @@ export async function backfillBostaSince({
     );
 
   const byId = new Map(orders.map((o) => [String(o._id), o]));
-  const byShopify = new Map(
-    orders.filter((o) => o.shopifyOrderId).map((o) => [String(o.shopifyOrderId), o])
-  );
   const byTracking = new Map(
     orders.filter((o) => o.bostaTrackingNumber).map((o) => [String(o.bostaTrackingNumber), o])
   );
@@ -386,11 +421,17 @@ export async function backfillBostaSince({
           delivery.trackingNumber != null ? String(delivery.trackingNumber) : null;
         const ref = String(delivery.businessReference || '').trim();
 
+        if (isForeignBostaDelivery(delivery)) {
+          results.unmatched += 1;
+          continue;
+        }
+
+        // Prefer existing Gazelle link / Mongo businessReference only — Shopify numeric
+        // refs often belong to WooCommerce and must not auto-link.
         let order =
           byDelivery.get(deliveryId) ||
           (tracking ? byTracking.get(tracking) : null) ||
           (ref && byId.has(ref) ? byId.get(ref) : null) ||
-          (ref && byShopify.has(ref) ? byShopify.get(ref) : null) ||
           null;
 
         if (!order) {
@@ -399,6 +440,8 @@ export async function backfillBostaSince({
           let best = null;
           let bestScore = -Infinity;
           for (const c of candidates) {
+            if (c.internalStatus === 'pending_verification') continue;
+            if (c.bostaDeliveryId && String(c.bostaDeliveryId) !== deliveryId) continue;
             if (c.bostaDeliveryId && usedDeliveryIds.has(String(c.bostaDeliveryId))) {
               if (String(c.bostaDeliveryId) !== deliveryId) continue;
             }
@@ -416,12 +459,15 @@ export async function backfillBostaSince({
           continue;
         }
 
+        if (order.internalStatus === 'pending_verification') {
+          results.unmatched += 1;
+          continue;
+        }
+
         if (order.bostaDeliveryId && String(order.bostaDeliveryId) !== deliveryId) {
-          // Already linked to a different shipment — skip to avoid clobbering.
-          if (usedDeliveryIds.has(deliveryId)) {
-            results.unmatched += 1;
-            continue;
-          }
+          // Already linked to a different shipment — never apply this delivery's status.
+          results.unmatched += 1;
+          continue;
         }
 
         try {
