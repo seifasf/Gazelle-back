@@ -659,6 +659,7 @@ export async function createManualOrder({
 
 /**
  * Resolve a prior order for exchange by Shopify name/id (#43897 / 43897).
+ * Only searches orders placed in the last 2 months (keeps lookup light).
  */
 export async function findOrderForExchange(query) {
   const raw = String(query || '').trim();
@@ -670,6 +671,8 @@ export async function findOrderForExchange(query) {
 
   const withHash = raw.startsWith('#') ? raw : `#${raw.replace(/^#/, '')}`;
   const digits = raw.replace(/\D/g, '');
+  const since = new Date();
+  since.setMonth(since.getMonth() - 2);
 
   const or = [
     { shopifyOrderName: withHash },
@@ -683,13 +686,19 @@ export async function findOrderForExchange(query) {
   if (/^[a-f\d]{24}$/i.test(raw)) or.push({ _id: raw });
   or.push({ shopifyOrderId: raw });
 
-  const order = await Order.findOne({ $or: or })
+  const order = await Order.findOne({
+    $or: or,
+    placedAt: { $gte: since },
+  })
+    .sort({ placedAt: -1 })
     .populate('customerId', 'fullName phone email')
     .populate('items.variantId', 'title color size imageUrl sku sellingPrice productId')
     .lean();
 
   if (!order) {
-    const err = new Error(`Order not found for ${withHash}`);
+    const err = new Error(
+      `Order not found for ${withHash} in the last 2 months. Older orders are not searchable.`
+    );
     err.statusCode = 404;
     throw err;
   }
