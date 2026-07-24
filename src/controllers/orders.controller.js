@@ -65,6 +65,15 @@ export async function createManualOrder(req, res, next) {
   }
 }
 
+export async function findExchangeOrder(req, res, next) {
+  try {
+    const order = await orderService.findOrderForExchange(req.query.q || req.query.search);
+    res.json({ data: order });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getOrder(req, res, next) {
   try {
     const order = await orderService.getOrderById(req.params.id);
@@ -186,6 +195,7 @@ export default {
   listOrders,
   getStateCounts,
   createManualOrder,
+  findExchangeOrder,
   getOrder,
   verifyOrder,
   cancelOrder,

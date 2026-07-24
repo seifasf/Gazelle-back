@@ -2,8 +2,8 @@ import bwipjs from 'bwip-js';
 import Variant from '../models/Variant.js';
 import '../models/Product.js'; // register for populate
 
-/** Sticker size in mm (physical label: 5.8 cm × 4 cm). */
-export const LABEL_WIDTH_MM = 58;
+/** Sticker size in mm (physical label: 5.1 cm × 4 cm). */
+export const LABEL_WIDTH_MM = 51;
 export const LABEL_HEIGHT_MM = 40;
 
 /**
@@ -52,8 +52,8 @@ export async function getVariantBarcodePng(variantId) {
   }
 
   const value = barcodeValueForVariant(variant);
-  // Tall, wide bars — fill sticker width and stay crisp when scaled.
-  const png = await renderCode128Png(value, { scale: 6, height: 22, includetext: false });
+  // Tall, wide bars — dominate the 5.1×4 cm sticker.
+  const png = await renderCode128Png(value, { scale: 7, height: 26, includetext: false });
   return {
     png,
     value,
@@ -67,7 +67,7 @@ export async function getVariantBarcodePng(variantId) {
 /**
  * Printable sticker sheet HTML (opens in browser → Print).
  * Layout: big centered barcode, then SKU + product.
- * Physical size: 5.8 cm wide × 4 cm tall.
+ * Physical size: 5.1 cm wide × 4 cm tall.
  * copies = how many identical labels (usually = units restocked).
  */
 export async function buildBarcodeLabelHtml(variantId, copies = 1) {
@@ -160,7 +160,7 @@ function buildLabelSheetHtml(labelRows) {
     .label {
       width: ${LABEL_WIDTH_MM}mm;
       height: ${LABEL_HEIGHT_MM}mm;
-      padding: 1mm 1.2mm 1mm;
+      padding: 0.8mm 1mm 1.5mm;
       border: 0.2mm solid #ccc;
       display: flex;
       flex-direction: column;
@@ -178,15 +178,15 @@ function buildLabelSheetHtml(labelRows) {
       display: flex;
       justify-content: center;
       align-items: center;
-      min-height: 20mm;
-      max-height: 24mm;
+      min-height: 22mm;
+      max-height: 27mm;
       margin: 0 auto;
     }
     .barcode {
       width: 100%;
       max-width: 100%;
       height: auto;
-      max-height: 22mm;
+      max-height: 26mm;
       object-fit: contain;
       object-position: center;
       image-rendering: pixelated;
@@ -196,9 +196,9 @@ function buildLabelSheetHtml(labelRows) {
     .sku {
       flex: 0 0 auto;
       width: 100%;
-      margin-top: 0.5mm;
+      margin-top: 0.4mm;
       font-family: "Courier New", Courier, monospace;
-      font-size: 13pt;
+      font-size: 10pt;
       font-weight: 900;
       letter-spacing: 0.02em;
       line-height: 1.05;
@@ -210,13 +210,14 @@ function buildLabelSheetHtml(labelRows) {
     .meta {
       flex: 0 0 auto;
       width: 100%;
-      margin-top: 0.2mm;
+      margin-top: 0.15mm;
+      margin-bottom: 0.4mm;
       text-align: center;
     }
     .title {
       font-family: Arial, Helvetica, sans-serif;
-      font-size: 9.5pt;
-      font-weight: 800;
+      font-size: 7pt;
+      font-weight: 700;
       line-height: 1.1;
       max-width: 100%;
       overflow: hidden;
@@ -225,16 +226,16 @@ function buildLabelSheetHtml(labelRows) {
       text-align: center;
     }
     .attrs {
-      margin-top: 0.15mm;
+      margin-top: 0.1mm;
       display: flex;
       justify-content: center;
-      gap: 1.2mm;
+      gap: 1mm;
       flex-wrap: wrap;
     }
     .attr {
       font-family: Arial, Helvetica, sans-serif;
-      font-size: 9.5pt;
-      font-weight: 800;
+      font-size: 7pt;
+      font-weight: 700;
       line-height: 1.1;
     }
     @media print {

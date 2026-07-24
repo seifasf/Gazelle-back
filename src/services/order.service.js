@@ -558,6 +558,14 @@ export async function createManualOrder({
           0
         );
 
+    // Exchange: items free, customer pays shipping by place (from Shopify prior order).
+    const feeRaw = shippingFee != null ? Number(shippingFee) : null;
+    const exchangeShippingFee =
+      feeRaw != null && Number.isFinite(feeRaw) && feeRaw >= 0
+        ? feeRaw
+        : Number(priorOrder?.shippingFee) || 0;
+    const finalShippingFee = exchange ? exchangeShippingFee : (shippingFee ?? 0);
+
     const finalShippingAddress =
       shippingMethod === 'pickup'
         ? undefined
@@ -571,6 +579,9 @@ export async function createManualOrder({
       ? `Exchange for ${priorOrder.shopifyOrderName || priorOrder.shopifyOrderId || priorOrder._id}`
       : null;
 
+    // Exchanges skip call-center verify and go straight to Ready to ship.
+    const initialStatus = exchange ? 'verified_ready_for_shipping' : 'pending_verification';
+
     const [order] = await Order.create(
       [{
         shopifyOrderId: ref,
@@ -578,11 +589,11 @@ export async function createManualOrder({
         manualSource,
         shippingMethod: shippingMethod || 'bosta',
         paymentMethod: paymentMethod || 'cod',
-        shippingFee: exchange ? 0 : (shippingFee ?? 0),
+        shippingFee: finalShippingFee,
         onlinePaymentReference: paymentMethod === 'online' ? ref : undefined,
         customerId: customerDoc._id,
         shippingAddress: finalShippingAddress,
-        internalStatus: 'pending_verification',
+        internalStatus: initialStatus,
         isCreatorOrder: Boolean(isCreatorOrder),
         isExchangeOrder: exchange,
         exchangeFromOrderId: exchange ? priorOrder._id : undefined,
@@ -593,21 +604,34 @@ export async function createManualOrder({
         assignedOrdersManagerId: actorUserId,
         verificationLog: [
           ...(note ? [{ outcome: 'confirmed', note, actorUserId }] : []),
-          ...(exchangeNote ? [{ outcome: 'confirmed', note: exchangeNote, actorUserId }] : []),
+          ...(exchangeNote
+            ? [{ outcome: 'confirmed', note: exchangeNote, actorUserId }]
+            : []),
+          ...(exchange
+            ? [{
+                outcome: 'confirmed',
+                note: `Exchange auto-verified · shipping EGP ${finalShippingFee}`,
+                actorUserId,
+              }]
+            : []),
         ],
       }],
       { session }
     );
 
+    if (exchange) {
+      await reserveStockForOrder(order._id, orderItems, session);
+    }
+
     await recordStatusChange(
       {
         orderId: order._id,
         fromStatus: null,
-        toStatus: 'pending_verification',
+        toStatus: initialStatus,
         source: 'user_action',
         actorUserId,
         note: exchange
-          ? `Exchange order from ${manualSource} (for ${priorOrder.shopifyOrderName || priorOrder.shopifyOrderId})`
+          ? `Exchange order from ${manualSource} (for ${priorOrder.shopifyOrderName || priorOrder.shopifyOrderId}) · shipping EGP ${finalShippingFee}`
           : `Manual order from ${manualSource}`,
       },
       session
@@ -615,11 +639,62 @@ export async function createManualOrder({
 
     await Customer.updateOne({ _id: customerDoc._id }, { $inc: { lifetimeOrders: 1 } }, { session });
 
-    return Order.findById(order._id).session(session).populate('customerId').populate('exchangeFromOrderId', 'shopifyOrderId shopifyOrderName internalStatus');
+    return Order.findById(order._id)
+      .session(session)
+      .populate('customerId')
+      .populate('exchangeFromOrderId', 'shopifyOrderId shopifyOrderName internalStatus shippingFee')
+      .populate('items.variantId', 'title color size imageUrl sku realStock onHoldStock');
   });
 
   await notifyNewOrder(manualOrder, { source: 'manual' });
+  if (exchange) {
+    try {
+      await notifyOrderVerified(manualOrder);
+    } catch {
+      /* non-blocking */
+    }
+  }
   return manualOrder;
+}
+
+/**
+ * Resolve a prior order for exchange by Shopify name/id (#43897 / 43897).
+ */
+export async function findOrderForExchange(query) {
+  const raw = String(query || '').trim();
+  if (!raw) {
+    const err = new Error('Enter a Shopify order number');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const withHash = raw.startsWith('#') ? raw : `#${raw.replace(/^#/, '')}`;
+  const digits = raw.replace(/\D/g, '');
+
+  const or = [
+    { shopifyOrderName: withHash },
+    { shopifyOrderName: raw },
+  ];
+  if (digits) {
+    or.push({ shopifyOrderId: digits });
+    or.push({ shopifyOrderName: `#${digits}` });
+  }
+  // Manual refs / Mongo id fallback
+  if (/^[a-f\d]{24}$/i.test(raw)) or.push({ _id: raw });
+  or.push({ shopifyOrderId: raw });
+
+  const order = await Order.findOne({ $or: or })
+    .populate('customerId', 'fullName phone email')
+    .populate('items.variantId', 'title color size imageUrl sku sellingPrice productId')
+    .lean();
+
+  if (!order) {
+    const err = new Error(`Order not found for ${withHash}`);
+    err.statusCode = 404;
+    throw err;
+  }
+
+  return order;
 }
 
 function escapeRegex(value) {
@@ -829,6 +904,7 @@ export default {
   stockIntake,
   setRealStockBatch,
   createManualOrder,
+  findOrderForExchange,
   getOrderStateCounts,
   getOrderById,
   listOrders,

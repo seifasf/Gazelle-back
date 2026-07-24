@@ -261,10 +261,24 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
     const deliveryId = result._id || result.id || result.data?._id;
     const trackingNumber = result.trackingNumber || result.tracking_number;
 
-    claimed.bostaDeliveryId = deliveryId;
-    claimed.bostaTrackingNumber = trackingNumber;
-    claimed.bostaShipmentStatus = 'created';
-    await claimed.save();
+    // Atomic write — avoid stuck "creating" if document.save() fails after Bosta succeeded.
+    const saved = await Order.findByIdAndUpdate(
+      orderId,
+      {
+        $set: {
+          bostaDeliveryId: deliveryId,
+          bostaTrackingNumber: trackingNumber,
+          bostaShipmentStatus: 'created',
+          bostaShipmentError: null,
+        },
+      },
+      { new: true }
+    );
+    if (!saved?.bostaDeliveryId) {
+      const err = new Error('Bosta delivery created but could not be saved on the order — contact admin');
+      err.statusCode = 500;
+      throw err;
+    }
 
     return {
       deliveryId,
@@ -273,9 +287,12 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
       created: true,
     };
   } catch (error) {
-    claimed.bostaShipmentStatus = 'failed';
-    claimed.bostaShipmentError = error.message;
-    await claimed.save();
+    await Order.findByIdAndUpdate(orderId, {
+      $set: {
+        bostaShipmentStatus: 'failed',
+        bostaShipmentError: error.message,
+      },
+    });
     logger.error({ err: error.message, orderId }, 'Bosta shipment create failed');
     throw error;
   }

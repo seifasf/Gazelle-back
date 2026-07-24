@@ -225,6 +225,16 @@ export async function exportCatalogStock(req, res, next) {
   }
 }
 
+export async function exportInventoryCount(req, res, next) {
+  try {
+    const { sendExcel } = await import('../utils/excelExport.js');
+    const { buffer, filename } = await productService.exportInventoryCountExcel();
+    sendExcel(res, { buffer, filename });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getVariantBarcodePng(req, res, next) {
   try {
     const { png, value } = await barcodeService.getVariantBarcodePng(req.params.id);
@@ -273,6 +283,7 @@ export default {
   listCatalog,
   catalogFilters,
   exportCatalogStock,
+  exportInventoryCount,
   getVariantBarcodePng,
   getVariantBarcodeLabels,
   getBarcodeLabelsBatch,

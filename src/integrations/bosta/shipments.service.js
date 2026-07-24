@@ -212,7 +212,10 @@ export async function createDelivery(order, customer) {
     throw err;
   }
 
-  const codAmount = (order.totalSellingPrice || 0) + (order.shippingFee || 0);
+  // Online / prepaid orders must not ask the courier for cash (double charge risk).
+  const due = (order.totalSellingPrice || 0) + (order.shippingFee || 0);
+  const codAmount =
+    order.paymentMethod === 'online' || order.paymentMethod === 'prepaid' ? 0 : due;
   const { firstName, lastName } = splitName(shipping.fullName || customer?.fullName);
   const resolved = await resolveBostaCityId(city);
   const bostaCityName = resolved?.resolvedName || city;

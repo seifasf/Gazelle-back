@@ -33,10 +33,10 @@ function scoreDeliveryMatch(order, delivery) {
   let score = 0;
   const ref = String(delivery.businessReference || '').trim();
   const orderId = String(order._id);
-  const shopifyId = String(order.shopifyOrderId || '');
 
-  if (ref && (ref === orderId || ref === shopifyId)) score += 100;
-  if (ref && shopifyId && ref.includes(shopifyId)) score += 80;
+  // Only Mongo businessReference counts as an ownership proof.
+  // Shopify numeric refs are shared with WooCommerce / old plugins — never boost them.
+  if (ref && ref === orderId) score += 100;
 
   const due = (order.totalSellingPrice || 0) + (order.shippingFee || 0);
   const cod = deliveryCod(delivery);

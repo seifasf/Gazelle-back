@@ -457,6 +457,56 @@ export async function exportCatalogStockExcel({ productIds = [] } = {}) {
   return { buffer, filename: `gazelle-stock-selected-${stamp}.xlsx` };
 }
 
+/**
+ * Full warehouse count sheet (الجرد) — same label style as مراقبه Excel:
+ * "Women Brown Ballerina - 38, Brown" + الاجمالى (= realStock).
+ */
+export async function exportInventoryCountExcel() {
+  const ExcelJS = (await import('exceljs')).default;
+  const { workbookBuffer, styleHeaderRow } = await import('../utils/excelExport.js');
+
+  const products = await Product.find({ status: 'active' })
+    .sort({ title: 1 })
+    .select('_id title')
+    .lean();
+  const productIds = products.map((p) => p._id);
+  const variants = await Variant.find({ productId: { $in: productIds } })
+    .sort({ productId: 1, color: 1, size: 1 })
+    .select('sku color size realStock productId')
+    .lean();
+
+  const titleById = new Map(products.map((p) => [String(p._id), p.title || '']));
+
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('الجرد');
+  sheet.columns = [
+    { header: 'Row Labels', key: 'label', width: 48 },
+    { header: 'الاجمالى', key: 'total', width: 12 },
+    { header: 'SKU', key: 'sku', width: 22 },
+  ];
+  styleHeaderRow(sheet);
+
+  for (const v of variants) {
+    const title = titleById.get(String(v.productId)) || v.sku || '';
+    const size = v.size != null && String(v.size).trim() !== '' ? String(v.size).trim() : '';
+    const color = v.color != null && String(v.color).trim() !== '' ? String(v.color).trim() : '';
+    let label = title;
+    if (size && color) label = `${title} - ${size}, ${color}`;
+    else if (size) label = `${title} - ${size}`;
+    else if (color) label = `${title} - ${color}`;
+
+    sheet.addRow({
+      label,
+      total: v.realStock ?? 0,
+      sku: v.sku || '',
+    });
+  }
+
+  const buffer = await workbookBuffer(workbook);
+  const stamp = new Date().toISOString().slice(0, 10);
+  return { buffer, filename: `gazelle-jard-${stamp}.xlsx` };
+}
+
 export default {
   listVariants,
   getVariantById,
@@ -470,4 +520,5 @@ export default {
   getCatalogFilterOptions,
   getStockQueueCounts,
   exportCatalogStockExcel,
+  exportInventoryCountExcel,
 };

@@ -10,6 +10,7 @@ router.use(authenticate, sanitizeFinancialResponse);
 router.get('/catalog', requireRoles('admin', 'stock_manager', 'orders_manager'), inventoryController.listCatalog);
 router.get('/catalog/filters', requireRoles('admin', 'stock_manager', 'orders_manager'), inventoryController.catalogFilters);
 router.post('/catalog/export-stock', requireRoles('admin', 'stock_manager'), inventoryController.exportCatalogStock);
+router.get('/catalog/export-jard', requireRoles('admin', 'stock_manager'), inventoryController.exportInventoryCount);
 router.get('/variants/lookup', requireRoles('admin', 'stock_manager', 'orders_manager'), inventoryController.lookupVariantBySku);
 router.get(
   '/variants/lookup-family',

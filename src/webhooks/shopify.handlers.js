@@ -62,17 +62,16 @@ export function mapShopifyPaymentMethod(payload = {}) {
     .map((g) => String(g).toLowerCase());
 
   const joined = gateways.join(' ');
-  const codHints = ['cod', 'cash on delivery', 'cash_on_delivery', 'bosta', 'manual'];
-  if (codHints.some((h) => joined.includes(h))) return 'cod';
+  // Explicit COD gateways only — do NOT treat bare "manual" as COD
+  // (Shopify Manual often means bank transfer / offline paid).
+  const codHints = ['cod', 'cash on delivery', 'cash_on_delivery', 'cash-on-delivery'];
 
-  // Paid online before fulfillment.
+  // Already paid → never create a Bosta COD ask (double charge).
   if (payload.financial_status === 'paid' || payload.financial_status === 'partially_paid') {
-    if (!joined || joined.includes('shopify_payments') || joined.includes('paymob') || joined.includes('stripe') || joined.includes('paypal')) {
-      return 'online';
-    }
-    // Unknown gateway but marked paid → online
-    if (!codHints.some((h) => joined.includes(h))) return 'online';
+    return 'online';
   }
+
+  if (codHints.some((h) => joined.includes(h))) return 'cod';
 
   // Default Egypt storefront path is COD when unpaid / pending.
   if (payload.financial_status === 'pending' || payload.financial_status === 'authorized') {
