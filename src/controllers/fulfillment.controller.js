@@ -133,6 +133,17 @@ export async function getOrderSheet(req, res, next) {
   }
 }
 
+export async function markOutOfStock(req, res, next) {
+  try {
+    const order = await fulfillmentService.markOrderOutOfStock(req.params.id, req.user._id, {
+      note: req.body?.note,
+    });
+    res.json({ data: order });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export default {
   getWarehouseReview,
   exportWarehouseReview,
@@ -146,4 +157,5 @@ export default {
   getShipmentStatus,
   checkStock,
   getOrderSheet,
+  markOutOfStock,
 };

@@ -4,6 +4,7 @@ export const ORDER_STATUSES = [
   'pending_verification',
   'no_response',
   'verified_ready_for_shipping',
+  'out_of_stock',
   'picked_up_by_bosta',
   'in_transit',
   'delivered',

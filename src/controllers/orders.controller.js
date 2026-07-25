@@ -3,6 +3,7 @@ import * as exchangeService from '../services/exchange.service.js';
 
 const STOCK_MANAGER_ORDER_STATUSES = new Set([
   'verified_ready_for_shipping',
+  'out_of_stock',
   'picked_up_by_bosta',
   'in_transit',
   'returning_to_origin',
@@ -167,7 +168,11 @@ export async function updateShippingAddress(req, res, next) {
     const Order = (await import('../models/Order.js')).default;
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ error: 'Order not found' });
-    if (!['pending_verification', 'no_response', 'verified_ready_for_shipping'].includes(order.internalStatus)) {
+    if (
+      !['pending_verification', 'no_response', 'verified_ready_for_shipping', 'out_of_stock'].includes(
+        order.internalStatus
+      )
+    ) {
       return res.status(400).json({ error: 'Cannot edit address at this stage' });
     }
     order.shippingAddress = { ...order.shippingAddress.toObject?.() || order.shippingAddress, ...req.body };
@@ -180,7 +185,20 @@ export async function updateShippingAddress(req, res, next) {
 
 export async function transitionStatus(req, res, next) {
   try {
-    const order = await orderService.transitionOrderStatus(req.params.id, req.body.toStatus, {
+    const toStatus = req.body.toStatus;
+    const role = req.user.role;
+
+    // Stock can only park as out_of_stock (via fulfillment) or return OOS → ready.
+    if (role === 'stock_manager') {
+      const allowed =
+        (toStatus === 'verified_ready_for_shipping') ||
+        (toStatus === 'out_of_stock');
+      if (!allowed) {
+        return res.status(403).json({ error: 'Stock managers can only move Out of stock ↔ Ready to ship' });
+      }
+    }
+
+    const order = await orderService.transitionOrderStatus(req.params.id, toStatus, {
       source: 'user_action',
       actorUserId: req.user._id,
       note: req.body.note,

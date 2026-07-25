@@ -3,7 +3,12 @@ import Variant from '../models/Variant.js';
 import { withTransaction } from '../utils/transaction.js';
 import { applyLedgerEntries } from './inventory.service.js';
 
-const EDITABLE = ['pending_verification', 'no_response', 'verified_ready_for_shipping'];
+const EDITABLE = [
+  'pending_verification',
+  'no_response',
+  'verified_ready_for_shipping',
+  'out_of_stock',
+];
 
 function recalcMerchandiseTotals(order) {
   const goodsSum = order.items.reduce(

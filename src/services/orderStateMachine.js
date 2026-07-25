@@ -9,7 +9,10 @@ export const ORDER_TRANSITIONS = {
   // Customer did not answer — can retry call, confirm later, or cancel.
   no_response: ['pending_verification', 'verified_ready_for_shipping', 'cancelled'],
   // Pickup orders can be marked as delivered directly (no courier step).
-  verified_ready_for_shipping: ['picked_up_by_bosta', 'delivered', 'cancelled'],
+  // Warehouse can park an order as out_of_stock until inventory is fixed.
+  verified_ready_for_shipping: ['picked_up_by_bosta', 'delivered', 'out_of_stock', 'cancelled'],
+  // Hold for missing SKUs — edit items, cancel, or send back to Ready to ship.
+  out_of_stock: ['verified_ready_for_shipping', 'cancelled'],
   // Bosta webhooks can skip steps (e.g. exception → RTO without a separate in_transit event).
   picked_up_by_bosta: ['in_transit', 'delivered', 'failed_delivery', 'returning_to_origin'],
   in_transit: ['delivered', 'failed_delivery', 'returning_to_origin'],

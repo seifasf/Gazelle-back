@@ -423,13 +423,42 @@ export async function getPickList() {
     // Customer pickup is handled on the order / Ready-to-ship queue — not Bosta fulfillment.
     shippingMethod: { $ne: 'pickup' },
   })
-    .sort({ placedAt: 1 })
+    // Newest ready-to-ship first so newly joined orders are easy to spot/select.
+    .sort({ verifiedAt: -1, placedAt: -1 })
     .populate('customerId', 'fullName phone riskFlag lifetimeCancelled')
     .populate({
       path: 'items.variantId',
       select: 'sku title color size imageUrl productId',
       populate: { path: 'productId', select: 'title' },
     });
+}
+
+/**
+ * Park a Ready-to-ship order as out_of_stock (warehouse missing SKUs).
+ * Stock hold stays reserved until cancel or ship.
+ */
+export async function markOrderOutOfStock(orderId, actorUserId, { note } = {}) {
+  const order = await Order.findById(orderId);
+  if (!order) {
+    const err = new Error('Order not found');
+    err.statusCode = 404;
+    throw err;
+  }
+  if (order.internalStatus !== 'verified_ready_for_shipping') {
+    const err = new Error('Only Ready to ship orders can move to Out of stock');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const reason = typeof note === 'string' && note.trim()
+    ? note.trim()
+    : 'Warehouse: item(s) out of stock';
+
+  return orderService.transitionOrderStatus(orderId, 'out_of_stock', {
+    source: 'user_action',
+    actorUserId,
+    note: reason,
+  });
 }
 
 export async function getShipmentStatus(orderId) {
@@ -544,6 +573,7 @@ export default {
   prepareAwbForOrder,
   createBostaShipmentForOrder,
   getPickList,
+  markOrderOutOfStock,
   getShipmentStatus,
   getAwbForOrder,
   checkStockAvailability,

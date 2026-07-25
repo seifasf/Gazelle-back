@@ -210,7 +210,12 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
       throw err;
     }
 
-    const cancellable = ['pending_verification', 'no_response', 'verified_ready_for_shipping'];
+    const cancellable = [
+      'pending_verification',
+      'no_response',
+      'verified_ready_for_shipping',
+      'out_of_stock',
+    ];
     if (!cancellable.includes(order.internalStatus)) {
       const err = new Error('Order cannot be cancelled at this stage');
       err.statusCode = 400;
@@ -951,7 +956,12 @@ export async function processDelayCallbacksDue() {
 }
 
 const DISCOUNT_PERCENTS = [5, 10, 15, 20, 25, 30];
-const DISCOUNTABLE_STATUSES = ['pending_verification', 'no_response', 'verified_ready_for_shipping'];
+const DISCOUNTABLE_STATUSES = [
+  'pending_verification',
+  'no_response',
+  'verified_ready_for_shipping',
+  'out_of_stock',
+];
 
 /**
  * Apply % discount on merchandise (totalSellingPrice), never on shippingFee.
