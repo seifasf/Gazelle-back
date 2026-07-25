@@ -16,5 +16,6 @@ const inventoryLedgerSchema = new mongoose.Schema(
 );
 
 inventoryLedgerSchema.index({ variantId: 1, createdAt: -1 });
+inventoryLedgerSchema.index({ ledgerType: 1, createdAt: -1 });
 
 export default mongoose.model('InventoryLedger', inventoryLedgerSchema);

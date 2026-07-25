@@ -27,6 +27,41 @@ export async function exportWarehouseReview(req, res, next) {
   }
 }
 
+export async function getStockIntakes(req, res, next) {
+  try {
+    const data = await warehouseReviewService.listStockIntakes({
+      from: req.query.from,
+      to: req.query.to,
+      limit: req.query.limit,
+      skip: req.query.skip,
+    });
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function exportStockIntakes(req, res, next) {
+  try {
+    const { buffer, filename } = await warehouseReviewService.exportStockIntakesExcel({
+      from: req.query.from,
+      to: req.query.to,
+    });
+    sendExcel(res, { buffer, filename });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function exportCurrentStock(req, res, next) {
+  try {
+    const { buffer, filename } = await warehouseReviewService.exportCurrentStockExcel();
+    sendExcel(res, { buffer, filename });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getPickList(req, res, next) {
   try {
     const orders = await fulfillmentService.getPickList();
@@ -99,6 +134,9 @@ export async function getOrderSheet(req, res, next) {
 export default {
   getWarehouseReview,
   exportWarehouseReview,
+  getStockIntakes,
+  exportStockIntakes,
+  exportCurrentStock,
   getPickList,
   pickAndPack,
   prepareAwb,

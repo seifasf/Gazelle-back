@@ -1,7 +1,10 @@
 import ExcelJS from 'exceljs';
 import Order from '../models/Order.js';
+import InventoryLedger from '../models/InventoryLedger.js';
 import '../models/Customer.js';
 import '../models/User.js';
+import '../models/Variant.js';
+import '../models/Product.js';
 import { workbookBuffer, styleHeaderRow } from '../utils/excelExport.js';
 
 const WAREHOUSE_STATUSES = ['pending_verification', 'verified_ready_for_shipping'];
@@ -178,4 +181,111 @@ export async function exportWarehouseBacklogExcel(query = {}) {
   return { buffer, filename: `warehouse-backlog-${stamp}.xlsx`, data };
 }
 
-export default { getWarehouseBacklog, exportWarehouseBacklogExcel };
+/**
+ * Pieces entered into warehouse (stock intake / count adjustments with +qty).
+ */
+export async function listStockIntakes({ from, to, limit = 100, skip = 0 } = {}) {
+  const filter = {
+    ledgerType: 'real_stock_increment_manual',
+    quantityDelta: { $gt: 0 },
+  };
+  if (from || to) {
+    filter.createdAt = {};
+    if (from) filter.createdAt.$gte = new Date(`${String(from).slice(0, 10)}T00:00:00.000Z`);
+    if (to) filter.createdAt.$lte = new Date(`${String(to).slice(0, 10)}T23:59:59.999Z`);
+  }
+
+  const lim = Math.min(Math.max(Number(limit) || 100, 1), 500);
+  const sk = Math.max(Number(skip) || 0, 0);
+
+  const [rows, total] = await Promise.all([
+    InventoryLedger.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(sk)
+      .limit(lim)
+      .populate({
+        path: 'variantId',
+        select: 'sku title color size imageUrl realStock productId',
+        populate: { path: 'productId', select: 'title imageUrl' },
+      })
+      .populate('actorUserId', 'name email')
+      .lean(),
+    InventoryLedger.countDocuments(filter),
+  ]);
+
+  const entries = rows.map((row) => {
+    const v = row.variantId && typeof row.variantId === 'object' ? row.variantId : null;
+    const product = v?.productId && typeof v.productId === 'object' ? v.productId : null;
+    return {
+      id: String(row._id),
+      enteredAt: row.createdAt,
+      quantity: row.quantityDelta,
+      reasonCode: row.reasonCode || 'restock',
+      sku: v?.sku || '—',
+      title: product?.title || v?.title || v?.sku || '—',
+      color: v?.color || '',
+      size: v?.size != null ? String(v.size) : '',
+      imageUrl: v?.imageUrl || product?.imageUrl || '',
+      realStockNow: v?.realStock ?? null,
+      variantId: v?._id ? String(v._id) : null,
+      enteredBy: row.actorUserId?.name || row.actorUserId?.email || '—',
+    };
+  });
+
+  const unitsEntered = entries.reduce((s, e) => s + (e.quantity || 0), 0);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    range: { from: from || null, to: to || null },
+    total,
+    unitsEntered,
+    limit: lim,
+    skip: sk,
+    entries,
+  };
+}
+
+export async function exportStockIntakesExcel(query = {}) {
+  const data = await listStockIntakes({ ...query, limit: 5000, skip: 0 });
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'Gazelle OMS';
+  workbook.created = new Date();
+
+  const sheet = workbook.addWorksheet('Stock entered');
+  sheet.columns = [
+    { header: 'Entered at', key: 'enteredAt', width: 22 },
+    { header: 'Product', key: 'title', width: 32 },
+    { header: 'SKU', key: 'sku', width: 20 },
+    { header: 'Color', key: 'color', width: 14 },
+    { header: 'Size', key: 'size', width: 10 },
+    { header: 'Qty entered', key: 'quantity', width: 12 },
+    { header: 'WH stock now', key: 'realStockNow', width: 14 },
+    { header: 'Reason', key: 'reasonCode', width: 14 },
+    { header: 'Entered by', key: 'enteredBy', width: 20 },
+  ];
+  for (const row of data.entries) {
+    sheet.addRow({
+      ...row,
+      enteredAt: row.enteredAt ? new Date(row.enteredAt).toISOString() : '',
+    });
+  }
+  styleHeaderRow(sheet);
+
+  const buffer = await workbookBuffer(workbook);
+  const stamp = new Date().toISOString().slice(0, 10);
+  return { buffer, filename: `warehouse-stock-entered-${stamp}.xlsx`, data };
+}
+
+/** Current warehouse stock levels (all SKUs + amounts). */
+export async function exportCurrentStockExcel() {
+  const { exportInventoryCountExcel } = await import('./product.service.js');
+  return exportInventoryCountExcel();
+}
+
+export default {
+  getWarehouseBacklog,
+  exportWarehouseBacklogExcel,
+  listStockIntakes,
+  exportStockIntakesExcel,
+  exportCurrentStockExcel,
+};

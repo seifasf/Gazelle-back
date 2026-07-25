@@ -9,6 +9,17 @@ router.use(authenticate);
 
 router.get('/warehouse-review', requireRoles('admin', 'stock_manager'), fulfillmentController.getWarehouseReview);
 router.get('/warehouse-review/export', requireRoles('admin', 'stock_manager'), fulfillmentController.exportWarehouseReview);
+router.get('/warehouse-review/intakes', requireRoles('admin', 'stock_manager'), fulfillmentController.getStockIntakes);
+router.get(
+  '/warehouse-review/intakes/export',
+  requireRoles('admin', 'stock_manager'),
+  fulfillmentController.exportStockIntakes
+);
+router.get(
+  '/warehouse-review/stock-export',
+  requireRoles('admin', 'stock_manager'),
+  fulfillmentController.exportCurrentStock
+);
 router.get('/pick-list', requireRoles('admin', 'stock_manager'), fulfillmentController.getPickList);
 router.post('/:id/pick-pack', requireRoles('admin', 'stock_manager'), fulfillmentController.pickAndPack);
 router.post('/:id/prepare-awb', requireRoles('admin', 'stock_manager'), fulfillmentController.prepareAwb);
