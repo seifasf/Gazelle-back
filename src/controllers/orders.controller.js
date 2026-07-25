@@ -191,6 +191,15 @@ export async function delayOrder(req, res, next) {
   }
 }
 
+export async function applyDiscount(req, res, next) {
+  try {
+    const order = await orderService.applyOrderDiscount(req.params.id, req.user._id, req.body);
+    res.json({ data: order });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export default {
   listOrders,
   getStateCounts,
@@ -206,4 +215,5 @@ export default {
   updateShippingAddress,
   transitionStatus,
   delayOrder,
+  applyDiscount,
 };

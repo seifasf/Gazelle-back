@@ -950,6 +950,86 @@ export async function processDelayCallbacksDue() {
   return { date: todayYmd, notified };
 }
 
+const DISCOUNT_PERCENTS = [5, 10, 15, 20, 25, 30];
+const DISCOUNTABLE_STATUSES = ['pending_verification', 'no_response', 'verified_ready_for_shipping'];
+
+/**
+ * Apply % discount on merchandise (totalSellingPrice), never on shippingFee.
+ * percent 0 clears the discount and restores merchandiseSubtotal.
+ */
+export async function applyOrderDiscount(orderId, actorUserId, { percent }) {
+  const order = await Order.findById(orderId);
+  if (!order) {
+    const err = new Error('Order not found');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  if (!DISCOUNTABLE_STATUSES.includes(order.internalStatus)) {
+    const err = new Error('Discount can only be set before the order is handed to courier');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (order.bostaDeliveryId || ['queued', 'creating', 'created'].includes(order.bostaShipmentStatus)) {
+    const err = new Error('Cannot change discount after a Bosta shipment was created');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (order.isExchangeOrder || order.isCreatorOrder) {
+    const err = new Error('Discount is not available on exchange / creator orders');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const pct = Number(percent);
+  if (!Number.isFinite(pct) || pct < 0) {
+    const err = new Error('Invalid discount percent');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (pct !== 0 && !DISCOUNT_PERCENTS.includes(pct)) {
+    const err = new Error(`Discount must be one of: ${DISCOUNT_PERCENTS.join(', ')}% (or 0 to clear)`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const base =
+    order.merchandiseSubtotal != null && order.merchandiseSubtotal > 0
+      ? Number(order.merchandiseSubtotal)
+      : Number(order.totalSellingPrice || 0) + Number(order.discountAmount || 0);
+
+  if (!(base > 0) && pct > 0) {
+    const err = new Error('Order has no merchandise total to discount');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const discountAmount = pct === 0 ? 0 : Math.round((base * pct) / 100 * 100) / 100;
+  const totalSellingPrice = Math.max(0, Math.round((base - discountAmount) * 100) / 100);
+
+  order.merchandiseSubtotal = base;
+  order.discountPercent = pct;
+  order.discountAmount = discountAmount;
+  order.totalSellingPrice = totalSellingPrice;
+  await order.save();
+
+  await OrderStatusHistory.create({
+    orderId: order._id,
+    fromStatus: order.internalStatus,
+    toStatus: order.internalStatus,
+    source: 'user_action',
+    actorUserId,
+    note:
+      pct === 0
+        ? `Cleared merchandise discount — total ${totalSellingPrice} EGP (shipping unchanged)`
+        : `Applied ${pct}% discount on merchandise (−${discountAmount} EGP) — goods ${totalSellingPrice} EGP + shipping ${order.shippingFee || 0} EGP`,
+  });
+
+  return order;
+}
+
 export default {
   verifyOrder,
   cancelOrder,
@@ -969,4 +1049,5 @@ export default {
   claimOrder,
   delayOrder,
   processDelayCallbacksDue,
+  applyOrderDiscount,
 };

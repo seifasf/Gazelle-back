@@ -90,6 +90,11 @@ const orderSchema = new mongoose.Schema(
     assignedOrdersManagerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     assignedStockManagerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     totalSellingPrice: { type: Number, required: true, min: 0 },
+    /** Merchandise total before % discount (shipping excluded). */
+    merchandiseSubtotal: { type: Number, min: 0 },
+    /** Percent off merchandise only (not shipping). */
+    discountPercent: { type: Number, min: 0, max: 100, default: 0 },
+    discountAmount: { type: Number, min: 0, default: 0 },
     totalCogsSnapshot: { type: Number, min: 0 },
     cancellationReason: String,
     isCreatorOrder: { type: Boolean, default: false },
