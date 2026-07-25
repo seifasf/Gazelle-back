@@ -141,6 +141,20 @@ function compactCity(value) {
     .replace(/[^a-z0-9\u0600-\u06ff]/g, '');
 }
 
+/** Country / invalid labels customers sometimes put in the city field. */
+const COUNTRY_LABELS = new Set([
+  'egypt',
+  'eg',
+  'egy',
+  'مصر',
+  'جمهوريةمصرالعربية',
+  'egypte',
+]);
+
+function isCountryLabel(value) {
+  return COUNTRY_LABELS.has(compactCity(value));
+}
+
 /** Common Egypt district / typo labels → Bosta top-level city name. */
 const CITY_ALIASES = {
   madinty: 'Cairo',
@@ -169,12 +183,16 @@ const CITY_ALIASES = {
   أكتوبر: 'Giza',
   sheikhzayed: 'Giza',
   الشيخزايد: 'Giza',
+  elshelkhzayed: 'Giza',
   haram: 'Giza',
   الهرم: 'Giza',
   dokki: 'Giza',
   الدقي: 'Giza',
   mohandessin: 'Giza',
   المهندسين: 'Giza',
+  القاهره: 'Cairo',
+  القاهرة: 'Cairo',
+  cahiro: 'Cairo',
 };
 
 async function resolveBostaCityId(cityName) {
@@ -212,8 +230,9 @@ async function resolveBostaCityId(cityName) {
 
 export async function createDelivery(order, customer) {
   const shipping = order.shippingAddress || {};
-  const city = typeof shipping.city === 'string' ? shipping.city.trim() : '';
-  const line1 = typeof shipping.line1 === 'string' ? shipping.line1.trim() : '';
+  let city = typeof shipping.city === 'string' ? shipping.city.trim() : '';
+  let zone = typeof shipping.zone === 'string' ? shipping.zone.trim() : '';
+  let line1 = typeof shipping.line1 === 'string' ? shipping.line1.trim() : '';
 
   if (!line1 || !city) {
     const err = new Error(
@@ -239,15 +258,43 @@ export async function createDelivery(order, customer) {
     throw err;
   }
   const { firstName, lastName } = splitName(shipping.fullName || customer?.fullName);
-  const resolved = await resolveBostaCityId(city);
+
+  // Shopify sometimes puts country in city ("Egypt") and the real city in province/zone.
+  let resolved = await resolveBostaCityId(city);
+  if (!resolved || isCountryLabel(city)) {
+    const fromZone = zone ? await resolveBostaCityId(zone) : null;
+    if (fromZone) {
+      const originalCity = city;
+      resolved = { ...fromZone, aliased: true };
+      city = fromZone.resolvedName;
+      zone = [originalCity !== city ? originalCity : null, zone !== city ? zone : null]
+        .filter(Boolean)
+        .join(' · ');
+    }
+  }
+
+  if (!resolved && isCountryLabel(city)) {
+    const err = new Error(
+      `City is set to “${shipping.city}” (country). Set a real Bosta city (e.g. Cairo) — often it is already in Zone/province.`
+    );
+    err.statusCode = 400;
+    err.code = 'INVALID_CITY';
+    throw err;
+  }
+
   const bostaCityName = resolved?.resolvedName || city;
+
+  // Bosta rejects very short first lines ("6046") — enrich with area/city for the courier.
+  if (line1.length < 10) {
+    line1 = [line1, zone, bostaCityName].filter(Boolean).join(', ');
+  }
 
   // Bosta create API expects dropOffAddress.city (name), not receiver.address.cityId.
   const dropOffAddress = {
     city: bostaCityName,
     firstLine: line1,
     secondLine: shipping.line2 || '',
-    zone: shipping.zone || (resolved?.aliased ? city : '') || '',
+    zone: zone || (resolved?.aliased ? shipping.city : '') || '',
   };
 
   const webhookUrl = bostaWebhookUrl(config.APP_URL);
@@ -285,11 +332,18 @@ export async function createDelivery(order, customer) {
     return response?.data || response;
   } catch (err) {
     const msg = err?.message || 'Bosta delivery create failed';
+    if (/insufficient parameters/i.test(msg)) {
+      const wrapped = new Error(
+        `Bosta needs a fuller street address (got “${shipping.line1 || ''}”). Open the order, add building/street details, then retry the policy.`
+      );
+      wrapped.statusCode = 400;
+      throw wrapped;
+    }
     if (/city/i.test(msg) || err?.statusCode === 400 || err?.statusCode === 500) {
       const wrapped = new Error(
         resolved?.resolvedName
           ? msg
-          : `Bosta rejected the city “${city}”. Pick a Bosta city (e.g. Cairo) and put the area in Zone, then retry.`
+          : `Bosta rejected the city “${shipping.city || city}”. Pick a Bosta city (e.g. Cairo) and put the area in Zone, then retry.`
       );
       wrapped.statusCode = err.statusCode || 502;
       throw wrapped;
