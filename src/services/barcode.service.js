@@ -2,8 +2,8 @@ import bwipjs from 'bwip-js';
 import Variant from '../models/Variant.js';
 import '../models/Product.js'; // register for populate
 
-/** Sticker size in mm (physical label: 5.1 cm × 4 cm). */
-export const LABEL_WIDTH_MM = 51;
+/** Sticker size in mm (physical label: 5.8 cm wide × 4 cm tall). */
+export const LABEL_WIDTH_MM = 58;
 export const LABEL_HEIGHT_MM = 40;
 
 /**
@@ -19,9 +19,10 @@ export function barcodeValueForVariant(variant) {
 }
 
 /**
- * Code128 bars only (SKU printed as separate text under the bars, like warehouse stickers).
+ * Code128 bars only (SKU printed as separate bold text under the bars).
+ * High scale = sharp bars on print (avoids "dotted" look from upscaling a tiny PNG).
  */
-export async function renderCode128Png(text, { scale = 4, height = 16, includetext = false } = {}) {
+export async function renderCode128Png(text, { scale = 10, height = 18, includetext = false } = {}) {
   const value = String(text || '').trim();
   if (!value) {
     const err = new Error('Barcode text is required');
@@ -36,9 +37,8 @@ export async function renderCode128Png(text, { scale = 4, height = 16, includete
     height,
     includetext,
     textxalign: 'center',
-    textsize: 11,
     backgroundcolor: 'FFFFFF',
-    paddingwidth: 1,
+    paddingwidth: 2,
     paddingheight: 1,
   });
 }
@@ -52,8 +52,8 @@ export async function getVariantBarcodePng(variantId) {
   }
 
   const value = barcodeValueForVariant(variant);
-  // Tall, wide bars — dominate the 5.1×4 cm sticker.
-  const png = await renderCode128Png(value, { scale: 7, height: 26, includetext: false });
+  // Wide, tall bars sized for a 5.8×4 cm sticker.
+  const png = await renderCode128Png(value, { scale: 12, height: 20, includetext: false });
   return {
     png,
     value,
@@ -66,16 +66,13 @@ export async function getVariantBarcodePng(variantId) {
 
 /**
  * Printable sticker sheet HTML (opens in browser → Print).
- * Layout: big centered barcode, then SKU + product.
- * Physical size: 5.1 cm wide × 4 cm tall.
- * copies = how many identical labels (usually = units restocked).
+ * Layout: big centered barcode, bold SKU + product name, all centered.
+ * Physical size: 5.8 cm wide × 4 cm tall.
  */
 export async function buildBarcodeLabelHtml(variantId, copies = 1) {
   const label = await getVariantBarcodePng(variantId);
   const n = Math.min(Math.max(Number(copies) || 1, 1), 200);
-  return buildLabelSheetHtml([
-    { ...label, copies: n },
-  ]);
+  return buildLabelSheetHtml([{ ...label, copies: n }]);
 }
 
 /** Soft cap — multi-product restock can be large; keep HTML / print dialog usable. */
@@ -120,34 +117,35 @@ function buildLabelSheetHtml(labelRows) {
   const totalCopies = labelRows.reduce((s, r) => s + (r.copies || 1), 0);
   const skuSummary = labelRows.map((r) => `${r.copies}× ${r.sku}`).join(', ');
 
-  // Embed each PNG once (not once per sticker) — multi-SKU restock was blowing up HTML size.
-  const assetsJson = JSON.stringify(
-    labelRows.map((r) => r.png.toString('base64'))
-  );
+  // Embed each PNG once (not once per sticker).
+  const assetsJson = JSON.stringify(labelRows.map((r) => r.png.toString('base64')));
 
   const labels = labelRows
-    .flatMap(({ value, sku, size, color, title, copies }, assetIndex) =>
-      Array.from({ length: copies }, () => `
+    .flatMap(({ value, sku, size, color, title, copies }, assetIndex) => {
+      const attrs = [color, size != null && size !== '' ? `Size ${size}` : null]
+        .filter(Boolean)
+        .map((a) => escapeHtml(String(a)))
+        .join(' · ');
+      return Array.from(
+        { length: copies },
+        () => `
     <div class="label" data-bc="${assetIndex}" data-alt="${escapeHtml(value)}">
-      <div class="barcode-wrap"></div>
-      <div class="sku">${escapeHtml(sku)}</div>
-      <div class="meta">
+      <div class="label-inner">
+        <div class="barcode-wrap"></div>
+        <div class="sku">${escapeHtml(sku)}</div>
         <div class="title">${escapeHtml(title || '')}</div>
-        <div class="attrs">
-          ${color ? `<span class="attr">${escapeHtml(color)}</span>` : ''}
-          ${size ? `<span class="attr">Size ${escapeHtml(String(size))}</span>` : ''}
-        </div>
+        ${attrs ? `<div class="attrs">${attrs}</div>` : ''}
       </div>
-    </div>
-  `)
-    )
+    </div>`
+      );
+    })
     .join('');
 
   return `<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Barcode labels</title>
+  <title>Barcode labels · ${LABEL_WIDTH_MM / 10}×${LABEL_HEIGHT_MM / 10} cm</title>
   <style>
     @page {
       size: ${LABEL_WIDTH_MM}mm ${LABEL_HEIGHT_MM}mm;
@@ -157,9 +155,12 @@ function buildLabelSheetHtml(labelRows) {
     html, body {
       width: ${LABEL_WIDTH_MM}mm;
       margin: 0;
+      padding: 0;
       font-family: Arial, Helvetica, sans-serif;
       color: #000;
       background: #fff;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
     }
     .toolbar {
       margin: 12px;
@@ -171,90 +172,80 @@ function buildLabelSheetHtml(labelRows) {
       font-size: 14px; padding: 8px 14px; cursor: pointer;
       background: #111; color: #fff; border: 0; border-radius: 6px;
     }
-    .sheet {
-      display: block;
-      padding: 0;
-    }
+    .sheet { display: block; padding: 0; }
     .label {
       width: ${LABEL_WIDTH_MM}mm;
       height: ${LABEL_HEIGHT_MM}mm;
-      padding: 0.8mm 1mm 1.5mm;
-      border: 0.2mm solid #ccc;
+      padding: 1.2mm 1.8mm 1.4mm;
+      border: 0.2mm solid #ddd;
       display: flex;
-      flex-direction: column;
       align-items: center;
-      justify-content: flex-start;
-      text-align: center;
+      justify-content: center;
       overflow: hidden;
       page-break-inside: avoid;
       break-inside: avoid;
       background: #fff;
     }
+    .label-inner {
+      width: 100%;
+      max-width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      gap: 0.6mm;
+    }
     .barcode-wrap {
       width: 100%;
-      flex: 1 1 auto;
+      height: 23mm;
       display: flex;
       justify-content: center;
       align-items: center;
-      min-height: 22mm;
-      max-height: 27mm;
-      margin: 0 auto;
+      flex: 0 0 23mm;
     }
     .barcode {
       width: 100%;
-      max-width: 100%;
-      height: auto;
-      max-height: 26mm;
-      object-fit: contain;
+      max-width: 54mm;
+      height: 22mm;
+      object-fit: fill;
       object-position: center;
-      image-rendering: pixelated;
+      image-rendering: -webkit-optimize-contrast;
+      image-rendering: crisp-edges;
       display: block;
-      margin: 0 auto;
     }
     .sku {
-      flex: 0 0 auto;
       width: 100%;
-      margin-top: 0.4mm;
-      font-family: "Courier New", Courier, monospace;
-      font-size: 10pt;
+      font-family: Arial Black, Arial, Helvetica, sans-serif;
+      font-size: 11pt;
       font-weight: 900;
       letter-spacing: 0.02em;
       line-height: 1.05;
       text-align: center;
-      max-width: 100%;
-      word-break: break-all;
-      text-transform: none;
-    }
-    .meta {
-      flex: 0 0 auto;
-      width: 100%;
-      margin-top: 0.15mm;
-      margin-bottom: 0.4mm;
-      text-align: center;
+      word-break: break-word;
+      color: #000;
     }
     .title {
+      width: 100%;
       font-family: Arial, Helvetica, sans-serif;
-      font-size: 7pt;
-      font-weight: 700;
+      font-size: 8.5pt;
+      font-weight: 800;
       line-height: 1.1;
+      text-align: center;
       max-width: 100%;
       overflow: hidden;
       white-space: nowrap;
       text-overflow: ellipsis;
-      text-align: center;
+      color: #000;
     }
     .attrs {
-      margin-top: 0.1mm;
-      display: flex;
-      justify-content: center;
-      gap: 1mm;
-      flex-wrap: wrap;
-    }
-    .attr {
+      width: 100%;
       font-family: Arial, Helvetica, sans-serif;
-      font-size: 7pt;
-      font-weight: 700;
+      font-size: 8pt;
+      font-weight: 800;
       line-height: 1.1;
+      text-align: center;
+      color: #000;
     }
     @media print {
       .toolbar { display: none !important; }
@@ -304,7 +295,7 @@ function buildLabelSheetHtml(labelRows) {
         wrap.appendChild(img);
       });
       window.addEventListener('load', function () {
-        setTimeout(function () { window.print(); }, 300);
+        setTimeout(function () { window.print(); }, 350);
       });
     })();
   </script>
