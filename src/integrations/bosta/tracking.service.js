@@ -274,6 +274,33 @@ export async function processBostaStatusUpdate({ deliveryId, state, payload, not
     return order;
   }
 
+  // Ready-to-ship stays in the warehouse queue until Gazelle owns the shipment
+  // (print policy / pick-pack sets bostaDeliveryId with businessReference = order id).
+  // Do not attach or advance from foreign / guessed deliveries.
+  if (order.internalStatus === 'verified_ready_for_shipping') {
+    const ref = String(
+      payload?.businessReference || payload?.business_reference || ''
+    ).trim();
+    const gazelleOwned = ref && ref === String(order._id);
+    const alreadyLinked = linkedId && incomingId && linkedId === incomingId;
+    const trackingMatches =
+      order.bostaTrackingNumber &&
+      tracking &&
+      String(order.bostaTrackingNumber) === tracking;
+    if (!gazelleOwned && !alreadyLinked && !trackingMatches) {
+      logger.info(
+        {
+          orderId: order._id,
+          deliveryId,
+          ref,
+          state: extractBostaStateTokens(state).join('/') || String(state),
+        },
+        'Ignoring Bosta status on ready-to-ship — wait for Gazelle policy / pick-pack'
+      );
+      return order;
+    }
+  }
+
   // Attach delivery id / tracking only after verify, and only when still unlinked.
   const updates = {};
   if (incomingId && !order.bostaDeliveryId) updates.bostaDeliveryId = incomingId;

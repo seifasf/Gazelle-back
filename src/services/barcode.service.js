@@ -78,24 +78,40 @@ export async function buildBarcodeLabelHtml(variantId, copies = 1) {
   ]);
 }
 
+/** Soft cap — multi-product restock can be large; keep HTML / print dialog usable. */
+const MAX_BATCH_LABELS = 800;
+const MAX_COPIES_PER_SKU = 200;
+
 /**
  * Multiple SKUs in one print sheet.
  * items: [{ variantId, copies }]
  */
 export async function buildBarcodeLabelsBatchHtml(items = []) {
-  const rows = [];
+  const planned = [];
   let total = 0;
   for (const item of items) {
-    const copies = Math.min(Math.max(Number(item.copies) || 1, 1), 200);
-    if (total + copies > 500) break;
-    const label = await getVariantBarcodePng(item.variantId);
-    rows.push({ ...label, copies });
+    const copies = Math.min(Math.max(Number(item.copies) || 1, 1), MAX_COPIES_PER_SKU);
+    if (!item.variantId || copies < 1) continue;
+    planned.push({ variantId: item.variantId, copies });
     total += copies;
   }
-  if (!rows.length) {
+  if (!planned.length) {
     const err = new Error('No barcode labels to print');
     err.statusCode = 400;
     throw err;
+  }
+  if (total > MAX_BATCH_LABELS) {
+    const err = new Error(
+      `Too many labels (${total}). Print at most ${MAX_BATCH_LABELS} at a time — select fewer sizes or lower the qty.`
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const rows = [];
+  for (const item of planned) {
+    const label = await getVariantBarcodePng(item.variantId);
+    rows.push({ ...label, copies: item.copies });
   }
   return buildLabelSheetHtml(rows);
 }
@@ -104,14 +120,16 @@ function buildLabelSheetHtml(labelRows) {
   const totalCopies = labelRows.reduce((s, r) => s + (r.copies || 1), 0);
   const skuSummary = labelRows.map((r) => `${r.copies}× ${r.sku}`).join(', ');
 
+  // Embed each PNG once (not once per sticker) — multi-SKU restock was blowing up HTML size.
+  const assetsJson = JSON.stringify(
+    labelRows.map((r) => r.png.toString('base64'))
+  );
+
   const labels = labelRows
-    .flatMap(({ png, value, sku, size, color, title, copies }) => {
-      const imgSrc = `data:image/png;base64,${png.toString('base64')}`;
-      return Array.from({ length: copies }, () => `
-    <div class="label">
-      <div class="barcode-wrap">
-        <img class="barcode" src="${imgSrc}" alt="${escapeHtml(value)}" />
-      </div>
+    .flatMap(({ value, sku, size, color, title, copies }, assetIndex) =>
+      Array.from({ length: copies }, () => `
+    <div class="label" data-bc="${assetIndex}" data-alt="${escapeHtml(value)}">
+      <div class="barcode-wrap"></div>
       <div class="sku">${escapeHtml(sku)}</div>
       <div class="meta">
         <div class="title">${escapeHtml(title || '')}</div>
@@ -121,8 +139,8 @@ function buildLabelSheetHtml(labelRows) {
         </div>
       </div>
     </div>
-  `);
-    })
+  `)
+    )
     .join('');
 
   return `<!doctype html>
@@ -262,13 +280,34 @@ function buildLabelSheetHtml(labelRows) {
 </head>
 <body>
   <div class="toolbar">
-    <button onclick="window.print()">Print labels</button>
+    <button type="button" onclick="window.print()">Print labels</button>
     <span style="margin-left:8px;color:#666;font-size:13px">
       ${totalCopies} sticker${totalCopies === 1 ? '' : 's'} · ${escapeHtml(skuSummary)} · ${LABEL_WIDTH_MM / 10}×${LABEL_HEIGHT_MM / 10} cm
     </span>
   </div>
   <div class="sheet">${labels}</div>
-  <script>window.addEventListener('load', () => setTimeout(() => window.print(), 250));</script>
+  <script type="application/json" id="barcode-assets">${assetsJson}</script>
+  <script>
+    (function () {
+      var assets = [];
+      try {
+        assets = JSON.parse(document.getElementById('barcode-assets').textContent || '[]');
+      } catch (e) {}
+      document.querySelectorAll('.label[data-bc]').forEach(function (el) {
+        var i = Number(el.getAttribute('data-bc'));
+        var wrap = el.querySelector('.barcode-wrap');
+        if (!wrap || !assets[i]) return;
+        var img = document.createElement('img');
+        img.className = 'barcode';
+        img.alt = el.getAttribute('data-alt') || '';
+        img.src = 'data:image/png;base64,' + assets[i];
+        wrap.appendChild(img);
+      });
+      window.addEventListener('load', function () {
+        setTimeout(function () { window.print(); }, 300);
+      });
+    })();
+  </script>
 </body>
 </html>`;
 }
