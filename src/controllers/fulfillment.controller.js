@@ -32,6 +32,7 @@ export async function getStockIntakes(req, res, next) {
     const data = await warehouseReviewService.listStockIntakes({
       from: req.query.from,
       to: req.query.to,
+      search: req.query.search,
       limit: req.query.limit,
       skip: req.query.skip,
     });
@@ -46,6 +47,7 @@ export async function exportStockIntakes(req, res, next) {
     const { buffer, filename } = await warehouseReviewService.exportStockIntakesExcel({
       from: req.query.from,
       to: req.query.to,
+      search: req.query.search,
     });
     sendExcel(res, { buffer, filename });
   } catch (err) {

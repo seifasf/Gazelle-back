@@ -234,23 +234,39 @@ export async function listCatalog({
 
   let searchProductIds = [];
   if (search) {
-    const escapedSearch = escapeRegex(search);
-    const regex = { $regex: escapedSearch, $options: 'i' };
+    // Name search: match full phrase OR every word in the product title (any order).
+    // SKU / barcode still match the full typed string.
+    const tokens = search.split(/\s+/).map((t) => t.trim()).filter(Boolean);
+    const fullRegex = { $regex: escapeRegex(search), $options: 'i' };
+    const tokenRegexes = tokens.map((t) => ({ $regex: escapeRegex(t), $options: 'i' }));
+
     searchProductIds = await Variant.distinct('productId', {
       $or: [
-        { sku: regex },
-        { barcode: regex },
-        { title: regex },
-        { color: regex },
-        { size: regex },
+        { sku: fullRegex },
+        { barcode: fullRegex },
+        { title: fullRegex },
+        { color: fullRegex },
+        { size: fullRegex },
+        ...tokenRegexes.flatMap((regex) => [
+          { sku: regex },
+          { color: regex },
+          { size: regex },
+        ]),
       ],
     });
+
+    const titleMatchers =
+      tokens.length > 1
+        ? [{ $and: tokens.map((t) => ({ title: { $regex: escapeRegex(t), $options: 'i' } })) }]
+        : [{ title: fullRegex }];
+
     productFilter.$or = [
-      { title: regex },
-      { vendor: regex },
-      { productType: regex },
-      { handle: regex },
-      { tags: regex },
+      ...titleMatchers,
+      { title: fullRegex },
+      { vendor: fullRegex },
+      { productType: fullRegex },
+      { handle: fullRegex },
+      { tags: fullRegex },
     ];
     if (searchProductIds.length) {
       productFilter.$or.push({ _id: { $in: searchProductIds } });
@@ -458,8 +474,9 @@ export async function exportCatalogStockExcel({ productIds = [] } = {}) {
 }
 
 /**
- * Full warehouse count sheet (الجرد) — same label style as مراقبه Excel:
- * "Women Brown Ballerina - 38, Brown" + الاجمالى (= realStock).
+ * Full warehouse count sheet (الجرد) — same content shape as مراقبه pivot:
+ * Row Labels | اضافة | خصم | الاجمالى (+ Shopify mirror + SKU).
+ * No fancy colors — plain header + data.
  */
 export async function exportInventoryCountExcel() {
   const ExcelJS = (await import('exceljs')).default;
@@ -472,7 +489,7 @@ export async function exportInventoryCountExcel() {
   const productIds = products.map((p) => p._id);
   const variants = await Variant.find({ productId: { $in: productIds } })
     .sort({ productId: 1, color: 1, size: 1 })
-    .select('sku color size realStock productId')
+    .select('sku color size realStock onlineStock productId')
     .lean();
 
   const titleById = new Map(products.map((p) => [String(p._id), p.title || '']));
@@ -481,7 +498,10 @@ export async function exportInventoryCountExcel() {
   const sheet = workbook.addWorksheet('الجرد');
   sheet.columns = [
     { header: 'Row Labels', key: 'label', width: 48 },
+    { header: 'اضافة', key: 'add', width: 10 },
+    { header: 'خصم', key: 'deduct', width: 10 },
     { header: 'الاجمالى', key: 'total', width: 12 },
+    { header: 'Shopify', key: 'shopify', width: 12 },
     { header: 'SKU', key: 'sku', width: 22 },
   ];
   styleHeaderRow(sheet);
@@ -495,9 +515,13 @@ export async function exportInventoryCountExcel() {
     else if (size) label = `${title} - ${size}`;
     else if (color) label = `${title} - ${color}`;
 
+    const total = v.realStock ?? 0;
     sheet.addRow({
       label,
-      total: v.realStock ?? 0,
+      add: '',
+      deduct: '',
+      total,
+      shopify: v.onlineStock ?? 0,
       sku: v.sku || '',
     });
   }

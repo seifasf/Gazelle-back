@@ -1,10 +1,10 @@
 import ExcelJS from 'exceljs';
 import Order from '../models/Order.js';
 import InventoryLedger from '../models/InventoryLedger.js';
+import Variant from '../models/Variant.js';
+import Product from '../models/Product.js';
 import '../models/Customer.js';
 import '../models/User.js';
-import '../models/Variant.js';
-import '../models/Product.js';
 import { workbookBuffer, styleHeaderRow } from '../utils/excelExport.js';
 
 const WAREHOUSE_STATUSES = ['pending_verification', 'verified_ready_for_shipping'];
@@ -184,7 +184,11 @@ export async function exportWarehouseBacklogExcel(query = {}) {
 /**
  * Pieces entered into warehouse (stock intake / count adjustments with +qty).
  */
-export async function listStockIntakes({ from, to, limit = 100, skip = 0 } = {}) {
+function escapeRegex(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export async function listStockIntakes({ from, to, search, limit = 100, skip = 0 } = {}) {
   const filter = {
     ledgerType: 'real_stock_increment_manual',
     quantityDelta: { $gt: 0 },
@@ -193,6 +197,37 @@ export async function listStockIntakes({ from, to, limit = 100, skip = 0 } = {})
     filter.createdAt = {};
     if (from) filter.createdAt.$gte = new Date(`${String(from).slice(0, 10)}T00:00:00.000Z`);
     if (to) filter.createdAt.$lte = new Date(`${String(to).slice(0, 10)}T23:59:59.999Z`);
+  }
+
+  const term = String(search || '').trim();
+  if (term) {
+    const regex = { $regex: escapeRegex(term), $options: 'i' };
+    const tokens = term.split(/\s+/).filter(Boolean);
+
+    const titleFilter =
+      tokens.length > 1
+        ? { $and: tokens.map((t) => ({ title: { $regex: escapeRegex(t), $options: 'i' } })) }
+        : { title: regex };
+
+    const [productIds, variantIds] = await Promise.all([
+      Product.find(titleFilter).distinct('_id'),
+      Variant.find({
+        $or: [
+          { sku: regex },
+          { barcode: regex },
+          { title: regex },
+          { color: regex },
+        ],
+      }).distinct('_id'),
+    ]);
+
+    const byProduct =
+      productIds.length > 0
+        ? await Variant.find({ productId: { $in: productIds } }).distinct('_id')
+        : [];
+
+    const idSet = new Set([...variantIds, ...byProduct].map(String));
+    filter.variantId = { $in: [...idSet] };
   }
 
   const lim = Math.min(Math.max(Number(limit) || 100, 1), 500);

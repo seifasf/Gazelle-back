@@ -175,6 +175,19 @@ export async function registerWebhooks(req, res, next) {
   }
 }
 
+export async function pushWarehouseStock(req, res, next) {
+  try {
+    const dryRun = req.body?.dryRun === true || req.query?.dryRun === 'true';
+    const { pushWarehouseStockToShopify } = await import(
+      '../integrations/shopify/pushWarehouseStock.service.js'
+    );
+    const data = await pushWarehouseStockToShopify({ dryRun });
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getLocations(req, res, next) {
   try {
     const result = await testShopifyConnection();
@@ -193,5 +206,6 @@ export default {
   importOrders,
   importCustomers,
   registerWebhooks,
+  pushWarehouseStock,
   getLocations,
 };

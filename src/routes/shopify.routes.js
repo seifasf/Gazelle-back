@@ -13,6 +13,7 @@ router.post('/connect', adminOnly, shopifyController.connect);
 router.post('/test', adminOnly, shopifyController.testConnection);
 router.post('/sync', adminOnly, shopifyController.syncCatalog);
 router.get('/sync-status', adminOnly, shopifyController.syncStatus);
+router.post('/push-warehouse-stock', adminOnly, shopifyController.pushWarehouseStock);
 router.post('/register-webhooks', adminOnly, shopifyController.registerWebhooks);
 router.get('/locations', adminOnly, shopifyController.getLocations);
 

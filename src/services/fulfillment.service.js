@@ -400,6 +400,8 @@ export async function getPickList() {
   return Order.find({
     internalStatus: 'verified_ready_for_shipping',
     placedAt: { $gte: cutoff },
+    // Customer pickup is handled on the order / Ready-to-ship queue — not Bosta fulfillment.
+    shippingMethod: { $ne: 'pickup' },
   })
     .sort({ placedAt: 1 })
     .populate('customerId', 'fullName phone riskFlag lifetimeCancelled')
