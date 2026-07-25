@@ -2,6 +2,7 @@ export const USER_ROLES = ['admin', 'orders_manager', 'stock_manager'];
 
 export const ORDER_STATUSES = [
   'pending_verification',
+  'no_response',
   'verified_ready_for_shipping',
   'picked_up_by_bosta',
   'in_transit',

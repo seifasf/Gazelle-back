@@ -22,7 +22,7 @@ export async function processExchange(orderId, actorUserId, { fromItemId, toVari
       throw err;
     }
 
-    const allowed = ['pending_verification', 'verified_ready_for_shipping'];
+    const allowed = ['pending_verification', 'no_response', 'verified_ready_for_shipping'];
     if (!allowed.includes(order.internalStatus)) {
       const err = new Error('Exchange only allowed before shipment');
       err.statusCode = 400;

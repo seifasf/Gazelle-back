@@ -260,8 +260,8 @@ export async function processBostaStatusUpdate({ deliveryId, state, payload, not
     return order;
   }
 
-  // Call-center / stock must verify first. Never attach or advance while pending.
-  if (order.internalStatus === 'pending_verification') {
+  // Call-center / stock must verify first. Never attach or advance while pending / no response.
+  if (order.internalStatus === 'pending_verification' || order.internalStatus === 'no_response') {
     logger.info(
       {
         orderId: order._id,
@@ -269,7 +269,7 @@ export async function processBostaStatusUpdate({ deliveryId, state, payload, not
         state: extractBostaStateTokens(state).join('/') || String(state),
         type: normalizeBostaType(payload?.type ?? null),
       },
-      'Ignoring Bosta status while order is still pending_verification'
+      'Ignoring Bosta status while order is still pending_verification / no_response'
     );
     return order;
   }

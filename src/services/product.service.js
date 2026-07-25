@@ -234,42 +234,53 @@ export async function listCatalog({
 
   let searchProductIds = [];
   if (search) {
-    // Name search: match full phrase OR every word in the product title (any order).
-    // SKU / barcode still match the full typed string.
-    const tokens = search.split(/\s+/).map((t) => t.trim()).filter(Boolean);
-    const fullRegex = { $regex: escapeRegex(search), $options: 'i' };
-    const tokenRegexes = tokens.map((t) => ({ $regex: escapeRegex(t), $options: 'i' }));
+    /**
+     * Accurate catalog search:
+     * - SKU-like queries → match SKU / barcode (prefix + contains), not loose color/size words
+     * - Name queries → every significant word (2+ chars) must appear in product title
+     * - Ignore 1-letter noise that previously matched half the catalog
+     */
+    const term = String(search).trim();
+    const tokens = term
+      .split(/\s+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length >= 2);
+    const looksLikeSku =
+      /[-_/]/.test(term) ||
+      /^[A-Za-z]{1,8}\d/.test(term) ||
+      (/^[A-Za-z0-9-_/]+$/.test(term) && /\d/.test(term) && !/\s/.test(term));
 
-    searchProductIds = await Variant.distinct('productId', {
-      $or: [
-        { sku: fullRegex },
-        { barcode: fullRegex },
-        { title: fullRegex },
-        { color: fullRegex },
-        { size: fullRegex },
-        ...tokenRegexes.flatMap((regex) => [
-          { sku: regex },
-          { color: regex },
-          { size: regex },
-        ]),
-      ],
-    });
+    if (looksLikeSku || (tokens.length === 1 && /^[A-Za-z0-9-_/]+$/.test(tokens[0]) && /\d/.test(tokens[0]))) {
+      const skuTerm = tokens[0] || term;
+      const contains = { $regex: escapeRegex(skuTerm), $options: 'i' };
+      const prefix = { $regex: `^${escapeRegex(skuTerm)}`, $options: 'i' };
+      searchProductIds = await Variant.distinct('productId', {
+        $or: [{ sku: prefix }, { barcode: prefix }, { sku: contains }, { barcode: contains }],
+      });
+      productFilter._id = { $in: searchProductIds };
+    } else if (tokens.length) {
+      // Name: require all words in product title (order-independent).
+      const titleAnd = {
+        $and: tokens.map((t) => ({ title: { $regex: escapeRegex(t), $options: 'i' } })),
+      };
+      // Also allow exact-ish phrase match on title / handle.
+      const phrase = { $regex: escapeRegex(term), $options: 'i' };
+      productFilter.$or = [
+        titleAnd,
+        { title: phrase },
+        { handle: phrase },
+      ];
 
-    const titleMatchers =
-      tokens.length > 1
-        ? [{ $and: tokens.map((t) => ({ title: { $regex: escapeRegex(t), $options: 'i' } })) }]
-        : [{ title: fullRegex }];
-
-    productFilter.$or = [
-      ...titleMatchers,
-      { title: fullRegex },
-      { vendor: fullRegex },
-      { productType: fullRegex },
-      { handle: fullRegex },
-      { tags: fullRegex },
-    ];
-    if (searchProductIds.length) {
-      productFilter.$or.push({ _id: { $in: searchProductIds } });
+      // If the full phrase also hits a SKU, include those products too.
+      searchProductIds = await Variant.distinct('productId', {
+        $or: [{ sku: phrase }, { barcode: phrase }],
+      });
+      if (searchProductIds.length) {
+        productFilter.$or.push({ _id: { $in: searchProductIds } });
+      }
+    } else {
+      // Term too short (e.g. one letter) — do not broaden the catalog.
+      productFilter._id = { $in: [] };
     }
   }
 
@@ -277,7 +288,14 @@ export async function listCatalog({
   let variantProductIds = null;
   if (hasVariantFilters) {
     variantProductIds = await Variant.distinct('productId', variantMatch);
-    productFilter._id = { $in: variantProductIds };
+    if (productFilter._id?.$in) {
+      const allow = new Set(variantProductIds.map(String));
+      productFilter._id = {
+        $in: productFilter._id.$in.filter((id) => allow.has(String(id))),
+      };
+    } else {
+      productFilter._id = { $in: variantProductIds };
+    }
   }
 
   const [totalProducts, products] = await Promise.all([

@@ -158,7 +158,7 @@ export async function updateShippingAddress(req, res, next) {
     const Order = (await import('../models/Order.js')).default;
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ error: 'Order not found' });
-    if (!['pending_verification', 'verified_ready_for_shipping'].includes(order.internalStatus)) {
+    if (!['pending_verification', 'no_response', 'verified_ready_for_shipping'].includes(order.internalStatus)) {
       return res.status(400).json({ error: 'Cannot edit address at this stage' });
     }
     order.shippingAddress = { ...order.shippingAddress.toObject?.() || order.shippingAddress, ...req.body };

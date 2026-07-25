@@ -23,6 +23,7 @@ export async function getIntegrationHealth() {
     paymobWebhookLast,
     failedShipments,
     pendingVerify,
+    noResponse,
     readyToShip,
     inTransit,
   ] = await Promise.all([
@@ -32,6 +33,7 @@ export async function getIntegrationHealth() {
     WebhookReceipt.findOne({ source: 'paymob' }).sort({ createdAt: -1 }).select('createdAt'),
     Order.countDocuments({ bostaShipmentStatus: 'failed', placedAt: { $gte: since } }),
     Order.countDocuments({ internalStatus: 'pending_verification', placedAt: { $gte: since } }),
+    Order.countDocuments({ internalStatus: 'no_response', placedAt: { $gte: since } }),
     Order.countDocuments({ internalStatus: 'verified_ready_for_shipping', placedAt: { $gte: since } }),
     Order.countDocuments({
       internalStatus: { $in: ['picked_up_by_bosta', 'in_transit'] },
@@ -68,6 +70,7 @@ export async function getIntegrationHealth() {
     },
     queues: {
       pendingVerification: pendingVerify,
+      noResponse,
       readyToShip,
       inTransit,
       failedShipments,

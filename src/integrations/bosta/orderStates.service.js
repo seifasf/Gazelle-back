@@ -47,8 +47,8 @@ async function linkAndSyncOrder(order, delivery, note) {
     );
     return { orderId: order._id, linked: false, synced: false, reason: 'foreign' };
   }
-  if (order.internalStatus === 'pending_verification') {
-    return { orderId: order._id, linked: false, synced: false, reason: 'pending_verification' };
+  if (order.internalStatus === 'pending_verification' || order.internalStatus === 'no_response') {
+    return { orderId: order._id, linked: false, synced: false, reason: order.internalStatus };
   }
 
   const deliveryId = String(delivery._id || delivery.id);
@@ -318,7 +318,7 @@ export async function backfillBostaSince({
           continue;
         }
 
-        if (order.internalStatus === 'pending_verification') {
+        if (order.internalStatus === 'pending_verification' || order.internalStatus === 'no_response') {
           results.unmatched += 1;
           continue;
         }

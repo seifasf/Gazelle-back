@@ -104,6 +104,13 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
     throw err;
   }
 
+  const verifiable = ['pending_verification', 'no_response'];
+  if (!verifiable.includes(order.internalStatus)) {
+    const err = new Error('Order is not waiting for verification');
+    err.statusCode = 400;
+    throw err;
+  }
+
   if (outcome === 'customer_cancelled') {
     const cancelNote = typeof note === 'string' ? note.trim() : '';
     if (!cancelNote) {
@@ -114,15 +121,34 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
     return cancelOrder(orderId, actorUserId, { reason: 'customer_changed_mind', note: cancelNote });
   }
 
+  if (outcome === 'no_response') {
+    const updated = await withTransaction(async (session) => {
+      const fresh = await Order.findById(orderId).session(session);
+      fresh.verificationLog.push({ outcome, note, actorUserId });
+      if (!fresh.assignedOrdersManagerId) fresh.assignedOrdersManagerId = actorUserId;
+      await fresh.save({ session });
+      if (fresh.internalStatus !== 'no_response') {
+        await transitionOrder(
+          fresh,
+          'no_response',
+          {
+            source: 'user_action',
+            actorUserId,
+            note: note || 'Customer did not respond',
+          },
+          session
+        );
+      }
+      return Order.findById(orderId).session(session);
+    });
+    return updated;
+  }
+
   if (outcome !== 'confirmed') {
+    // e.g. customer_requested_changes — log only, stay in current queue state.
     order.verificationLog.push({ outcome, note, actorUserId });
     await order.save();
     return order;
-  }
-
-  const updates = { totalCogsSnapshot };
-  if (!order.assignedOrdersManagerId) {
-    updates.assignedOrdersManagerId = actorUserId;
   }
 
   const verified = await withTransaction(async (session) => {
@@ -184,7 +210,7 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
       throw err;
     }
 
-    const cancellable = ['pending_verification', 'verified_ready_for_shipping'];
+    const cancellable = ['pending_verification', 'no_response', 'verified_ready_for_shipping'];
     if (!cancellable.includes(order.internalStatus)) {
       const err = new Error('Order cannot be cancelled at this stage');
       err.statusCode = 400;
@@ -717,8 +743,9 @@ function ordersPlacedFromCutoff() {
 }
 
 export async function getOrderStateCounts() {
+  const cutoff = ordersPlacedFromCutoff();
   const pipeline = [
-    { $match: { placedAt: { $gte: ordersPlacedFromCutoff() } } },
+    { $match: { placedAt: { $gte: cutoff } } },
     { $group: { _id: '$internalStatus', count: { $sum: 1 } } },
   ];
   const rows = await Order.aggregate(pipeline);
@@ -727,6 +754,23 @@ export async function getOrderStateCounts() {
     counts[row._id] = row.count;
   }
   counts.total = rows.reduce((sum, r) => sum + r.count, 0);
+
+  // Fulfillment queue excludes customer pickup (handled on the order page).
+  const [fulfillmentReady, pickupReady] = await Promise.all([
+    Order.countDocuments({
+      placedAt: { $gte: cutoff },
+      internalStatus: 'verified_ready_for_shipping',
+      shippingMethod: { $ne: 'pickup' },
+    }),
+    Order.countDocuments({
+      placedAt: { $gte: cutoff },
+      internalStatus: 'verified_ready_for_shipping',
+      shippingMethod: 'pickup',
+    }),
+  ]);
+  counts.fulfillment_ready = fulfillmentReady;
+  counts.pickup_ready = pickupReady;
+
   return counts;
 }
 
@@ -797,7 +841,11 @@ export async function getOrderById(orderId) {
     .populate('customerId')
     .populate('assignedOrdersManagerId', 'name email')
     .populate('assignedStockManagerId', 'name email')
-    .populate('items.variantId', 'title color size imageUrl sku realStock onHoldStock');
+    .populate({
+      path: 'items.variantId',
+      select: 'title color size imageUrl sku realStock onHoldStock productId',
+      populate: { path: 'productId', select: 'title imageUrl' },
+    });
 }
 
 export async function getOrderStatusHistory(orderId) {
@@ -824,8 +872,8 @@ export async function delayOrder(orderId, actorUserId, { delayedUntil, note }) {
     err.statusCode = 404;
     throw err;
   }
-  if (order.internalStatus !== 'pending_verification') {
-    const err = new Error('Only pending verification orders can be delayed');
+  if (order.internalStatus !== 'pending_verification' && order.internalStatus !== 'no_response') {
+    const err = new Error('Only pending verification / no-response orders can be delayed');
     err.statusCode = 400;
     throw err;
   }
@@ -887,7 +935,7 @@ export async function processDelayCallbacksDue() {
   const dayEnd = new Date(`${todayYmd}T23:59:59.999+03:00`);
 
   const due = await Order.find({
-    internalStatus: 'pending_verification',
+    internalStatus: { $in: ['pending_verification', 'no_response'] },
     delayedUntil: { $gte: dayStart, $lte: dayEnd },
     $or: [{ delayNotifiedOn: { $exists: false } }, { delayNotifiedOn: null }, { delayNotifiedOn: { $ne: todayYmd } }],
   }).limit(200);

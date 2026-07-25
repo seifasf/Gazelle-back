@@ -5,7 +5,9 @@ import { ORDER_STATUSES, TERMINAL_ORDER_STATUSES } from '../constants/index.js';
  * Keys are current status; values are arrays of valid next statuses.
  */
 export const ORDER_TRANSITIONS = {
-  pending_verification: ['verified_ready_for_shipping', 'cancelled'],
+  pending_verification: ['verified_ready_for_shipping', 'no_response', 'cancelled'],
+  // Customer did not answer — can retry call, confirm later, or cancel.
+  no_response: ['pending_verification', 'verified_ready_for_shipping', 'cancelled'],
   // Pickup orders can be marked as delivered directly (no courier step).
   verified_ready_for_shipping: ['picked_up_by_bosta', 'delivered', 'cancelled'],
   // Bosta webhooks can skip steps (e.g. exception → RTO without a separate in_transit event).
