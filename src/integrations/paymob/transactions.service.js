@@ -208,23 +208,33 @@ export async function sumSuccessfulTransactions({ from, to, maxPages = 80 } = {}
 }
 
 /**
- * Sync Paymob into the ledger for a range, then return live API totals
- * (not a stale ledger aggregate if sync was partial).
+ * Sync Paymob into the ledger for a range, then return the best available total.
+ * Accept's transaction list often returns an empty first page (pages=1, amount=0)
+ * even when the ledger already has real receipts — never prefer that empty live sum.
  */
 export async function syncAndSumPaymobReceived({ from, to, maxPages = 80 } = {}) {
   if (!isPaymobApiConfigured()) {
-    return { amount: 0, count: 0, source: 'unavailable', real: false };
+    const [row] = await PaymobReceived.aggregate([
+      { $match: { receivedAt: { $gte: from, $lte: to } } },
+      {
+        $group: {
+          _id: null,
+          amount: { $sum: '$amountEgp' },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+    return {
+      amount: row?.amount ?? 0,
+      count: row?.count ?? 0,
+      source: row?.count ? 'paymob_ledger' : 'unavailable',
+      real: Boolean(row?.count),
+    };
   }
 
+  let live = { amount: 0, count: 0, pages: 0 };
   try {
-    const live = await sumSuccessfulTransactions({ from, to, maxPages });
-    return {
-      amount: live.amount,
-      count: live.count,
-      source: 'paymob',
-      real: true,
-      pages: live.pages,
-    };
+    live = await sumSuccessfulTransactions({ from, to, maxPages });
   } catch (err) {
     logger.warn({ err }, 'Paymob live sync failed — using ledger only');
   }
@@ -240,11 +250,30 @@ export async function syncAndSumPaymobReceived({ from, to, maxPages = 80 } = {})
     },
   ]);
 
+  const ledgerAmount = Math.round((row?.amount ?? 0) * 100) / 100;
+  const ledgerCount = row?.count ?? 0;
+  const liveAmount = Math.round((live.amount || 0) * 100) / 100;
+  const liveCount = live.count || 0;
+
+  // Empty/partial Accept pages must not wipe a populated ledger (~100k month totals).
+  if (ledgerCount > liveCount || (liveCount === 0 && ledgerAmount > 0)) {
+    return {
+      amount: ledgerAmount,
+      count: ledgerCount,
+      source: 'paymob_ledger',
+      real: true,
+      pages: live.pages,
+      liveAmount,
+      liveCount,
+    };
+  }
+
   return {
-    amount: row?.amount ?? 0,
-    count: row?.count ?? 0,
-    source: 'paymob_ledger',
+    amount: liveAmount,
+    count: liveCount,
+    source: 'paymob',
     real: true,
+    pages: live.pages,
   };
 }
 

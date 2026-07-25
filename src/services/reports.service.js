@@ -178,9 +178,7 @@ const dateToStringCairo = (field) => ({
 
 
 async function paymobReceivedForRange({ from, to }) {
-  // Always refresh from Paymob when configured — a non-empty ledger used to
-  // short-circuit and leave month-to-date totals stuck on a partial sync
-  // (Accept defaults to 10 txs/page).
+  // Sync Accept → ledger, but never trust an empty live page over real receipts.
   try {
     const { isPaymobApiConfigured, syncAndSumPaymobReceived } = await import(
       '../integrations/paymob/transactions.service.js'
@@ -190,7 +188,14 @@ async function paymobReceivedForRange({ from, to }) {
         syncAndSumPaymobReceived({ from, to, maxPages: 80 }),
         new Promise((_, reject) => setTimeout(() => reject(new Error('Paymob API timeout')), 45000)),
       ]);
-      return live;
+      if ((live?.count || 0) > 0 || (live?.amount || 0) > 0) {
+        return live;
+      }
+      // Fall through to ledger when Accept returned pages=1 / amount=0.
+      logger.warn(
+        { live, from, to },
+        'Paymob live sum empty — using ledger for online payment total'
+      );
     }
   } catch (err) {
     logger.warn({ err }, 'Paymob API sync skipped — falling back to ledger');
