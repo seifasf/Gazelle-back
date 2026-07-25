@@ -153,6 +153,15 @@ export async function exchangeItem(req, res, next) {
   }
 }
 
+export async function removeItem(req, res, next) {
+  try {
+    const order = await exchangeService.removeOrderItem(req.params.id, req.user._id, req.body);
+    res.json({ data: order });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function updateShippingAddress(req, res, next) {
   try {
     const Order = (await import('../models/Order.js')).default;
@@ -212,6 +221,7 @@ export default {
   getStatusHistory,
   claimOrder,
   exchangeItem,
+  removeItem,
   updateShippingAddress,
   transitionStatus,
   delayOrder,
