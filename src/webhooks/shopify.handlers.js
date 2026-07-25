@@ -238,15 +238,29 @@ export async function handleOrdersUpdated(payload) {
     order.shopifyOrderName = name;
   }
 
+  // Any Shopify-paid order must be online in OMS so Bosta policy COD = 0.
+  const financial = String(payload.financial_status || '').toLowerCase();
+  if (financial === 'paid' || financial === 'partially_paid') {
+    order.paymentMethod = 'online';
+    order.onlinePaymentStatus = 'paid';
+    order.onlinePaymentProvider = order.onlinePaymentProvider || 'shopify';
+    if (!order.onlinePaidAt) {
+      order.onlinePaidAt = new Date(payload.processed_at || payload.updated_at || Date.now());
+    }
+    if (order.onlinePaymentAmount == null) {
+      order.onlinePaymentAmount = parseFloat(payload.total_price) || 0;
+    }
+  }
+
   const shipping = payload.shipping_address;
   if (shipping) {
     order.shippingAddress = {
       fullName: `${shipping.first_name || ''} ${shipping.last_name || ''}`.trim(),
-      line1: shipping.address1 || order.shippingAddress.line1,
+      line1: shipping.address1 || order.shippingAddress?.line1,
       line2: shipping.address2,
-      city: shipping.city || order.shippingAddress.city,
+      city: shipping.city || order.shippingAddress?.city,
       zone: shipping.province,
-      phone: shipping.phone,
+      phone: shipping.phone || order.shippingAddress?.phone,
     };
   }
   await order.save();

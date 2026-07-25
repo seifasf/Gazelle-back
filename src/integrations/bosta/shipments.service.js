@@ -12,6 +12,25 @@ function splitName(fullName) {
 }
 
 /**
+ * Paid on Shopify / Paymob / marked online → Bosta COD must be 0 (never collect cash).
+ */
+export function isOrderPrepaidForBosta(order) {
+  if (!order) return false;
+  const method = String(order.paymentMethod || '').toLowerCase();
+  if (method === 'online' || method === 'prepaid') return true;
+  const status = String(order.onlinePaymentStatus || '').toLowerCase();
+  if (status === 'paid' || status === 'success' || status === 'captured') return true;
+  if (order.onlinePaidAt) return true;
+  return false;
+}
+
+/** Cash the courier should collect — always 0 for prepaid/Shopify-paid. */
+export function bostaCodAmountForOrder(order) {
+  if (isOrderPrepaidForBosta(order)) return 0;
+  return (order.totalSellingPrice || 0) + (order.shippingFee || 0);
+}
+
+/**
  * Build Bosta package description (وصف الشحنة) with product name, SKU, size, color.
  * Prefer keeping every line intact; only soft-truncate if very long.
  */
@@ -212,10 +231,8 @@ export async function createDelivery(order, customer) {
     throw err;
   }
 
-  // Online / prepaid orders must not ask the courier for cash (double charge risk).
-  const due = (order.totalSellingPrice || 0) + (order.shippingFee || 0);
-  const codAmount =
-    order.paymentMethod === 'online' || order.paymentMethod === 'prepaid' ? 0 : due;
+  // Paid Shopify / online orders → COD 0 on the policy (never double-charge).
+  const codAmount = bostaCodAmountForOrder(order);
   const { firstName, lastName } = splitName(shipping.fullName || customer?.fullName);
   const resolved = await resolveBostaCityId(city);
   const bostaCityName = resolved?.resolvedName || city;
@@ -290,6 +307,8 @@ export async function updateDeliveryPackageDescription(deliveryId, order) {
     allowToOpenPackage: true,
     specs: { packageDetails: { itemsCount, description } },
     notes: description,
+    // Keep COD in sync — paid Shopify orders must stay 0 on the AWB.
+    cod: bostaCodAmountForOrder(order),
   };
 
   const base = (config.BOSTA_API_BASE_URL || 'https://app.bosta.co/api/v2').replace(/\/api\/v2\/?$/, '');
@@ -411,4 +430,11 @@ function normalizeAwbPayload(raw, deliveryId) {
   return { url: null, deliveryId, raw };
 }
 
-export default { createDelivery, getDelivery, getAwb, updateDeliveryPackageDescription };
+export default {
+  createDelivery,
+  getDelivery,
+  getAwb,
+  updateDeliveryPackageDescription,
+  isOrderPrepaidForBosta,
+  bostaCodAmountForOrder,
+};
