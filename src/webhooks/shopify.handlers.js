@@ -9,6 +9,14 @@ import { notifyNewOrder } from '../services/notification.service.js';
 import OrderStatusHistory from '../models/OrderStatusHistory.js';
 import { reportOnlineStockDrift } from '../services/discrepancy.service.js';
 import logger from '../utils/logger.js';
+import {
+  mapShopifyPaymentMethod,
+  mapShopifyShippingFee,
+  applyShopifyMoneyFields,
+  isShopifyOrderPaid,
+} from '../integrations/shopify/orderMoney.js';
+
+export { mapShopifyPaymentMethod, mapShopifyShippingFee };
 
 async function resolveVariant(lineItem) {
   if (!lineItem.variant_id && !lineItem.sku) return null;
@@ -46,47 +54,6 @@ function mapImportedOrderStatus(payload) {
   if (payload.cancelled_at) return 'cancelled';
   if (payload.fulfillment_status === 'fulfilled') return 'delivered';
   return 'pending_verification';
-}
-
-/**
- * Infer Gazelle payment method from Shopify gateways / financial status.
- * Cash-on-delivery gateways (Bosta COD, manual COD, etc.) → cod; otherwise online.
- */
-export function mapShopifyPaymentMethod(payload = {}) {
-  const gateways = [
-    ...(Array.isArray(payload.payment_gateway_names) ? payload.payment_gateway_names : []),
-    payload.gateway,
-    payload.payment_gateway,
-  ]
-    .filter(Boolean)
-    .map((g) => String(g).toLowerCase());
-
-  const joined = gateways.join(' ');
-  // Explicit COD gateways only — do NOT treat bare "manual" as COD
-  // (Shopify Manual often means bank transfer / offline paid).
-  const codHints = ['cod', 'cash on delivery', 'cash_on_delivery', 'cash-on-delivery'];
-
-  // Already paid → never create a Bosta COD ask (double charge).
-  if (payload.financial_status === 'paid' || payload.financial_status === 'partially_paid') {
-    return 'online';
-  }
-
-  if (codHints.some((h) => joined.includes(h))) return 'cod';
-
-  // Default Egypt storefront path is COD when unpaid / pending.
-  if (payload.financial_status === 'pending' || payload.financial_status === 'authorized') {
-    return 'cod';
-  }
-
-  return 'cod';
-}
-
-function mapShopifyShippingFee(payload = {}) {
-  const fromSet = parseFloat(payload.total_shipping_price_set?.shop_money?.amount);
-  if (Number.isFinite(fromSet)) return fromSet;
-  const lines = payload.shipping_lines || [];
-  const sum = lines.reduce((s, l) => s + (parseFloat(l.price) || 0), 0);
-  return Number.isFinite(sum) ? sum : 0;
 }
 
 export async function handleOrdersCreate(payload, { reserveStock = true, statusOverride, source = 'shopify_webhook' } = {}) {
@@ -148,9 +115,7 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
       : undefined;
   const paymentMethod = mapShopifyPaymentMethod(payload);
   const shippingFee = mapShopifyShippingFee(payload);
-  const onlinePaid =
-    paymentMethod === 'online' &&
-    (payload.financial_status === 'paid' || payload.financial_status === 'partially_paid');
+  const onlinePaid = paymentMethod === 'online' && isShopifyOrderPaid(payload);
 
   const order = await withTransaction(async (session) => {
     const [created] = await Order.create(
@@ -238,19 +203,8 @@ export async function handleOrdersUpdated(payload) {
     order.shopifyOrderName = name;
   }
 
-  // Any Shopify-paid order must be online in OMS so Bosta policy COD = 0.
-  const financial = String(payload.financial_status || '').toLowerCase();
-  if (financial === 'paid' || financial === 'partially_paid') {
-    order.paymentMethod = 'online';
-    order.onlinePaymentStatus = 'paid';
-    order.onlinePaymentProvider = order.onlinePaymentProvider || 'shopify';
-    if (!order.onlinePaidAt) {
-      order.onlinePaidAt = new Date(payload.processed_at || payload.updated_at || Date.now());
-    }
-    if (order.onlinePaymentAmount == null) {
-      order.onlinePaymentAmount = parseFloat(payload.total_price) || 0;
-    }
-  }
+  // Sync shipping fee from Shopify (city / zone rates) + paid → online (Bosta COD = 0).
+  applyShopifyMoneyFields(order, payload);
 
   const shipping = payload.shipping_address;
   if (shipping) {

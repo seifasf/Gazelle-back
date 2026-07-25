@@ -233,6 +233,11 @@ export async function createDelivery(order, customer) {
 
   // Paid Shopify / online orders → COD 0 on the policy (never double-charge).
   const codAmount = bostaCodAmountForOrder(order);
+  if (isOrderPrepaidForBosta(order) && codAmount !== 0) {
+    const err = new Error('Paid order must have Bosta COD = 0');
+    err.statusCode = 500;
+    throw err;
+  }
   const { firstName, lastName } = splitName(shipping.fullName || customer?.fullName);
   const resolved = await resolveBostaCityId(city);
   const bostaCityName = resolved?.resolvedName || city;

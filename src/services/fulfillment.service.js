@@ -13,6 +13,8 @@ import {
 } from '../integrations/bosta/shipments.service.js';
 import orderService from '../services/order.service.js';
 import logger from '../utils/logger.js';
+import { syncShopifyMoneyOntoOrder } from '../integrations/shopify/syncOrderMoney.service.js';
+import { bostaCodAmountForOrder, isOrderPrepaidForBosta } from '../integrations/bosta/shipments.service.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const LOGO_PATH = resolve(__dirname, '../assets/gazelle-logo.png');
@@ -123,14 +125,30 @@ function assertBostaShipable(order) {
  * Does NOT change internalStatus — used for print-policy-before-confirm.
  */
 export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
-  const order = await Order.findById(orderId).populate('customerId');
+  let order = await Order.findById(orderId).populate('customerId');
   if (!order) {
     const err = new Error('Order not found');
     err.statusCode = 404;
     throw err;
   }
 
+  // Refresh Shopify city shipping fee + paid status before AWB (COD must be 0 if paid).
+  order = (await syncShopifyMoneyOntoOrder(order)) || order;
+
   assertBostaShipable(order);
+
+  logger.info(
+    {
+      orderId: String(order._id),
+      name: order.shopifyOrderName,
+      city: order.shippingAddress?.city,
+      shippingFee: order.shippingFee,
+      prepaid: isOrderPrepaidForBosta(order),
+      bostaCod: bostaCodAmountForOrder(order),
+      paymentMethod: order.paymentMethod,
+    },
+    'Preparing Bosta delivery (shipping + COD)'
+  );
 
   if (order.bostaDeliveryId || order.bostaTrackingNumber) {
     // Reject WooCommerce / phone-match leftovers — create a real Gazelle delivery instead.
@@ -188,6 +206,8 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
       }
       await order.save();
       try {
+        // Re-sync money so existing AWB COD stays 0 for paid / correct shipping for COD.
+        await syncShopifyMoneyOntoOrder(order);
         await updateDeliveryPackageDescription(order.bostaDeliveryId, order);
       } catch (err) {
         logger.warn(
