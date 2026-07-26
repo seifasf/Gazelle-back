@@ -12,7 +12,8 @@ function splitName(fullName) {
 }
 
 /**
- * Paid on Shopify / Paymob / marked online → Bosta COD must be 0 (never collect cash).
+ * Paid on Shopify / Paymob / marked online → Bosta COD must be 0 (never double-charge).
+ * Creator totals follow the manual Total field — not forced to 0 here.
  */
 export function isOrderPrepaidForBosta(order) {
   if (!order) return false;
@@ -24,24 +25,40 @@ export function isOrderPrepaidForBosta(order) {
   return false;
 }
 
-/** Cash the courier should collect — always 0 for prepaid/Shopify-paid. */
+/**
+ * Cash the courier should collect from the customer (never pay the customer).
+ * - Prepaid / online paid → 0
+ * - Customer return / refund pickup → always 0 (no cash to client)
+ * - Exchange → shipping only (goods free on the OMS order)
+ * - Creator / normal COD → goods + shipping
+ */
 export function bostaCodAmountForOrder(order) {
+  if (!order) return 0;
   if (isOrderPrepaidForBosta(order)) return 0;
-  return (order.totalSellingPrice || 0) + (order.shippingFee || 0);
+  if (order.isReturnOrder) return 0;
+  return Math.max(0, (order.totalSellingPrice || 0) + (order.shippingFee || 0));
+}
+
+/** Bosta delivery type codes used by Gazelle. */
+export const BOSTA_DELIVERY_TYPE = {
+  SEND: 10,
+  EXCHANGE: 15,
+  CUSTOMER_RETURN_PICKUP: 20,
+};
+
+export function bostaDeliveryTypeForOrder(order) {
+  if (order?.isReturnOrder) return BOSTA_DELIVERY_TYPE.CUSTOMER_RETURN_PICKUP;
+  if (order?.isExchangeOrder) return BOSTA_DELIVERY_TYPE.EXCHANGE;
+  return BOSTA_DELIVERY_TYPE.SEND;
 }
 
 /**
  * Build Bosta package description (وصف الشحنة) with product name, SKU, size, color.
  * Prefer keeping every line intact; only soft-truncate if very long.
  */
-function buildPackageDescription(order, variantsById = new Map()) {
-  const ref =
-    order.shopifyOrderName ||
-    (order.shopifyOrderId ? `#${order.shopifyOrderId}` : null) ||
-    `Order ${order._id}`;
-
+function formatItemLines(items, variantsById = new Map()) {
   const lines = [];
-  for (const item of order.items || []) {
+  for (const item of items || []) {
     const variant =
       (item.variantId && typeof item.variantId === 'object' && (item.variantId.sku || item.variantId.title)
         ? item.variantId
@@ -49,23 +66,68 @@ function buildPackageDescription(order, variantsById = new Map()) {
       variantsById.get(String(item.variantId?._id || item.variantId)) ||
       {};
     const name =
+      item.title ||
       variant.productTitle ||
       (variant.productId && typeof variant.productId === 'object' ? variant.productId.title : null) ||
       variant.title ||
-      item.title ||
       '';
     const sku = variant.sku || item.sku || '';
-    const size = variant.size != null && variant.size !== '' ? `Size ${variant.size}` : '';
-    const color = variant.color || '';
+    const size =
+      item.size != null && item.size !== ''
+        ? `Size ${item.size}`
+        : variant.size != null && variant.size !== ''
+          ? `Size ${variant.size}`
+          : '';
+    const color = item.color || variant.color || '';
     const qty = item.quantity || 1;
     const bits = [name, sku, size, color].filter(Boolean);
     const label = bits.length ? bits.join(' · ') : sku || 'item';
     lines.push(`${label} x${qty}`);
   }
+  return lines;
+}
 
-  const itemsText = lines.join(' | ');
-  const full = itemsText ? `${ref} | ${itemsText}` : String(ref);
-  // Soft limit — Bosta accepts ~200+; avoid cutting mid-SKU when possible
+function countItems(items) {
+  return (items || []).reduce((s, i) => s + (i.quantity || 0), 0);
+}
+
+function buildPackageDescription(order, variantsById = new Map()) {
+  const ref =
+    order.shopifyOrderName ||
+    (order.shopifyOrderId ? `#${order.shopifyOrderId}` : null) ||
+    `Order ${order._id}`;
+
+  const cod = bostaCodAmountForOrder(order);
+  const tags = [];
+  if (order.isReturnOrder) tags.push('RETURN PICKUP · COD 0 · NO CASH TO CUSTOMER');
+  else if (order.isExchangeOrder) {
+    tags.push(cod > 0 ? `EXCHANGE · COD ${cod} (shipping only)` : 'EXCHANGE · COD 0');
+  } else if (order.isCreatorOrder) {
+    tags.push(cod > 0 ? `CREATOR · COD ${cod}` : 'CREATOR/GIFT · COD 0');
+  } else if (isOrderPrepaidForBosta(order)) {
+    tags.push('PAID · COD 0');
+  }
+
+  const outboundLines = formatItemLines(order.items, variantsById);
+  const returnSource =
+    order.bostaReturnItems?.length
+      ? order.bostaReturnItems
+      : order.isReturnOrder
+        ? order.items
+        : [];
+  const returnLines = formatItemLines(returnSource, variantsById);
+
+  const parts = [tags.length ? tags.join(' | ') : null, ref].filter(Boolean);
+  if (order.isReturnOrder) {
+    if (returnLines.length) parts.push(`PICK UP FROM CUSTOMER: ${returnLines.join(' | ')}`);
+  } else if (order.isExchangeOrder) {
+    if (outboundLines.length) parts.push(`DELIVER: ${outboundLines.join(' | ')}`);
+    if (returnLines.length) parts.push(`COLLECT FROM CUSTOMER: ${returnLines.join(' | ')}`);
+  } else if (outboundLines.length) {
+    parts.push(outboundLines.join(' | '));
+  }
+
+  const full = parts.join(' | ');
   if (full.length <= 400) return full;
   return `${full.slice(0, 397)}…`;
 }
@@ -74,7 +136,8 @@ async function loadVariantsForOrder(order) {
   const map = new Map();
   const idsToFetch = [];
 
-  for (const item of order.items || []) {
+  const allLines = [...(order.items || []), ...(order.bostaReturnItems || [])];
+  for (const item of allLines) {
     const v = item.variantId;
     if (!v) continue;
     // Populated variant doc (has sku/title). Plain ObjectId is also typeof 'object'.
@@ -250,10 +313,16 @@ export async function createDelivery(order, customer) {
     throw err;
   }
 
-  // Paid Shopify / online orders → COD 0 on the policy (never double-charge).
+  // Paid Shopify / online → COD 0. Return pickups → COD 0 (never pay the customer).
+  // Creator / exchange follow order totals (exchange = shipping only when goods are 0).
   const codAmount = bostaCodAmountForOrder(order);
   if (isOrderPrepaidForBosta(order) && codAmount !== 0) {
     const err = new Error('Paid order must have Bosta COD = 0');
+    err.statusCode = 500;
+    throw err;
+  }
+  if (order.isReturnOrder && codAmount !== 0) {
+    const err = new Error('Return pickup must have Bosta COD = 0 (no cash to customer)');
     err.statusCode = 500;
     throw err;
   }
@@ -299,17 +368,54 @@ export async function createDelivery(order, customer) {
 
   const webhookUrl = bostaWebhookUrl(config.APP_URL);
   const variantsById = await loadVariantsForOrder(order);
-  const itemsCount = (order.items || []).reduce((s, i) => s + (i.quantity || 0), 0);
+  const deliveryType = bostaDeliveryTypeForOrder(order);
   const description = buildPackageDescription(order, variantsById);
 
+  const outboundCount = countItems(order.items);
+  const outboundDesc =
+    formatItemLines(order.items, variantsById).join(' | ') || description;
+  const returnSource =
+    order.bostaReturnItems?.length
+      ? order.bostaReturnItems
+      : order.isReturnOrder
+        ? order.items
+        : [];
+  const returnCount = countItems(returnSource);
+  const returnDesc = formatItemLines(returnSource, variantsById).join(' | ');
+
+  if (deliveryType === BOSTA_DELIVERY_TYPE.EXCHANGE && returnCount < 1) {
+    const err = new Error(
+      'Exchange policy needs items to collect from the customer. Re-create the exchange and tick the returned items.'
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+  if (deliveryType === BOSTA_DELIVERY_TYPE.CUSTOMER_RETURN_PICKUP && returnCount < 1) {
+    const err = new Error('Return pickup needs at least one item to collect from the customer');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  // SEND / EXCHANGE: packageDetails = what we deliver.
+  // CRP return: packageDetails = what we pick up from the customer.
+  const primaryDetails =
+    deliveryType === BOSTA_DELIVERY_TYPE.CUSTOMER_RETURN_PICKUP
+      ? {
+          itemsCount: returnCount,
+          description: returnDesc || description,
+        }
+      : {
+          itemsCount: Math.max(1, outboundCount),
+          description: outboundDesc,
+        };
+
   const payload = {
-    type: 10,
+    type: deliveryType,
     allowToOpenPackage: true, // فتح الشحنة = نعم
     specs: {
-      packageDetails: {
-        itemsCount,
-        description,
-      },
+      packageType: 'Parcel',
+      size: 'MEDIUM',
+      packageDetails: primaryDetails,
     },
     receiver: {
       firstName,
@@ -321,6 +427,16 @@ export async function createDelivery(order, customer) {
     cod: codAmount,
     notes: description,
   };
+
+  // Exchange: deliver new + collect old — Bosta requires return package details.
+  if (deliveryType === BOSTA_DELIVERY_TYPE.EXCHANGE) {
+    payload.returnSpecs = {
+      packageDetails: {
+        itemsCount: returnCount,
+        description: returnDesc || 'Customer return items',
+      },
+    };
+  }
 
   // Bosta rejects localhost webhook URLs — only send public ones (Render/prod).
   if (webhookUrl && !/localhost|127\.0\.0\.1/i.test(webhookUrl)) {
@@ -496,4 +612,6 @@ export default {
   updateDeliveryPackageDescription,
   isOrderPrepaidForBosta,
   bostaCodAmountForOrder,
+  bostaDeliveryTypeForOrder,
+  BOSTA_DELIVERY_TYPE,
 };

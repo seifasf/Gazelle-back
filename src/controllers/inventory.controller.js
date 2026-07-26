@@ -85,6 +85,7 @@ export async function stockIntakeBatch(req, res, next) {
     }
 
     const results = [];
+    const restockedVariantIds = [];
     for (const item of items) {
       const quantity = Number(item.quantity);
       if (!item.variantId || !(quantity > 0)) continue;
@@ -94,19 +95,26 @@ export async function stockIntakeBatch(req, res, next) {
         reasonCode,
         note,
         actorUserId: req.user._id,
+        skipOosAutoRelease: true,
       });
       results.push({
         variantId: item.variantId,
         quantity,
         ...result,
       });
+      restockedVariantIds.push(item.variantId);
     }
 
     if (!results.length) {
       return res.status(400).json({ error: 'Enter at least one size quantity greater than 0' });
     }
 
-    res.json({ data: { results, count: results.length } });
+    const oosReleased = await orderService.releaseOutOfStockOrdersIfRestocked(restockedVariantIds, {
+      actorUserId: req.user._id,
+      note: 'Auto: stock intake restocked SKUs — back to Ready to ship',
+    });
+
+    res.json({ data: { results, count: results.length, oosReleased } });
   } catch (err) {
     next(err);
   }

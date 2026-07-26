@@ -2,6 +2,7 @@ import Order from '../models/Order.js';
 import OrderStatusHistory from '../models/OrderStatusHistory.js';
 import Variant from '../models/Variant.js';
 import Customer from '../models/Customer.js';
+import mongoose from 'mongoose';
 import { withTransaction } from '../utils/transaction.js';
 import { assertTransition, isTerminalStatus } from './orderStateMachine.js';
 import {
@@ -26,6 +27,7 @@ import {
 } from './notification.service.js';
 import { recordDeliveryJournal } from './accounting.service.js';
 import { recordCustomerCancellation } from './customer.service.js';
+import logger from '../utils/logger.js';
 
 async function recordStatusChange(
   { orderId, fromStatus, toStatus, source, actorUserId, note },
@@ -330,15 +332,17 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
       throw err;
     }
 
-    if (order.internalStatus !== 'returned_awaiting_receipt') {
-      const err = new Error('Only warehouse-received returns can be confirmed back into stock');
+    const confirmable = ['returned_awaiting_receipt', 'returning_to_origin'];
+    if (!confirmable.includes(order.internalStatus)) {
+      const err = new Error('Only returning / Back at Bosta orders can be confirmed into warehouse stock');
       err.statusCode = 400;
       throw err;
     }
 
-    // Post-delivery return vs RTO (never delivered) — warehouse only, no Shopify push.
+    // Post-delivery return / customer return pickup: increment warehouse stock.
+    // Pre-delivery RTO (never delivered): release hold only.
     const ledgerDocs = await applyLedgerEntries(
-      order.deliveredAt
+      order.isReturnOrder || order.deliveredAt
         ? buildPostDeliveryReturnEntries(order._id, order.items)
         : buildPreDeliveryReleaseEntries(order._id, order.items),
       session
@@ -347,7 +351,11 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
     await transitionOrder(
       order,
       'returned_to_stock',
-      { source: 'user_action', actorUserId, note },
+      {
+        source: 'user_action',
+        actorUserId,
+        note: note || 'Physical receipt confirmed — returned to warehouse stock',
+      },
       session
     );
 
@@ -361,7 +369,89 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
   });
 
   await afterLedgerApplied(result.ledgerDocs);
+  // Post-delivery returns add real stock — may unblock Out of stock orders.
+  if (result.order?.deliveredAt) {
+    const variantIds = (result.order.items || []).map((i) => i.variantId).filter(Boolean);
+    await releaseOutOfStockOrdersIfRestocked(variantIds, {
+      actorUserId,
+      note: 'Auto: return restocked SKUs — back to Ready to ship',
+    });
+  }
   return result.order;
+}
+
+/**
+ * After warehouse stock increases, move Out of stock orders back to Ready to ship
+ * when every line item now has enough realStock.
+ */
+export async function releaseOutOfStockOrdersIfRestocked(
+  variantIds,
+  { actorUserId = null, note } = {}
+) {
+  const ids = [
+    ...new Set(
+      (variantIds || [])
+        .map((id) => String(id || '').trim())
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    ),
+  ];
+  if (!ids.length) return { released: [], checked: 0 };
+
+  const objectIds = ids.map((id) => new mongoose.Types.ObjectId(id));
+  const candidates = await Order.find({
+    internalStatus: 'out_of_stock',
+    'items.variantId': { $in: objectIds },
+  })
+    .sort({ verifiedAt: 1, placedAt: 1 })
+    .select('_id items sku shopifyOrderName');
+
+  if (!candidates.length) return { released: [], checked: 0 };
+
+  const neededVariantIds = [
+    ...new Set(
+      candidates.flatMap((o) => (o.items || []).map((i) => String(i.variantId))).filter(Boolean)
+    ),
+  ];
+  const variants = await Variant.find({ _id: { $in: neededVariantIds } }).select('realStock sku');
+  const stockById = new Map(variants.map((v) => [String(v._id), v.realStock ?? 0]));
+
+  const released = [];
+  const releaseNote =
+    note || 'Auto: stock restocked — back to Ready to ship';
+
+  for (const order of candidates) {
+    const lines = order.items || [];
+    if (!lines.length) continue;
+    const fullyStocked = lines.every((item) => {
+      const have = stockById.get(String(item.variantId));
+      if (have == null) return false;
+      return have >= (item.quantity || 0);
+    });
+    if (!fullyStocked) continue;
+
+    try {
+      await transitionOrderStatus(order._id, 'verified_ready_for_shipping', {
+        source: 'system',
+        actorUserId,
+        note: releaseNote,
+      });
+      released.push(String(order._id));
+    } catch (err) {
+      logger.warn(
+        { err: err?.message || err, orderId: String(order._id) },
+        'Failed to auto-release out_of_stock order after restock'
+      );
+    }
+  }
+
+  if (released.length) {
+    logger.info(
+      { released: released.length, variantIds: ids },
+      'Auto-released out_of_stock orders after restock'
+    );
+  }
+
+  return { released, checked: candidates.length };
 }
 
 export async function transitionOrderStatus(orderId, toStatus, meta) {
@@ -400,7 +490,13 @@ export async function reserveStockForOrder(orderId, items, session) {
   return applyLedgerEntries(entries, session);
 }
 
-export async function manualStockAdjustment({ variantId, quantityDelta, reasonCode, actorUserId }) {
+export async function manualStockAdjustment({
+  variantId,
+  quantityDelta,
+  reasonCode,
+  actorUserId,
+  skipOosAutoRelease = false,
+}) {
   const result = await withTransaction(async (session) => {
     const entries = buildStockIntakeEntries({
       variantId,
@@ -414,10 +510,23 @@ export async function manualStockAdjustment({ variantId, quantityDelta, reasonCo
   });
   await afterLedgerApplied(result.ledgerDocs);
   await checkVariantsLowStock([variantId]);
+  if (!skipOosAutoRelease && quantityDelta > 0) {
+    result.oosReleased = await releaseOutOfStockOrdersIfRestocked([variantId], {
+      actorUserId,
+      note: 'Auto: stock intake restocked SKUs — back to Ready to ship',
+    });
+  }
   return result;
 }
 
-export async function stockIntake({ variantId, quantity, reasonCode, note, actorUserId }) {
+export async function stockIntake({
+  variantId,
+  quantity,
+  reasonCode,
+  note,
+  actorUserId,
+  skipOosAutoRelease = false,
+}) {
   if (quantity <= 0) {
     const err = new Error('Stock intake quantity must be positive');
     err.statusCode = 400;
@@ -428,6 +537,7 @@ export async function stockIntake({ variantId, quantity, reasonCode, note, actor
     quantityDelta: quantity,
     reasonCode: reasonCode || 'restock',
     actorUserId,
+    skipOosAutoRelease,
   });
 }
 
@@ -499,13 +609,24 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
   await notifyNegativeStockCrossings(allCrossings);
   await checkVariantsLowStock(results.map((r) => r.variantId));
 
+  const increasedIds = results
+    .filter((r) => r.changed && r.realStock > r.previous)
+    .map((r) => r.variantId);
+  let oosReleased = { released: [], checked: 0 };
+  if (increasedIds.length) {
+    oosReleased = await releaseOutOfStockOrdersIfRestocked(increasedIds, {
+      actorUserId,
+      note: 'Auto: stock count restocked SKUs — back to Ready to ship',
+    });
+  }
+
   if (!results.length) {
     const err = new Error('No valid stock set rows');
     err.statusCode = 400;
     throw err;
   }
 
-  return { results, count: results.length };
+  return { results, count: results.length, oosReleased };
 }
 
 export async function createManualOrder({
@@ -522,9 +643,19 @@ export async function createManualOrder({
   isCreatorOrder = false,
   isExchangeOrder = false,
   exchangeFromOrderId = null,
+  isReturnOrder = false,
+  returnFromOrderId = null,
+  bostaReturnItems = null,
 }) {
   const ref = `MAN-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const exchange = Boolean(isExchangeOrder);
+  const customerReturn = Boolean(isReturnOrder);
+
+  if (exchange && customerReturn) {
+    const err = new Error('Choose either Exchange or Return — not both');
+    err.statusCode = 400;
+    throw err;
+  }
 
   if (exchange && !exchangeFromOrderId) {
     const err = new Error('Select the previous order this exchange replaces');
@@ -532,12 +663,35 @@ export async function createManualOrder({
     throw err;
   }
 
+  if (customerReturn && !returnFromOrderId) {
+    const err = new Error('Select the previous order this return is for');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (exchange && (!Array.isArray(bostaReturnItems) || bostaReturnItems.length < 1)) {
+    const err = new Error('Select the items to collect from the customer for this exchange');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (
+    customerReturn &&
+    (!Array.isArray(bostaReturnItems) || bostaReturnItems.length < 1) &&
+    (!Array.isArray(items) || items.length < 1)
+  ) {
+    const err = new Error('Select the items to pick up for this return');
+    err.statusCode = 400;
+    throw err;
+  }
+
   const manualOrder = await withTransaction(async (session) => {
     let priorOrder = null;
-    if (exchange) {
-      priorOrder = await Order.findById(exchangeFromOrderId).session(session);
+    const priorId = exchange ? exchangeFromOrderId : customerReturn ? returnFromOrderId : null;
+    if (priorId) {
+      priorOrder = await Order.findById(priorId).session(session);
       if (!priorOrder) {
-        const err = new Error('Previous exchange order not found');
+        const err = new Error('Previous order not found');
         err.statusCode = 404;
         throw err;
       }
@@ -577,12 +731,12 @@ export async function createManualOrder({
         variantId: variant._id,
         sku: variant.sku,
         quantity: item.quantity,
-        unitSellingPrice: exchange ? 0 : (item.unitSellingPrice ?? variant.sellingPrice),
+        unitSellingPrice: exchange || customerReturn ? 0 : (item.unitSellingPrice ?? variant.sellingPrice),
         unitCogs: variant.cogs,
       });
     }
 
-    const total = exchange
+    const total = exchange || customerReturn
       ? 0
       : totalSellingPrice ?? orderItems.reduce(
           (sum, i) => sum + i.unitSellingPrice * i.quantity,
@@ -590,12 +744,17 @@ export async function createManualOrder({
         );
 
     // Exchange: items free, customer pays shipping by place (from Shopify prior order).
+    // Return pickup: no COD / no shipping collect — courier must not give cash to customer.
     const feeRaw = shippingFee != null ? Number(shippingFee) : null;
     const exchangeShippingFee =
       feeRaw != null && Number.isFinite(feeRaw) && feeRaw >= 0
         ? feeRaw
         : Number(priorOrder?.shippingFee) || 0;
-    const finalShippingFee = exchange ? exchangeShippingFee : (shippingFee ?? 0);
+    const finalShippingFee = customerReturn
+      ? 0
+      : exchange
+        ? exchangeShippingFee
+        : (shippingFee ?? 0);
 
     const finalShippingAddress =
       shippingMethod === 'pickup'
@@ -606,51 +765,108 @@ export async function createManualOrder({
             fullName: shippingAddress?.fullName || customer.fullName,
           };
 
-    const exchangeNote = priorOrder
-      ? `Exchange for ${priorOrder.shopifyOrderName || priorOrder.shopifyOrderId || priorOrder._id}`
+    const priorLabel = priorOrder
+      ? priorOrder.shopifyOrderName || priorOrder.shopifyOrderId || priorOrder._id
       : null;
+    const linkNote = exchange
+      ? `Exchange for ${priorLabel}`
+      : customerReturn
+        ? `Return pickup for ${priorLabel}`
+        : null;
 
-    // Exchanges skip call-center verify and go straight to Ready to ship.
-    const initialStatus = exchange ? 'verified_ready_for_shipping' : 'pending_verification';
+    const method = shippingMethod || 'bosta';
+    const isPickup = method === 'pickup' && !exchange && !customerReturn;
+    const now = new Date();
+
+    // Manual orders skip call-center verify:
+    // - normal / exchange / local / bosta → Ready to ship
+    // - customer pickup → Delivered immediately
+    // - refund / return → Returning to Warehouse (track inbound)
+    let initialStatus = 'verified_ready_for_shipping';
+    if (customerReturn) initialStatus = 'returning_to_origin';
+    else if (isPickup) initialStatus = 'delivered';
+
+    const normalizedReturnItems = Array.isArray(bostaReturnItems) && bostaReturnItems.length
+      ? bostaReturnItems.map((r) => ({
+          variantId: r.variantId,
+          sku: r.sku,
+          quantity: r.quantity || 1,
+          title: r.title,
+          color: r.color,
+          size: r.size,
+        }))
+      : customerReturn
+        ? orderItems.map((i) => ({
+            variantId: i.variantId,
+            sku: i.sku,
+            quantity: i.quantity,
+          }))
+        : [];
 
     const [order] = await Order.create(
       [{
         shopifyOrderId: ref,
         orderSource: 'manual',
         manualSource,
-        shippingMethod: shippingMethod || 'bosta',
-        paymentMethod: paymentMethod || 'cod',
+        shippingMethod: method,
+        paymentMethod: customerReturn ? 'cod' : (paymentMethod || 'cod'),
         shippingFee: finalShippingFee,
-        onlinePaymentReference: paymentMethod === 'online' ? ref : undefined,
+        onlinePaymentReference: paymentMethod === 'online' && !customerReturn ? ref : undefined,
         customerId: customerDoc._id,
         shippingAddress: finalShippingAddress,
         internalStatus: initialStatus,
-        isCreatorOrder: Boolean(isCreatorOrder),
+        verifiedAt: now,
+        deliveredAt: isPickup ? now : undefined,
+        closedAt: isPickup ? now : undefined,
+        isCreatorOrder: exchange || customerReturn ? false : Boolean(isCreatorOrder),
         isExchangeOrder: exchange,
         exchangeFromOrderId: exchange ? priorOrder._id : undefined,
+        isReturnOrder: customerReturn,
+        returnFromOrderId: customerReturn ? priorOrder._id : undefined,
+        bostaReturnItems: normalizedReturnItems,
         totalSellingPrice: total,
         totalCogsSnapshot: orderItems.reduce((s, i) => s + (i.unitCogs || 0) * i.quantity, 0),
         items: orderItems,
-        placedAt: new Date(),
+        placedAt: now,
         assignedOrdersManagerId: actorUserId,
         verificationLog: [
           ...(note ? [{ outcome: 'confirmed', note, actorUserId }] : []),
-          ...(exchangeNote
-            ? [{ outcome: 'confirmed', note: exchangeNote, actorUserId }]
+          ...(linkNote
+            ? [{ outcome: 'confirmed', note: linkNote, actorUserId }]
             : []),
-          ...(exchange
-            ? [{
-                outcome: 'confirmed',
-                note: `Exchange auto-verified · shipping EGP ${finalShippingFee}`,
-                actorUserId,
-              }]
-            : []),
+          {
+            outcome: 'confirmed',
+            note: customerReturn
+              ? 'Return / refund auto-verified · Returning to Warehouse · Bosta CRP · COD 0'
+              : isPickup
+                ? 'Pickup auto-verified · marked Delivered'
+                : exchange
+                  ? `Exchange auto-verified · Ready to ship · shipping EGP ${finalShippingFee} · Bosta EXCHANGE`
+                  : 'Manual order auto-verified · Ready to ship',
+            actorUserId,
+          },
         ],
       }],
       { session }
     );
 
-    if (exchange) {
+    let deliveryLedgerDocs = null;
+
+    if (customerReturn) {
+      // Inbound only — no warehouse hold. Stock increments when confirmed in warehouse.
+    } else if (isPickup) {
+      await reserveStockForOrder(order._id, orderItems, session);
+      deliveryLedgerDocs = await applyLedgerEntries(
+        buildDeliveryEntries(order._id, orderItems),
+        session
+      );
+      await Customer.updateOne(
+        { _id: customerDoc._id },
+        { $inc: { lifetimeDelivered: 1 } },
+        { session }
+      );
+    } else {
+      // Ready to ship (normal, creator, exchange, local shipping, Bosta).
       await reserveStockForOrder(order._id, orderItems, session);
     }
 
@@ -661,24 +877,42 @@ export async function createManualOrder({
         toStatus: initialStatus,
         source: 'user_action',
         actorUserId,
-        note: exchange
-          ? `Exchange order from ${manualSource} (for ${priorOrder.shopifyOrderName || priorOrder.shopifyOrderId}) · shipping EGP ${finalShippingFee}`
-          : `Manual order from ${manualSource}`,
+        note: customerReturn
+          ? `Return pickup from ${manualSource} (for ${priorLabel}) · Returning to Warehouse · COD 0`
+          : isPickup
+            ? `Pickup from ${manualSource} · Delivered`
+            : exchange
+              ? `Exchange from ${manualSource} (for ${priorLabel}) · Ready to ship · shipping EGP ${finalShippingFee}`
+              : `Manual order from ${manualSource} · Ready to ship`,
       },
       session
     );
 
     await Customer.updateOne({ _id: customerDoc._id }, { $inc: { lifetimeOrders: 1 } }, { session });
 
-    return Order.findById(order._id)
+    const populated = await Order.findById(order._id)
       .session(session)
       .populate('customerId')
       .populate('exchangeFromOrderId', 'shopifyOrderId shopifyOrderName internalStatus shippingFee')
+      .populate('returnFromOrderId', 'shopifyOrderId shopifyOrderName internalStatus shippingFee')
       .populate('items.variantId', 'title color size imageUrl sku realStock onHoldStock');
+
+    if (deliveryLedgerDocs) populated._ledgerDocs = deliveryLedgerDocs;
+    return populated;
   });
 
+  if (manualOrder?._ledgerDocs) {
+    await afterLedgerApplied(manualOrder._ledgerDocs);
+    await checkVariantsLowStock((manualOrder.items || []).map((i) => i.variantId?._id || i.variantId));
+    try {
+      await recordDeliveryJournal(manualOrder, actorUserId);
+    } catch {
+      /* non-blocking */
+    }
+  }
+
   await notifyNewOrder(manualOrder, { source: 'manual' });
-  if (exchange) {
+  if (!manualOrder.isReturnOrder && manualOrder.internalStatus === 'verified_ready_for_shipping') {
     try {
       await notifyOrderVerified(manualOrder);
     } catch {
@@ -779,7 +1013,17 @@ export async function getOrderStateCounts() {
   return counts;
 }
 
-export async function listOrders({ status, search, orderSource, shippingMethod, limit = 50, skip = 0, sort = { placedAt: -1 } }) {
+export async function listOrders({
+  status,
+  search,
+  orderSource,
+  shippingMethod,
+  isExchangeOrder,
+  isReturnOrder,
+  limit = 50,
+  skip = 0,
+  sort = { placedAt: -1 },
+}) {
   const filter = {
     // Hide pre-cutover orders from queues / lists; money KPIs still use full ranges.
     placedAt: { $gte: ordersPlacedFromCutoff() },
@@ -792,6 +1036,8 @@ export async function listOrders({ status, search, orderSource, shippingMethod, 
   }
   if (orderSource) filter.orderSource = orderSource;
   if (shippingMethod) filter.shippingMethod = shippingMethod;
+  if (isExchangeOrder === true || isExchangeOrder === 'true') filter.isExchangeOrder = true;
+  if (isReturnOrder === true || isReturnOrder === 'true') filter.isReturnOrder = true;
   if (search) {
     const term = String(search).trim();
     if (term) {
@@ -987,8 +1233,8 @@ export async function applyOrderDiscount(orderId, actorUserId, { percent }) {
     throw err;
   }
 
-  if (order.isExchangeOrder || order.isCreatorOrder) {
-    const err = new Error('Discount is not available on exchange / creator orders');
+  if (order.isExchangeOrder || order.isCreatorOrder || order.isReturnOrder) {
+    const err = new Error('Discount is not available on exchange / creator / return orders');
     err.statusCode = 400;
     throw err;
   }
@@ -1050,6 +1296,7 @@ export default {
   manualStockAdjustment,
   stockIntake,
   setRealStockBatch,
+  releaseOutOfStockOrdersIfRestocked,
   createManualOrder,
   findOrderForExchange,
   getOrderStateCounts,

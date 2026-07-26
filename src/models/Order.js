@@ -98,9 +98,29 @@ const orderSchema = new mongoose.Schema(
     totalCogsSnapshot: { type: Number, min: 0 },
     cancellationReason: String,
     isCreatorOrder: { type: Boolean, default: false },
-    /** Manual exchange shipment against a previous order — total is 0. */
+    /** Manual exchange shipment against a previous order — goods free; Bosta type EXCHANGE. */
     isExchangeOrder: { type: Boolean, default: false, index: true },
     exchangeFromOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', index: true },
+    /**
+     * Manual customer-return pickup (refund/return) — Bosta type CRP, COD always 0.
+     * Courier picks items up; no cash to the customer.
+     */
+    isReturnOrder: { type: Boolean, default: false, index: true },
+    returnFromOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', index: true },
+    /**
+     * Items Bosta must collect from the customer (exchange pickup side or full return).
+     * Outbound `items` stay what we ship (exchange) or mirror pickup lines (return).
+     */
+    bostaReturnItems: [
+      {
+        variantId: { type: mongoose.Schema.Types.ObjectId, ref: 'Variant' },
+        sku: String,
+        quantity: { type: Number, min: 1 },
+        title: String,
+        color: String,
+        size: String,
+      },
+    ],
     items: { type: [orderItemSchema], required: true, validate: [(v) => v.length > 0, 'Order must have items'] },
     verificationLog: [verificationLogSchema],
     placedAt: { type: Date, required: true },
