@@ -371,34 +371,54 @@ export async function getProfitAndLoss({ from, to } = {}) {
 }
 
 export async function getBalanceSheet() {
-  await backfillMissingDeliveryJournals({ limit: 400 });
+  // Opportunistic light backfill only — never block the report on hundreds of writes.
+  // Full catch-up belongs in a job / admin action, not every page load.
+  try {
+    await backfillMissingDeliveryJournals({ limit: 15 });
+  } catch (err) {
+    logger.warn({ err: err?.message || err }, 'Balance sheet light backfill skipped');
+  }
 
-  const [accounts, entries] = await Promise.all([
+  const [accounts, sums, journalCount] = await Promise.all([
     GLAccount.find({ isActive: true }).sort({ code: 1 }).lean(),
-    JournalEntry.find().populate('lines.accountId', 'code name category type'),
+    JournalEntry.aggregate([
+      { $unwind: '$lines' },
+      {
+        $group: {
+          _id: '$lines.accountId',
+          debit: { $sum: { $ifNull: ['$lines.debit', 0] } },
+          credit: { $sum: { $ifNull: ['$lines.credit', 0] } },
+        },
+      },
+    ]),
+    JournalEntry.countDocuments(),
   ]);
+
+  const sumById = Object.fromEntries(
+    sums.map((s) => [String(s._id), { debit: s.debit || 0, credit: s.credit || 0 }])
+  );
 
   const balances = {};
   for (const acc of accounts) {
-    balances[String(acc._id)] = {
+    const id = String(acc._id);
+    const sumsFor = sumById[id] || { debit: 0, credit: 0 };
+    balances[id] = {
       account: acc,
-      debit: 0,
-      credit: 0,
+      debit: sumsFor.debit,
+      credit: sumsFor.credit,
       balance: 0,
     };
   }
 
-  for (const entry of entries) {
-    for (const line of entry.lines) {
-      const acc = line.accountId;
-      if (!acc) continue;
-      const id = String(acc._id);
-      if (!balances[id]) {
-        balances[id] = { account: acc.toObject?.() || acc, debit: 0, credit: 0, balance: 0 };
-      }
-      balances[id].debit += line.debit || 0;
-      balances[id].credit += line.credit || 0;
-    }
+  // Include orphan account refs that appear in journals but are inactive/missing from CoA list.
+  for (const [id, sumsFor] of Object.entries(sumById)) {
+    if (balances[id]) continue;
+    balances[id] = {
+      account: { _id: id, code: '?', name: 'Unknown account', category: 'equity', type: 'credit' },
+      debit: sumsFor.debit,
+      credit: sumsFor.credit,
+      balance: 0,
+    };
   }
 
   const rows = Object.values(balances).map((row) => {
@@ -436,7 +456,7 @@ export async function getBalanceSheet() {
     expense: grouped.expense.reduce((s, r) => s + r.balance, 0),
   };
 
-  return { ...grouped, totals, journalCount: entries.length };
+  return { ...grouped, totals, journalCount };
 }
 
 /** Create missing auto-delivery journals so CoA balances reflect delivered sales. */

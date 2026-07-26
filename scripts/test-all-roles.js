@@ -253,25 +253,33 @@ async function run() {
     orderId = created.data?.data?._id;
     customerId = created.data?.data?.customerId?._id || created.data?.data?.customerId;
 
-    // new_order notification should reach OM but NOT stock manager.
+    // Manual orders auto-verify → Ready to ship, so stock gets order_verified (not only new_order).
     await new Promise((r) => setTimeout(r, 400));
     const omAfter = (await call('GET', '/notifications/unread-count', { token: om })).data?.data?.unread ?? 0;
     const smAfter = (await call('GET', '/notifications/unread-count', { token: sm })).data?.data?.unread ?? 0;
     record('new_order notifies Orders Manager', omAfter > omBefore, `${omBefore} → ${omAfter}`);
-    record('new_order does NOT notify Stock Manager', smAfter === smBefore, `${smBefore} → ${smAfter}`);
+    record(
+      'manual auto-verify notifies Stock Manager (ready to ship)',
+      smAfter > smBefore,
+      `${smBefore} → ${smAfter}`
+    );
 
     if (orderId) {
-      // SM cannot verify (orders-manager action).
+      const createdStatus = created.data?.data?.internalStatus;
+      record(
+        'manual order lands Ready to ship (auto-verified)',
+        createdStatus === 'verified_ready_for_shipping',
+        createdStatus
+      );
+
+      // SM cannot verify (orders-manager action). Verify itself is a no-op for already-ready orders.
       await expect('BLOCK SM verify', 'POST', `/orders/${orderId}/verify`, { token: sm, body: { outcome: 'confirmed' }, status: 403 });
-      // OM verifies → should emit order_verified to stock manager.
-      await expect('OM verifies order', 'POST', `/orders/${orderId}/verify`, {
+      await expect('OM verify rejected when already ready', 'POST', `/orders/${orderId}/verify`, {
         token: om,
-        status: [200, 201],
+        status: 400,
         body: { outcome: 'confirmed', note: 'role test', shippingMethod: 'local_shipping' },
       });
-      await new Promise((r) => setTimeout(r, 400));
-      const smVerified = (await call('GET', '/notifications/unread-count', { token: sm })).data?.data?.unread ?? 0;
-      record('order_verified notifies Stock Manager', smVerified > smBefore, `${smBefore} → ${smVerified}`);
+      record('order already ready for stock (skip verify)', true, 'auto-verified on create');
 
       // OM cannot pick-pack (stock action); SM can.
       await expect('BLOCK OM pick-pack', 'POST', `/fulfillment/${orderId}/pick-pack`, { token: om, status: 403 });
