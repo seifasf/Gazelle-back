@@ -39,11 +39,15 @@ export function bostaCodAmountForOrder(order) {
   return Math.max(0, (order.totalSellingPrice || 0) + (order.shippingFee || 0));
 }
 
-/** Bosta delivery type codes used by Gazelle. */
+/** Bosta delivery type codes (live API — verified against Gazelle Bosta account). */
 export const BOSTA_DELIVERY_TYPE = {
   SEND: 10,
-  EXCHANGE: 15,
-  CUSTOMER_RETURN_PICKUP: 20,
+  /** Return to Origin (failed delivery coming back) — not used for create. */
+  RTO: 20,
+  /** Customer return / refund pickup — courier collects from customer, COD must be 0. */
+  CUSTOMER_RETURN_PICKUP: 25,
+  /** Exchange — deliver new + collect old; returnSpecs required. */
+  EXCHANGE: 30,
 };
 
 export function bostaDeliveryTypeForOrder(order) {
@@ -428,9 +432,16 @@ export async function createDelivery(order, customer) {
     notes: description,
   };
 
-  // Exchange: deliver new + collect old — Bosta requires return package details.
+  // CRP (type 25): Bosta requires pickupAddress (customer) — dropOff alone fails with city error.
+  if (deliveryType === BOSTA_DELIVERY_TYPE.CUSTOMER_RETURN_PICKUP) {
+    payload.pickupAddress = { ...dropOffAddress };
+  }
+
+  // Exchange (type 30): deliver new + collect old — returnSpecs required by Bosta.
   if (deliveryType === BOSTA_DELIVERY_TYPE.EXCHANGE) {
     payload.returnSpecs = {
+      packageType: 'Parcel',
+      size: 'MEDIUM',
       packageDetails: {
         itemsCount: returnCount,
         description: returnDesc || 'Customer return items',

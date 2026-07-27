@@ -245,9 +245,9 @@ export async function bostaReturnsForRange({ from, to }) {
 
   for (const row of rows) {
     const code = row.typeCode;
-    // Bosta type codes: 10 SEND, 15 EXCHANGE, 20 CRP, 25 RTO
-    if (code === 25 || /return to origin|rto/i.test(String(row.typeValue || ''))) byType.rto += 1;
-    else if (code === 20 || /customer return/i.test(String(row.typeValue || ''))) byType.customer_return += 1;
+    // Bosta type codes (live): 10 SEND, 20 RTO, 25 CRP, 30 EXCHANGE
+    if (code === 20 || /return to origin|\brto\b/i.test(String(row.typeValue || ''))) byType.rto += 1;
+    else if (code === 25 || /customer return/i.test(String(row.typeValue || ''))) byType.customer_return += 1;
     else if (code === 15 || code === 30 || /exchange/i.test(String(row.typeValue || ''))) byType.exchange += 1;
     else if (code === 10) byType.send += 1;
     else byType.other += 1;
@@ -259,9 +259,9 @@ export async function bostaReturnsForRange({ from, to }) {
   const linkedRows = rows.filter((r) => r.orderId);
   const linkedRto = linkedRows.filter(
     (r) =>
-      r.typeCode === 25 ||
-      /return to origin|rto/i.test(String(r.typeValue || '')) ||
       r.typeCode === 20 ||
+      /return to origin|\brto\b/i.test(String(r.typeValue || '')) ||
+      r.typeCode === 25 ||
       /customer return/i.test(String(r.typeValue || ''))
   ).length;
 

@@ -91,13 +91,14 @@ export function normalizeBostaType(type) {
   if (type == null || type === '') return null;
   if (typeof type === 'string') return type.trim().toUpperCase().replace(/\s+/g, '_');
   if (typeof type === 'number') {
-    // Common Bosta type codes: 10 SEND, 15 EXCHANGE, 20 CRP, 25 RTO, …
+    // Common Bosta type codes (live Gazelle account):
+    // 10 SEND · 20 RTO · 25 CUSTOMER_RETURN_PICKUP · 30 EXCHANGE
     const byCode = {
       10: 'SEND',
-      15: 'EXCHANGE',
-      20: 'CUSTOMER_RETURN_PICKUP',
-      25: 'RTO',
-      30: 'SIGN_AND_RETURN',
+      15: 'EXCHANGE', // legacy alias (create API rejects 15; live creates use 30)
+      20: 'RTO',
+      25: 'CUSTOMER_RETURN_PICKUP',
+      30: 'EXCHANGE',
     };
     return byCode[type] || String(type);
   }

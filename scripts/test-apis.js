@@ -29,7 +29,7 @@ async function req(method, path, { token, body, base = BASE, expectStatus, allow
     data = { raw: text };
   }
 
-  const ok = expectStatus ? res.status === expectStatus : res.ok;
+  const ok = expectStatus != null ? res.status === expectStatus : res.ok;
   results.push({
     method,
     path,
@@ -39,8 +39,9 @@ async function req(method, path, { token, body, base = BASE, expectStatus, allow
     error: ok || allowFail ? null : data.error || data.raw || res.statusText,
   });
 
-  if (!ok && !allowFail && expectStatus !== res.status) {
-    throw new Error(`${method} ${path} → ${res.status}: ${data.error || text}`);
+  if (!ok && !allowFail) {
+    const detail = data.error || (typeof text === 'string' ? text.slice(0, 300) : res.statusText);
+    throw new Error(`${method} ${path} → ${res.status}: ${detail}`);
   }
   return { status: res.status, data };
 }
@@ -253,14 +254,14 @@ async function run() {
     body: { batchLabel: 'Batch-2026-01', cogs: 125, quantity: 50 },
   });
 
-  await req('GET', '/inventory/variants', { token: adminToken });
+  await req('GET', '/inventory/variants?limit=10', { token: adminToken });
   await req('GET', `/inventory/variants/${ids.variant._id}`, { token: adminToken });
   await req('POST', `/inventory/variants/${ids.variant._id}/adjust`, {
     token: adminToken,
     body: { quantityDelta: 5, reasonCode: 'restock' },
   });
   await req('GET', `/inventory/variants/${ids.variant._id}/ledger`, { token: adminToken });
-  await req('GET', '/inventory/discrepancies', { token: adminToken });
+  await req('GET', '/inventory/discrepancies?limit=10', { token: adminToken });
 
   await req('GET', '/customers', { token: adminToken });
   await req('GET', `/customers/${ids.customer._id}`, { token: adminToken });
