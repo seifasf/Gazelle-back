@@ -177,7 +177,13 @@ export async function updateShippingAddress(req, res, next) {
     ) {
       return res.status(400).json({ error: 'Cannot edit address at this stage' });
     }
-    order.shippingAddress = { ...order.shippingAddress.toObject?.() || order.shippingAddress, ...req.body };
+    const prev = order.shippingAddress?.toObject?.() || order.shippingAddress || {};
+    order.shippingAddress = { ...prev, ...req.body };
+    // Address fix after a failed Bosta create — clear so stock can retry scan & ship.
+    if (order.bostaShipmentStatus === 'failed' && !order.bostaDeliveryId) {
+      order.bostaShipmentStatus = 'none';
+      order.bostaShipmentError = null;
+    }
     await order.save();
     res.json({ data: order });
   } catch (err) {

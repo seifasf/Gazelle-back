@@ -2,6 +2,7 @@ import { bostaRequest } from './client.js';
 import { config } from '../../config/index.js';
 import Settings from '../../models/Settings.js';
 import { bostaWebhookUrl } from './webhookPayload.js';
+import { fetchBostaDistricts } from './cities.service.js';
 
 function splitName(fullName) {
   const parts = (fullName || 'Customer').trim().split(/\s+/);
@@ -295,6 +296,62 @@ async function resolveBostaCityId(cityName) {
   return { cityId: fuzzy.id || fuzzy.code || null, resolvedName: fuzzy.name, aliased: Boolean(aliasTarget) };
 }
 
+function normalizeDistrictNeedle(value) {
+  return compactCity(String(value || ''))
+    .replace(/٦/g, '6')
+    .replace(/أكتوبر|اكتوبر/g, 'october')
+    .replace(/المقطم|مقطم/g, 'mokattam');
+}
+
+/**
+ * Best-effort match of free-text zone / area / street against Bosta districts for a city.
+ */
+async function resolveBostaDistrict(cityId, ...hints) {
+  if (!cityId) return null;
+  let districts = [];
+  try {
+    districts = await fetchBostaDistricts(cityId);
+  } catch {
+    return null;
+  }
+  if (!districts.length) return null;
+
+  const needles = hints
+    .flatMap((h) => String(h || '').split(/[·|,/]/))
+    .map((h) => normalizeDistrictNeedle(h))
+    .filter((h) => h.length >= 3);
+
+  if (!needles.length) return null;
+
+  const scoreDistrict = (d) => {
+    const fields = [
+      d.districtName,
+      d.districtOtherName,
+      d.zoneName,
+      d.zoneOtherName,
+    ].map(normalizeDistrictNeedle).filter(Boolean);
+    let best = 0;
+    for (const needle of needles) {
+      for (const field of fields) {
+        if (field === needle) best = Math.max(best, 100);
+        else if (field.includes(needle) || needle.includes(field)) best = Math.max(best, 60);
+      }
+    }
+    return best;
+  };
+
+  let best = null;
+  let bestScore = 0;
+  for (const d of districts) {
+    const score = scoreDistrict(d);
+    if (score > bestScore) {
+      bestScore = score;
+      best = d;
+    }
+  }
+  return bestScore >= 60 ? best : null;
+}
+
 export async function createDelivery(order, customer) {
   const shipping = order.shippingAddress || {};
   let city = typeof shipping.city === 'string' ? shipping.city.trim() : '';
@@ -356,18 +413,29 @@ export async function createDelivery(order, customer) {
   }
 
   const bostaCityName = resolved?.resolvedName || city;
+  const cityId = resolved?.cityId || null;
 
   // Bosta rejects very short first lines ("6046") — enrich with area/city for the courier.
   if (line1.length < 10) {
     line1 = [line1, zone, bostaCityName].filter(Boolean).join(', ');
   }
 
-  // Bosta create API expects dropOffAddress.city (name), not receiver.address.cityId.
+  const district = await resolveBostaDistrict(cityId, zone, shipping.line2, line1);
+
+  // Send cityId (+ district when known) so Bosta does not crash resolving city from text alone.
   const dropOffAddress = {
     city: bostaCityName,
+    ...(cityId ? { cityId } : {}),
     firstLine: line1,
     secondLine: shipping.line2 || '',
-    zone: zone || (resolved?.aliased ? shipping.city : '') || '',
+    zone: district?.zoneName || zone || (resolved?.aliased ? shipping.city : '') || '',
+    ...(district?.districtId
+      ? {
+          districtId: district.districtId,
+          districtName: district.districtName,
+          ...(district.zoneId ? { zoneId: district.zoneId } : {}),
+        }
+      : {}),
   };
 
   const webhookUrl = bostaWebhookUrl(config.APP_URL);
@@ -464,6 +532,14 @@ export async function createDelivery(order, customer) {
         `Bosta needs a fuller street address (got “${shipping.line1 || ''}”). Open the order, add building/street details, then retry the policy.`
       );
       wrapped.statusCode = 400;
+      throw wrapped;
+    }
+    if (/cannot read properties of undefined.*city/i.test(msg)) {
+      const wrapped = new Error(
+        `Bosta could not resolve the city/area for “${bostaCityName}${zone ? ` · ${zone}` : ''}”. Pick a Bosta city, then an area/district, then retry.`
+      );
+      wrapped.statusCode = 400;
+      wrapped.code = 'INVALID_CITY';
       throw wrapped;
     }
     if (/city/i.test(msg) || err?.statusCode === 400 || err?.statusCode === 500) {

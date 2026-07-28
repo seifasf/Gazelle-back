@@ -1,7 +1,11 @@
 import { Router } from 'express';
 import { authenticate } from '../middleware/auth.js';
 import { adminOnly, requireRoles } from '../middleware/rbac.js';
-import { fetchBostaCities, getBostaCitiesFromDb } from '../integrations/bosta/cities.service.js';
+import {
+  fetchBostaCities,
+  getBostaCitiesFromDb,
+  fetchBostaDistricts,
+} from '../integrations/bosta/cities.service.js';
 import { isBostaConfigured } from '../integrations/bosta/client.js';
 
 const router = Router();
@@ -29,6 +33,23 @@ router.get('/bosta-cities', requireRoles('admin', 'orders_manager', 'stock_manag
     next(err);
   }
 });
+
+/** Districts / areas for a Bosta city (city → area → street address flow). */
+router.get(
+  '/bosta-cities/:cityId/districts',
+  requireRoles('admin', 'orders_manager', 'stock_manager'),
+  async (req, res, next) => {
+    try {
+      if (!isBostaConfigured()) {
+        return res.json({ data: [], configured: false });
+      }
+      const districts = await fetchBostaDistricts(req.params.cityId);
+      res.json({ data: districts, configured: true, count: districts.length });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 router.post('/bosta-cities/sync', adminOnly, async (req, res, next) => {
   try {

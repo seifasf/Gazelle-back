@@ -42,4 +42,25 @@ export async function getBostaCitiesFromDb() {
   return settings?.bostaCities || [];
 }
 
-export default { fetchBostaCities, getBostaCitiesFromDb };
+const districtsCache = new Map();
+const DISTRICTS_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * Bosta districts (areas) for a city — used for address pickers + shipment cityId/districtId.
+ */
+export async function fetchBostaDistricts(cityId, { force = false } = {}) {
+  const id = String(cityId || '').trim();
+  if (!id) return [];
+
+  const cached = districtsCache.get(id);
+  if (!force && cached && Date.now() - cached.at < DISTRICTS_TTL_MS) {
+    return cached.list;
+  }
+
+  const response = await bostaRequest(`/cities/${encodeURIComponent(id)}/districts`);
+  const list = (response?.data || response?.list || []).filter(Boolean);
+  districtsCache.set(id, { at: Date.now(), list });
+  return list;
+}
+
+export default { fetchBostaCities, getBostaCitiesFromDb, fetchBostaDistricts };
