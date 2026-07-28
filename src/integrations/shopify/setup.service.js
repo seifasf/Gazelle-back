@@ -449,6 +449,104 @@ export async function backfillShopifyOrderNames({ maxItems = 500 } = {}) {
   return results;
 }
 
+/**
+ * Fetch any Shopify order by display name / number (e.g. #44082 or 44082) and upsert into OMS.
+ * Used by exchange & return prior-order lookup — always hits Shopify for the entered id.
+ */
+export async function importShopifyOrderByName(query) {
+  if (!(await isShopifyConfigured())) {
+    const err = new Error('Shopify credentials not configured');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const raw = String(query || '').trim();
+  if (!raw) {
+    const err = new Error('Enter a Shopify order number');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  // Manual OMS refs are not Shopify orders.
+  if (/^MAN-/i.test(raw) || /^[a-f\d]{24}$/i.test(raw)) {
+    return null;
+  }
+
+  const digits = raw.replace(/\D/g, '');
+  const withHash = digits ? `#${digits}` : raw.startsWith('#') ? raw : `#${raw}`;
+
+  let shopifyOrder = null;
+
+  // 1) GraphQL name search — reliable for any historical order number.
+  if (digits) {
+    try {
+      const { shopifyGraphQL } = await import('./client.js');
+      const searchQueries = [`name:${withHash}`, `name:${digits}`, withHash];
+      for (const q of searchQueries) {
+        const res = await shopifyGraphQL(
+          `query ($q: String!) {
+            orders(first: 10, query: $q, sortKey: CREATED_AT, reverse: true) {
+              edges { node { legacyResourceId name } }
+            }
+          }`,
+          { q }
+        );
+        const edges = res?.orders?.edges || [];
+        const exact =
+          edges.find((e) => String(e?.node?.name || '') === withHash)
+          || edges.find((e) => String(e?.node?.name || '').replace(/\D/g, '') === digits)
+          || null;
+        if (exact?.node?.legacyResourceId) {
+          const full = await shopifyRest(`/orders/${exact.node.legacyResourceId}.json`);
+          shopifyOrder = full?.order || null;
+          if (shopifyOrder) break;
+        }
+      }
+    } catch (err) {
+      logger.warn({ err: err.message, digits }, 'Shopify GraphQL order lookup failed');
+    }
+  }
+
+  // 2) REST name filter fallback.
+  if (!shopifyOrder) {
+    const nameCandidates = [...new Set([withHash, raw, digits || null].filter(Boolean))];
+    for (const name of nameCandidates) {
+      try {
+        const data = await shopifyRest(`/orders.json?name=${encodeURIComponent(name)}&status=any`);
+        const list = data?.orders || [];
+        shopifyOrder =
+          list.find((o) => String(o.name) === withHash || String(o.order_number) === digits)
+          || list[0]
+          || null;
+        if (shopifyOrder) break;
+      } catch (err) {
+        logger.warn({ err: err.message, name }, 'Shopify REST name lookup failed');
+      }
+    }
+  }
+
+  if (!shopifyOrder) return null;
+
+  const existing = await Order.findOne({ shopifyOrderId: String(shopifyOrder.id) });
+  if (existing) {
+    const name = shopifyOrder.name || (shopifyOrder.order_number != null ? `#${shopifyOrder.order_number}` : null);
+    if (name && existing.shopifyOrderName !== name) {
+      existing.shopifyOrderName = name;
+      await existing.save();
+    }
+    return existing;
+  }
+
+  const statusOverride = mapImportedOrderStatus(shopifyOrder);
+  // Prior orders for exchange/return — only reserve stock if still open/unfulfilled.
+  await handleOrdersCreate(shopifyOrder, {
+    statusOverride,
+    source: 'shopify_import',
+    reserveStock: statusOverride === 'pending_verification',
+  });
+  return Order.findOne({ shopifyOrderId: String(shopifyOrder.id) });
+}
+
 export async function fullShopifySync({ importOrders = true, orderLimit = 50 } = {}) {
   await testShopifyConnection();
   const catalog = await syncCatalogFromShopify();
@@ -469,5 +567,6 @@ export default {
   importAllShopifyCustomers,
   ensureOrdersLoaded,
   backfillShopifyOrderNames,
+  importShopifyOrderByName,
   fullShopifySync,
 };

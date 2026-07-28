@@ -923,8 +923,9 @@ export async function createManualOrder({
 }
 
 /**
- * Resolve a prior order for exchange by Shopify name/id (#43897 / 43897).
- * Only searches orders placed in the last 2 months (keeps lookup light).
+ * Resolve a prior order for exchange / return by Shopify order number.
+ * Always searches Shopify for the entered id (any age), then upserts into OMS.
+ * Local-only fallback for manual orders (MAN-…) or Mongo ids.
  */
 export async function findOrderForExchange(query) {
   const raw = String(query || '').trim();
@@ -936,39 +937,57 @@ export async function findOrderForExchange(query) {
 
   const withHash = raw.startsWith('#') ? raw : `#${raw.replace(/^#/, '')}`;
   const digits = raw.replace(/\D/g, '');
-  const since = new Date();
-  since.setMonth(since.getMonth() - 2);
+  const isManualOrMongo = /^MAN-/i.test(raw) || /^[a-f\d]{24}$/i.test(raw);
 
+  async function populateOrder(docOrId) {
+    const id = docOrId?._id || docOrId;
+    if (!id) return null;
+    return Order.findById(id)
+      .populate('customerId', 'fullName phone email')
+      .populate('items.variantId', 'title color size imageUrl sku sellingPrice productId')
+      .lean();
+  }
+
+  // Shopify path: any numeric / #order entered → search Shopify live.
+  if (!isManualOrMongo && digits) {
+    try {
+      const { importShopifyOrderByName } = await import('../integrations/shopify/setup.service.js');
+      const imported = await importShopifyOrderByName(raw);
+      const order = await populateOrder(imported);
+      if (order) return order;
+    } catch (err) {
+      if (err.statusCode && err.statusCode !== 404 && err.statusCode !== 400) throw err;
+      // Continue to local fallback below.
+    }
+  }
+
+  // Local fallback (manual orders, Mongo id, or Shopify already in OMS if API failed).
   const or = [
     { shopifyOrderName: withHash },
     { shopifyOrderName: raw },
+    { shopifyOrderId: raw },
   ];
   if (digits) {
     or.push({ shopifyOrderId: digits });
     or.push({ shopifyOrderName: `#${digits}` });
   }
-  // Manual refs / Mongo id fallback
   if (/^[a-f\d]{24}$/i.test(raw)) or.push({ _id: raw });
-  or.push({ shopifyOrderId: raw });
 
-  const order = await Order.findOne({
-    $or: or,
-    placedAt: { $gte: since },
-  })
+  const local = await Order.findOne({ $or: or })
     .sort({ placedAt: -1 })
     .populate('customerId', 'fullName phone email')
     .populate('items.variantId', 'title color size imageUrl sku sellingPrice productId')
     .lean();
 
-  if (!order) {
+  if (!local) {
     const err = new Error(
-      `Order not found for ${withHash} in the last 2 months. Older orders are not searchable.`
+      `Order ${withHash} not found on Shopify. Check the order number and try again.`
     );
     err.statusCode = 404;
     throw err;
   }
 
-  return order;
+  return local;
 }
 
 function escapeRegex(value) {
