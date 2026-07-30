@@ -339,14 +339,63 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
       throw err;
     }
 
-    // Post-delivery return / customer return pickup: increment warehouse stock.
-    // Pre-delivery RTO (never delivered): release hold only.
-    const ledgerDocs = await applyLedgerEntries(
-      order.isReturnOrder || order.deliveredAt
-        ? buildPostDeliveryReturnEntries(order._id, order.items)
-        : buildPreDeliveryReleaseEntries(order._id, order.items),
-      session
-    );
+    /**
+     * What physically arrives at the warehouse:
+     * - Exchange (delivered): COLLECT lines (bostaReturnItems) — outbound already sold on deliver
+     * - Exchange (never delivered): outbound package came back — release hold only
+     * - Refund CRP: pickup lines (bostaReturnItems or items) → +real stock
+     * - Post-delivery RTO: order.items → +real stock
+     * - Pre-delivery refused: release hold on order.items only
+     */
+    const collectLines =
+      Array.isArray(order.bostaReturnItems) && order.bostaReturnItems.length > 0
+        ? order.bostaReturnItems
+        : order.items;
+
+    let ledgerEntries;
+    let restockVariantIds = [];
+    let confirmNote;
+
+    if (order.isExchangeOrder && order.deliveredAt) {
+      if (!collectLines?.length) {
+        const err = new Error('Exchange has no collect items to restock — check bostaReturnItems');
+        err.statusCode = 400;
+        throw err;
+      }
+      ledgerEntries = buildPostDeliveryReturnEntries(order._id, collectLines);
+      restockVariantIds = collectLines.map((i) => i.variantId).filter(Boolean);
+      confirmNote =
+        note ||
+        `Exchange collect received — restocked ${collectLines
+          .map((i) => `${i.sku}×${i.quantity}`)
+          .join(', ')}`;
+    } else if (order.isExchangeOrder) {
+      // Failed exchange / customer refused — outbound never sold; free the hold.
+      ledgerEntries = buildPreDeliveryReleaseEntries(order._id, order.items);
+      confirmNote =
+        note ||
+        `Exchange not delivered — released hold on ${(order.items || [])
+          .map((i) => `${i.sku}×${i.quantity}`)
+          .join(', ')}`;
+    } else if (order.isReturnOrder) {
+      ledgerEntries = buildPostDeliveryReturnEntries(order._id, collectLines);
+      restockVariantIds = collectLines.map((i) => i.variantId).filter(Boolean);
+      confirmNote =
+        note ||
+        `Refund pickup received — restocked ${(collectLines || [])
+          .map((i) => `${i.sku}×${i.quantity}`)
+          .join(', ')}`;
+    } else if (order.deliveredAt) {
+      ledgerEntries = buildPostDeliveryReturnEntries(order._id, order.items);
+      restockVariantIds = (order.items || []).map((i) => i.variantId).filter(Boolean);
+      confirmNote = note || 'Physical receipt confirmed — returned to warehouse stock';
+    } else {
+      // Customer refused / failed delivery before sell — free the hold, do not +1 real stock.
+      ledgerEntries = buildPreDeliveryReleaseEntries(order._id, order.items);
+      confirmNote = note || 'Physical receipt confirmed — hold released (never delivered)';
+    }
+
+    const ledgerDocs = await applyLedgerEntries(ledgerEntries, session);
 
     await transitionOrder(
       order,
@@ -354,7 +403,7 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
       {
         source: 'user_action',
         actorUserId,
-        note: note || 'Physical receipt confirmed — returned to warehouse stock',
+        note: confirmNote,
       },
       session
     );
@@ -365,16 +414,20 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
       { session }
     );
 
-    return { order: await Order.findById(orderId).session(session), ledgerDocs };
+    return {
+      order: await Order.findById(orderId).session(session),
+      ledgerDocs,
+      restockVariantIds,
+    };
   });
 
   await afterLedgerApplied(result.ledgerDocs);
-  // Post-delivery returns add real stock — may unblock Out of stock orders.
-  if (result.order?.deliveredAt) {
-    const variantIds = (result.order.items || []).map((i) => i.variantId).filter(Boolean);
-    await releaseOutOfStockOrdersIfRestocked(variantIds, {
+
+  // Restock (exchange collect / refund / post-delivery return) may unblock Out of stock orders.
+  if (result.restockVariantIds?.length) {
+    await releaseOutOfStockOrdersIfRestocked(result.restockVariantIds, {
       actorUserId,
-      note: 'Auto: return restocked SKUs — back to Ready to ship',
+      note: 'Auto: return/exchange restocked SKUs — back to Ready to ship',
     });
   }
   return result.order;
@@ -685,6 +738,16 @@ export async function createManualOrder({
     throw err;
   }
 
+  // Refund: if only collect lines were sent, mirror them into `items` (order schema requires items).
+  const outboundItemsInput =
+    customerReturn && (!Array.isArray(items) || items.length < 1) && Array.isArray(bostaReturnItems)
+      ? bostaReturnItems.map((r) => ({
+          variantId: r.variantId,
+          quantity: r.quantity || 1,
+          unitSellingPrice: 0,
+        }))
+      : items;
+
   const manualOrder = await withTransaction(async (session) => {
     let priorOrder = null;
     const priorId = exchange ? exchangeFromOrderId : customerReturn ? returnFromOrderId : null;
@@ -720,7 +783,7 @@ export async function createManualOrder({
     }
 
     const orderItems = [];
-    for (const item of items) {
+    for (const item of outboundItemsInput || []) {
       const variant = await Variant.findById(item.variantId).session(session);
       if (!variant) {
         const err = new Error(`Variant not found: ${item.variantId}`);
@@ -734,6 +797,12 @@ export async function createManualOrder({
         unitSellingPrice: exchange || customerReturn ? 0 : (item.unitSellingPrice ?? variant.sellingPrice),
         unitCogs: variant.cogs,
       });
+    }
+
+    if (!orderItems.length) {
+      const err = new Error(customerReturn ? 'Select the items to pick up for this return' : 'Add at least one item');
+      err.statusCode = 400;
+      throw err;
     }
 
     const total = exchange || customerReturn
@@ -786,22 +855,32 @@ export async function createManualOrder({
     if (customerReturn) initialStatus = 'returning_to_origin';
     else if (isPickup) initialStatus = 'delivered';
 
-    const normalizedReturnItems = Array.isArray(bostaReturnItems) && bostaReturnItems.length
-      ? bostaReturnItems.map((r) => ({
-          variantId: r.variantId,
-          sku: r.sku,
+    // Enrich collect lines with SKU/title from variants so Bosta policy + warehouse confirm are accurate.
+    let normalizedReturnItems = [];
+    if (Array.isArray(bostaReturnItems) && bostaReturnItems.length) {
+      for (const r of bostaReturnItems) {
+        const variant = await Variant.findById(r.variantId).session(session);
+        if (!variant) {
+          const err = new Error(`Return variant not found: ${r.variantId}`);
+          err.statusCode = 404;
+          throw err;
+        }
+        normalizedReturnItems.push({
+          variantId: variant._id,
+          sku: r.sku || variant.sku,
           quantity: r.quantity || 1,
-          title: r.title,
-          color: r.color,
-          size: r.size,
-        }))
-      : customerReturn
-        ? orderItems.map((i) => ({
-            variantId: i.variantId,
-            sku: i.sku,
-            quantity: i.quantity,
-          }))
-        : [];
+          title: r.title || variant.title,
+          color: r.color || variant.color,
+          size: r.size || variant.size,
+        });
+      }
+    } else if (customerReturn) {
+      normalizedReturnItems = orderItems.map((i) => ({
+        variantId: i.variantId,
+        sku: i.sku,
+        quantity: i.quantity,
+      }));
+    }
 
     const [order] = await Order.create(
       [{
