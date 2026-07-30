@@ -296,17 +296,125 @@ async function resolveBostaCityId(cityName) {
   return { cityId: fuzzy.id || fuzzy.code || null, resolvedName: fuzzy.name, aliased: Boolean(aliasTarget) };
 }
 
+/** Common neighborhood spellings → Bosta district English name. */
+const AREA_ALIASES = {
+  smouha: 'Smouha',
+  smoha: 'Smouha',
+  semouha: 'Smouha',
+  سموحه: 'Smouha',
+  سموحة: 'Smouha',
+  mokattam: 'ElMokattam',
+  المقطم: 'ElMokattam',
+  مقطم: 'ElMokattam',
+  maadi: 'Maadi',
+  المعادي: 'Maadi',
+  معادي: 'Maadi',
+  nasrcity: 'Nasr City',
+  مدينةنصر: 'Nasr City',
+  '6october': '6 October',
+  sixthofoctober: '6 October',
+  اكتوبر: '6 October',
+  أكتوبر: '6 October',
+  sheikhzayed: 'Sheikh Zayed',
+  الشيخزايد: 'Sheikh Zayed',
+  haram: 'Haram',
+  الهرم: 'Haram',
+  dokki: 'Dokki',
+  الدقي: 'Dokki',
+  mohandessin: 'Mohandessin',
+  المهندسين: 'Mohandessin',
+  heliopolis: 'Heliopolis',
+  مصرالجديدة: 'Heliopolis',
+  zamalek: 'Zamalek',
+  الزمالك: 'Zamalek',
+  agouza: 'Agouza',
+  العجوزه: 'Agouza',
+  العجوزة: 'Agouza',
+  qesmelraml: 'Qesm ElRaml',
+  قسمالرمل: 'Qesm ElRaml',
+  elraml: 'ElRaml',
+  الرمل: 'ElRaml',
+  sidigaber: 'Sidi Gaber',
+  سيديجابر: 'Sidi Gaber',
+  // Alexandria — prefer covered Sidi Gaber district (ElAmaria "Mostafa Kamel" is uncovered).
+  mostafakamel: 'Mustafa Kamel (Sidi Gaber)',
+  mustafakamel: 'Mustafa Kamel (Sidi Gaber)',
+  mostafakamil: 'Mustafa Kamel (Sidi Gaber)',
+  مصطفىكامل: 'Mustafa Kamel (Sidi Gaber)',
+  مصطفيكامل: 'Mustafa Kamel (Sidi Gaber)',
+  عماراتضباطمصطفىكامل: 'Mustafa Kamel (Sidi Gaber)',
+};
+
+/** Generic short tokens that match too many districts — never score alone. */
+const WEAK_AREA_TOKENS = new Set([
+  'كامل', // "complete/full" — appears in many Arabic district names
+  'kamel',
+  'kamil',
+  'شارع',
+  'street',
+  'apartment',
+  'floor',
+  'third',
+  'خلف',
+  'مباشر',
+]);
+
 function normalizeDistrictNeedle(value) {
   return compactCity(String(value || ''))
     .replace(/٦/g, '6')
     .replace(/أكتوبر|اكتوبر/g, 'october')
-    .replace(/المقطم|مقطم/g, 'mokattam');
+    .replace(/المقطم|مقطم/g, 'mokattam')
+    .replace(/سموحة/g, 'سموحه')
+    .replace(/مصطفى/g, 'مصطفي');
+}
+
+function isDropOffCovered(district) {
+  if (district?.dropOffAvailability === false) return false;
+  return true;
 }
 
 /**
- * Best-effort match of free-text zone / area / street against Bosta districts for a city.
+ * Split free-text address into searchable tokens (EN + AR), including bigrams.
  */
-async function resolveBostaDistrict(cityId, ...hints) {
+function addressTokens(...hints) {
+  const raw = hints
+    .flatMap((h) => String(h || '').split(/[·|,/+\n]/))
+    .map((h) => h.trim())
+    .filter(Boolean);
+
+  const tokens = new Set();
+  for (const part of raw) {
+    const compact = normalizeDistrictNeedle(part);
+    if (compact.length >= 3) tokens.add(compact);
+
+    const words = part.split(/[\s,_-]+/).map((w) => normalizeDistrictNeedle(w)).filter((w) => w.length >= 2);
+    for (const w of words) {
+      if (w.length >= 3) tokens.add(w);
+    }
+    // Bigrams: "مصطفى كامل" → مصطفىكامل (matches AREA_ALIASES / district names)
+    for (let i = 0; i < words.length - 1; i += 1) {
+      const bi = `${words[i]}${words[i + 1]}`;
+      if (bi.length >= 5) tokens.add(bi);
+    }
+  }
+
+  for (const [alias, canonical] of Object.entries(AREA_ALIASES)) {
+    const aliasC = normalizeDistrictNeedle(alias);
+    const canonC = normalizeDistrictNeedle(canonical);
+    if ([...tokens].some((t) => t === aliasC || t.includes(aliasC) || aliasC.includes(t))) {
+      tokens.add(canonC);
+      tokens.add(aliasC);
+    }
+  }
+
+  return [...tokens].filter((t) => !WEAK_AREA_TOKENS.has(t));
+}
+
+/**
+ * Match free-text zone / street against Bosta districts for a city.
+ * Never picks uncovered districts (Bosta error 4009 "Uncovered drop off…").
+ */
+async function resolveBostaDistrict(cityId, cityName, ...hints) {
   if (!cityId) return null;
   let districts = [];
   try {
@@ -316,40 +424,59 @@ async function resolveBostaDistrict(cityId, ...hints) {
   }
   if (!districts.length) return null;
 
-  const needles = hints
-    .flatMap((h) => String(h || '').split(/[·|,/]/))
-    .map((h) => normalizeDistrictNeedle(h))
-    .filter((h) => h.length >= 3);
+  // Zone equal to city ("Alexandria") is useless noise from Shopify.
+  const cleanedHints = hints.filter((h) => {
+    const c = normalizeDistrictNeedle(h);
+    const cityC = normalizeDistrictNeedle(cityName);
+    if (!c) return false;
+    if (cityC && c === cityC) return false;
+    if (isCountryLabel(h)) return false;
+    return true;
+  });
 
+  const needles = addressTokens(...cleanedHints);
   if (!needles.length) return null;
 
   const scoreDistrict = (d) => {
-    const fields = [
-      d.districtName,
-      d.districtOtherName,
-      d.zoneName,
-      d.zoneOtherName,
-    ].map(normalizeDistrictNeedle).filter(Boolean);
+    const districtFields = [d.districtName, d.districtOtherName]
+      .map(normalizeDistrictNeedle)
+      .filter(Boolean);
+    const zoneFields = [d.zoneName, d.zoneOtherName].map(normalizeDistrictNeedle).filter(Boolean);
     let best = 0;
     for (const needle of needles) {
-      for (const field of fields) {
-        if (field === needle) best = Math.max(best, 100);
-        else if (field.includes(needle) || needle.includes(field)) best = Math.max(best, 60);
+      const longNeedle = needle.length >= 8;
+      for (const field of districtFields) {
+        if (field === needle) best = Math.max(best, longNeedle ? 160 : 130);
+        else if (field.includes(needle) && needle.length >= 5) {
+          // Prefer longer needles so "mustafakamel" beats stray "كامل".
+          best = Math.max(best, 80 + Math.min(40, needle.length));
+        } else if (needle.includes(field) && field.length >= 6) {
+          best = Math.max(best, 100);
+        }
+      }
+      for (const field of zoneFields) {
+        if (field === needle) best = Math.max(best, 45);
+        else if (field.includes(needle) && needle.length >= 6) best = Math.max(best, 35);
       }
     }
     return best;
   };
 
+  const covered = districts.filter(isDropOffCovered);
+  const pool = covered.length ? covered : districts;
+
   let best = null;
   let bestScore = 0;
-  for (const d of districts) {
+  for (const d of pool) {
     const score = scoreDistrict(d);
     if (score > bestScore) {
       bestScore = score;
       best = d;
     }
   }
-  return bestScore >= 60 ? best : null;
+
+  // Require a strong district-level match (not a weak substring).
+  return bestScore >= 100 ? best : null;
 }
 
 export async function createDelivery(order, customer) {
@@ -420,23 +547,24 @@ export async function createDelivery(order, customer) {
     line1 = [line1, zone, bostaCityName].filter(Boolean).join(', ');
   }
 
-  const district = await resolveBostaDistrict(cityId, zone, shipping.line2, line1);
+  // Ignore zone when it duplicates the city (Shopify often sets both to "Alexandria").
+  const zoneHint = compactCity(zone) && compactCity(zone) !== compactCity(bostaCityName) ? zone : '';
+  const district = await resolveBostaDistrict(cityId, bostaCityName, zoneHint, shipping.line2, line1);
 
-  // Send cityId (+ district when known) so Bosta does not crash resolving city from text alone.
+  // Prefer resolved Bosta zone/district so geocoder covers the area (Smouha, etc.).
+  // When districtId is set, `zone` must be Bosta's zoneName (e.g. Sidi Gaber), not districtName.
   const dropOffAddress = {
     city: bostaCityName,
     ...(cityId ? { cityId } : {}),
     firstLine: line1,
     secondLine: shipping.line2 || '',
-    zone: district?.zoneName || zone || (resolved?.aliased ? shipping.city : '') || '',
-    ...(district?.districtId
-      ? {
-          districtId: district.districtId,
-          districtName: district.districtName,
-          ...(district.zoneId ? { zoneId: district.zoneId } : {}),
-        }
-      : {}),
+    zone: district?.zoneName || zoneHint || (resolved?.aliased ? shipping.city : '') || '',
   };
+  if (district?.districtId) {
+    dropOffAddress.districtId = district.districtId;
+    dropOffAddress.districtName = district.districtName;
+    if (district.zoneId) dropOffAddress.zoneId = district.zoneId;
+  }
 
   const webhookUrl = bostaWebhookUrl(config.APP_URL);
   const variantsById = await loadVariantsForOrder(order);
@@ -527,6 +655,49 @@ export async function createDelivery(order, customer) {
     return response?.data || response;
   } catch (err) {
     const msg = err?.message || 'Bosta delivery create failed';
+
+    // Uncovered (4009) / Zone Not Found (3002): bad district or zone pairing.
+    // Retry once with zone = district name (no districtId) — Bosta geocodes Smouha etc. that way.
+    if (/uncovered drop.?off|uncovered pickup|zone not found|errorCode.?(4009|3002)/i.test(msg)) {
+      const areaHint =
+        dropOffAddress.districtName ||
+        dropOffAddress.zone ||
+        zoneHint ||
+        bostaCityName;
+      if (payload.dropOffAddress?.districtId || /zone not found/i.test(msg)) {
+        const retryAddress = {
+          city: dropOffAddress.city,
+          ...(dropOffAddress.cityId ? { cityId: dropOffAddress.cityId } : {}),
+          firstLine: dropOffAddress.firstLine,
+          secondLine: dropOffAddress.secondLine || '',
+          zone: dropOffAddress.districtName || areaHint,
+        };
+        const retryPayload = {
+          ...payload,
+          dropOffAddress: retryAddress,
+          ...(payload.pickupAddress ? { pickupAddress: { ...retryAddress } } : {}),
+        };
+        try {
+          const response = await bostaRequest('/deliveries', { method: 'POST', body: retryPayload });
+          return response?.data || response;
+        } catch (retryErr) {
+          const wrapped = new Error(
+            `Bosta does not cover this area (“${areaHint}”). Open the order, pick a covered area/district (e.g. Smouha), then retry.`
+          );
+          wrapped.statusCode = 400;
+          wrapped.code = 'UNCOVERED_ADDRESS';
+          wrapped.cause = retryErr?.message;
+          throw wrapped;
+        }
+      }
+      const wrapped = new Error(
+        `Bosta does not cover this drop-off area in ${bostaCityName}. Open the order, set a covered area/district from the street text (e.g. Smouha), then retry.`
+      );
+      wrapped.statusCode = 400;
+      wrapped.code = 'UNCOVERED_ADDRESS';
+      throw wrapped;
+    }
+
     if (/insufficient parameters/i.test(msg)) {
       const wrapped = new Error(
         `Bosta needs a fuller street address (got “${shipping.line1 || ''}”). Open the order, add building/street details, then retry the policy.`
