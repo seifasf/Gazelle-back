@@ -7,12 +7,12 @@ import { createNotification } from './notification.service.js';
 import logger from '../utils/logger.js';
 
 /**
- * Nightly check: variants below threshold with no open factory PO.
+ * Nightly check: variants with negative warehouse stock and no open factory PO.
  */
 export async function checkRestockNeeded() {
   const lowVariants = await Variant.find({
-    $expr: { $lte: ['$realStock', '$lowStockThreshold'] },
-  }).select('sku title realStock lowStockThreshold');
+    realStock: { $lt: 0 },
+  }).select('sku title realStock');
 
   let notified = 0;
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -33,11 +33,11 @@ export async function checkRestockNeeded() {
     if (existing) continue;
 
     await createNotification({
-      type: variant.realStock <= 0 ? 'out_of_stock' : 'low_stock',
+      type: 'out_of_stock',
       roles: ['admin'],
-      severity: variant.realStock <= 0 ? 'danger' : 'warning',
+      severity: 'danger',
       title: `Restock needed — ${variant.sku}`,
-      body: `${variant.title || variant.sku}: ${variant.realStock} in warehouse. No open factory PO — create one.`,
+      body: `${variant.title || variant.sku}: warehouse is ${variant.realStock}. No open factory PO — create one.`,
       link: '/admin/manufacturing/purchase-orders/new',
       variantId: variant._id,
     });

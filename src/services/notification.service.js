@@ -141,22 +141,18 @@ export async function notifyFactoryRestockNeeded(variantId, { orderId, realStock
 }
 
 /**
- * Emit a low/out-of-stock notification for a variant if it has crossed its
- * threshold. De-duplicates against any recent unread alert for the same variant
- * so we don't spam on every decrement.
+ * Emit a low-stock notification when warehouse stock goes negative.
+ * De-duplicates against any recent unread alert for the same variant.
  */
 export async function notifyLowStockIfNeeded(variantId) {
   try {
     const variant = await Variant.findById(variantId);
     if (!variant) return null;
 
-    // Negatives get the urgent factory restock path instead of a soft low-stock ping.
-    if (variant.realStock < 0) {
-      return notifyFactoryRestockNeeded(variantId, { realStock: variant.realStock });
-    }
+    // Alerts only when realStock is negative (open stock / oversold).
+    if (!(variant.realStock < 0)) return null;
 
-    const threshold = variant.lowStockThreshold ?? 5;
-    if (variant.realStock > threshold) return null;
+    await notifyFactoryRestockNeeded(variantId, { realStock: variant.realStock });
 
     const since = new Date(Date.now() - 6 * 60 * 60 * 1000);
     const existing = await Notification.findOne({
@@ -166,13 +162,12 @@ export async function notifyLowStockIfNeeded(variantId) {
     });
     if (existing) return null;
 
-    const out = variant.realStock <= 0;
     return createNotification({
-      type: out ? 'out_of_stock' : 'low_stock',
+      type: 'out_of_stock',
       roles: ['admin', 'stock_manager'],
-      severity: out ? 'danger' : 'warning',
-      title: out ? `Out of stock — ${variant.sku}` : `Low stock — ${variant.sku}`,
-      body: `${variant.title || variant.sku}: ${variant.realStock} left in warehouse (threshold ${threshold}).`,
+      severity: 'danger',
+      title: `Negative stock — ${variant.sku}`,
+      body: `${variant.title || variant.sku}: warehouse is ${variant.realStock} (needs restock).`,
       link: '/stock/low-stock',
       variantId: variant._id,
     });

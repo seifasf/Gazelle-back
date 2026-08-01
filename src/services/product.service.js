@@ -33,7 +33,8 @@ export async function listVariants({ search, lowStockOnly, limit = 50, skip = 0,
   }
 
   if (lowStockOnly) {
-    filter.$expr = { $lte: ['$realStock', '$lowStockThreshold'] };
+    // Low-stock alerts = open stock gone negative (needs factory restock).
+    filter.realStock = { $lt: 0 };
   }
 
   const [variants, total] = await Promise.all([
@@ -229,7 +230,7 @@ export async function listCatalog({
   if (stockStatus === 'out_of_stock') variantMatch.realStock = { $lte: 0 };
   if (stockStatus === 'on_hold') variantMatch.onHoldStock = { $gt: 0 };
   if (stockStatus === 'low') {
-    variantMatch.$expr = { $lte: ['$realStock', '$lowStockThreshold'] };
+    variantMatch.realStock = { $lt: 0 };
   }
 
   let searchProductIds = [];
@@ -341,7 +342,7 @@ export async function listCatalog({
         if (stockStatus === 'in_stock' && !(variant.realStock > 0)) return false;
         if (stockStatus === 'out_of_stock' && variant.realStock > 0) return false;
         if (stockStatus === 'on_hold' && !(variant.onHoldStock > 0)) return false;
-        if (stockStatus === 'low' && !(variant.realStock <= variant.lowStockThreshold)) return false;
+        if (stockStatus === 'low' && !(variant.realStock < 0)) return false;
         return true;
       });
     }
@@ -428,7 +429,7 @@ export async function getStockQueueCounts() {
   const activeProductIds = await Product.find({ status: 'active' }).distinct('_id');
   const variantFilter = {
     productId: { $in: activeProductIds },
-    $expr: { $lte: ['$realStock', '$lowStockThreshold'] },
+    realStock: { $lt: 0 },
   };
 
   const [lowStock, discrepancies] = await Promise.all([
