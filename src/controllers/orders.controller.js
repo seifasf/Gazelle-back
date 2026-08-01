@@ -179,6 +179,15 @@ export async function removeItem(req, res, next) {
   }
 }
 
+export async function addItem(req, res, next) {
+  try {
+    const order = await exchangeService.addOrderItem(req.params.id, req.user._id, req.body);
+    res.json({ data: order });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function updateShippingAddress(req, res, next) {
   try {
     const Order = (await import('../models/Order.js')).default;
@@ -263,6 +272,7 @@ export default {
   claimOrder,
   exchangeItem,
   removeItem,
+  addItem,
   updateShippingAddress,
   transitionStatus,
   delayOrder,

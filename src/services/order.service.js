@@ -20,6 +20,7 @@ import {
   ORDER_STATUSES,
   ORDERS_PLACED_FROM_YMD,
   LOCAL_SHIPPING_FEE,
+  DEFAULT_BOSTA_SHIPPING_FEE,
   JOB_NAMES,
 } from '../constants/index.js';
 import { getAgenda } from '../config/agenda.js';
@@ -840,7 +841,9 @@ export async function createManualOrder({
           ? LOCAL_SHIPPING_FEE
           : method === 'pickup'
             ? 0
-            : (Number.isFinite(feeRaw) && feeRaw >= 0 ? feeRaw : 0);
+            : Number.isFinite(feeRaw) && feeRaw > 0
+              ? feeRaw
+              : DEFAULT_BOSTA_SHIPPING_FEE;
 
     const finalShippingAddress =
       method === 'pickup'

@@ -28,6 +28,7 @@ router.post('/:id/delay', requireRoles('admin', 'orders_manager'), ordersControl
 router.post('/:id/cancel', requireRoles('admin', 'orders_manager'), ordersController.cancelOrder);
 router.post('/:id/exchange', requireRoles('admin', 'orders_manager'), ordersController.exchangeItem);
 router.post('/:id/remove-item', requireRoles('admin', 'orders_manager'), ordersController.removeItem);
+router.post('/:id/add-item', requireRoles('admin', 'orders_manager'), ordersController.addItem);
 router.patch('/:id/shipping', requireRoles('admin', 'orders_manager'), ordersController.updateShippingAddress);
 router.post('/:id/discount', requireRoles('admin', 'orders_manager'), ordersController.applyDiscount);
 router.post('/:id/transition', requireRoles('admin', 'orders_manager', 'stock_manager'), ordersController.transitionStatus);

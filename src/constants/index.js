@@ -64,6 +64,12 @@ export const SHIPPING_METHODS = ['bosta', 'local_shipping', 'pickup'];
 export const LOCAL_SHIPPING_FEE = 95;
 
 /**
+ * Default Bosta / Shopify city shipping when a manual order has no fee entered.
+ * Matches the most common Shopify shipping_lines amount in OMS.
+ */
+export const DEFAULT_BOSTA_SHIPPING_FEE = 90;
+
+/**
  * OMS order cutover (Cairo calendar day).
  * Order lists + order-based dashboard tiles only include orders placed on/after this day.
  * Money KPIs (COD, Paymob, Bosta returns) keep the admin-selected full date range.
