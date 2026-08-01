@@ -252,10 +252,16 @@ export async function listCatalog({
 
     if (looksLikeSku || (tokens.length === 1 && /^[A-Za-z0-9-_/]+$/.test(tokens[0]) && /\d/.test(tokens[0]))) {
       const skuTerm = tokens[0] || term;
-      const contains = { $regex: escapeRegex(skuTerm), $options: 'i' };
+      // Prefix + exact only — no mid-string contains (avoids partial “fast” hits).
+      const exact = { $regex: `^${escapeRegex(skuTerm)}$`, $options: 'i' };
       const prefix = { $regex: `^${escapeRegex(skuTerm)}`, $options: 'i' };
       searchProductIds = await Variant.distinct('productId', {
-        $or: [{ sku: prefix }, { barcode: prefix }, { sku: contains }, { barcode: contains }],
+        $or: [
+          { sku: exact },
+          { barcode: exact },
+          { sku: prefix },
+          { barcode: prefix },
+        ],
       });
       productFilter._id = { $in: searchProductIds };
     } else if (tokens.length) {

@@ -420,8 +420,6 @@ export async function getPickList() {
   return Order.find({
     internalStatus: 'verified_ready_for_shipping',
     placedAt: { $gte: cutoff },
-    // Customer pickup is handled on the order / Ready-to-ship queue — not Bosta fulfillment.
-    shippingMethod: { $ne: 'pickup' },
   })
     // Newest ready-to-ship first so newly joined orders are easy to spot/select.
     .sort({ verifiedAt: -1, placedAt: -1 })

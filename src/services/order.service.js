@@ -823,7 +823,7 @@ export async function createManualOrder({
       ? 0
       : exchange
         ? exchangeShippingFee
-        : (shippingFee ?? 0);
+        : (Number.isFinite(feeRaw) && feeRaw >= 0 ? feeRaw : 0);
 
     const finalShippingAddress =
       shippingMethod === 'pickup'
@@ -848,12 +848,10 @@ export async function createManualOrder({
     const now = new Date();
 
     // Manual orders skip call-center verify:
-    // - normal / exchange / local / bosta → Ready to ship
-    // - customer pickup → Delivered immediately
+    // - normal / exchange / local / bosta / customer pickup → Ready to ship
     // - refund / return → Returning to Warehouse (track inbound)
     let initialStatus = 'verified_ready_for_shipping';
     if (customerReturn) initialStatus = 'returning_to_origin';
-    else if (isPickup) initialStatus = 'delivered';
 
     // Enrich collect lines with SKU/title from variants so Bosta policy + warehouse confirm are accurate.
     let normalizedReturnItems = [];
@@ -895,8 +893,8 @@ export async function createManualOrder({
         shippingAddress: finalShippingAddress,
         internalStatus: initialStatus,
         verifiedAt: now,
-        deliveredAt: isPickup ? now : undefined,
-        closedAt: isPickup ? now : undefined,
+        deliveredAt: undefined,
+        closedAt: undefined,
         isCreatorOrder: exchange || customerReturn ? false : Boolean(isCreatorOrder),
         isExchangeOrder: exchange,
         exchangeFromOrderId: exchange ? priorOrder._id : undefined,
@@ -918,7 +916,7 @@ export async function createManualOrder({
             note: customerReturn
               ? 'Return / refund auto-verified · Returning to Warehouse · Bosta CRP · COD 0'
               : isPickup
-                ? 'Pickup auto-verified · marked Delivered'
+                ? 'Pickup auto-verified · Ready to ship · print Gazelle policy on Fulfillment'
                 : exchange
                   ? `Exchange auto-verified · Ready to ship · shipping EGP ${finalShippingFee} · Bosta EXCHANGE`
                   : 'Manual order auto-verified · Ready to ship',
@@ -929,23 +927,10 @@ export async function createManualOrder({
       { session }
     );
 
-    let deliveryLedgerDocs = null;
-
     if (customerReturn) {
       // Inbound only — no warehouse hold. Stock increments when confirmed in warehouse.
-    } else if (isPickup) {
-      await reserveStockForOrder(order._id, orderItems, session);
-      deliveryLedgerDocs = await applyLedgerEntries(
-        buildDeliveryEntries(order._id, orderItems),
-        session
-      );
-      await Customer.updateOne(
-        { _id: customerDoc._id },
-        { $inc: { lifetimeDelivered: 1 } },
-        { session }
-      );
     } else {
-      // Ready to ship (normal, creator, exchange, local shipping, Bosta).
+      // Ready to ship (normal, creator, exchange, local, pickup, Bosta).
       await reserveStockForOrder(order._id, orderItems, session);
     }
 
@@ -959,7 +944,7 @@ export async function createManualOrder({
         note: customerReturn
           ? `Return pickup from ${manualSource} (for ${priorLabel}) · Returning to Warehouse · COD 0`
           : isPickup
-            ? `Pickup from ${manualSource} · Delivered`
+            ? `Pickup from ${manualSource} · Ready to ship`
             : exchange
               ? `Exchange from ${manualSource} (for ${priorLabel}) · Ready to ship · shipping EGP ${finalShippingFee}`
               : `Manual order from ${manualSource} · Ready to ship`,
@@ -976,19 +961,8 @@ export async function createManualOrder({
       .populate('returnFromOrderId', 'shopifyOrderId shopifyOrderName internalStatus shippingFee')
       .populate('items.variantId', 'title color size imageUrl sku realStock onHoldStock');
 
-    if (deliveryLedgerDocs) populated._ledgerDocs = deliveryLedgerDocs;
     return populated;
   });
-
-  if (manualOrder?._ledgerDocs) {
-    await afterLedgerApplied(manualOrder._ledgerDocs);
-    await checkVariantsLowStock((manualOrder.items || []).map((i) => i.variantId?._id || i.variantId));
-    try {
-      await recordDeliveryJournal(manualOrder, actorUserId);
-    } catch {
-      /* non-blocking */
-    }
-  }
 
   await notifyNewOrder(manualOrder, { source: 'manual' });
   if (!manualOrder.isReturnOrder && manualOrder.internalStatus === 'verified_ready_for_shipping') {
@@ -1153,23 +1127,32 @@ export async function listOrders({
         .lean();
       const customerIds = matchingCustomers.map((c) => c._id);
 
+      const digits = term.replace(/^#/, '').trim();
+      const withHash = digits.startsWith('#') ? digits : `#${digits}`;
+      const digitsRegex = digits ? { $regex: escapeRegex(digits), $options: 'i' } : null;
+      const hashRegex = digits ? { $regex: escapeRegex(withHash), $options: 'i' } : null;
+
       filter.$or = [
         { shopifyOrderId: regex },
+        { shopifyOrderName: regex },
         { bostaTrackingNumber: regex },
         { bostaDeliveryId: regex },
         { 'shippingAddress.fullName': regex },
         { 'shippingAddress.phone': regex },
         { 'shippingAddress.city': regex },
+        { 'items.sku': regex },
         ...(customerIds.length ? [{ customerId: { $in: customerIds } }] : []),
       ];
-      // Allow searching with a leading # (UI shows Shopify as #123…).
-      const digits = term.replace(/^#/, '').trim();
-      if (digits && digits !== term) {
-        const digitsRegex = { $regex: escapeRegex(digits), $options: 'i' };
+
+      // Order # as shown in UI (#44004) — match with/without hash on name + id.
+      if (digits && digitsRegex) {
         filter.$or.push(
           { shopifyOrderId: digitsRegex },
+          { shopifyOrderName: digitsRegex },
+          { shopifyOrderName: hashRegex },
           { bostaTrackingNumber: digitsRegex },
-          { bostaDeliveryId: digitsRegex }
+          { bostaDeliveryId: digitsRegex },
+          { 'items.sku': digitsRegex }
         );
       }
     }
