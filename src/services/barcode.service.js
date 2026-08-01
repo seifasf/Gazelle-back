@@ -52,8 +52,8 @@ export async function getVariantBarcodePng(variantId) {
   }
 
   const value = barcodeValueForVariant(variant);
-  // Wide, tall bars sized for a 5.8×4 cm sticker.
-  const png = await renderCode128Png(value, { scale: 12, height: 20, includetext: false });
+  // Slightly shorter bars so two-line product names fit on the 5.8×4 cm sticker.
+  const png = await renderCode128Png(value, { scale: 12, height: 14, includetext: false });
   return {
     png,
     value,
@@ -176,10 +176,10 @@ function buildLabelSheetHtml(labelRows) {
     .label {
       width: ${LABEL_WIDTH_MM}mm;
       height: ${LABEL_HEIGHT_MM}mm;
-      padding: 1.2mm 1.8mm 1.4mm;
+      padding: 0.8mm 1.8mm 1.2mm;
       border: 0.2mm solid #ddd;
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: center;
       overflow: hidden;
       page-break-inside: avoid;
@@ -192,24 +192,25 @@ function buildLabelSheetHtml(labelRows) {
       display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
+      justify-content: flex-start;
       text-align: center;
-      gap: 0.6mm;
+      gap: 0.5mm;
     }
     .barcode-wrap {
       width: 100%;
-      height: 23mm;
+      height: 16mm;
       display: flex;
       justify-content: center;
-      align-items: center;
-      flex: 0 0 23mm;
+      align-items: flex-start;
+      flex: 0 0 16mm;
+      margin-top: 0;
     }
     .barcode {
       width: 100%;
       max-width: 54mm;
-      height: 22mm;
+      height: 15mm;
       object-fit: fill;
-      object-position: center;
+      object-position: center top;
       image-rendering: -webkit-optimize-contrast;
       image-rendering: crisp-edges;
       display: block;
@@ -230,12 +231,17 @@ function buildLabelSheetHtml(labelRows) {
       font-family: Arial, Helvetica, sans-serif;
       font-size: 8.5pt;
       font-weight: 800;
-      line-height: 1.1;
+      line-height: 1.15;
       text-align: center;
       max-width: 100%;
+      /* Allow two lines so long product names are fully visible */
+      white-space: normal;
       overflow: hidden;
-      white-space: nowrap;
-      text-overflow: ellipsis;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      word-break: break-word;
       color: #000;
     }
     .attrs {
