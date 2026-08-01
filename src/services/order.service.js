@@ -10,6 +10,8 @@ import {
   notifyNegativeStockCrossings,
   buildHoldReserveEntries,
   buildDeliveryEntries,
+  buildDeliveryStockEntries,
+  buildMissingHoldEntries,
   buildPreDeliveryReleaseEntries,
   buildPostDeliveryReturnEntries,
   buildManualAdjustmentEntry,
@@ -184,6 +186,9 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
 
     if (fresh.orderSource === 'manual') {
       await reserveStockForOrder(fresh._id, fresh.items, session);
+    } else {
+      // Shopify already reserves at ingest — top up if hold is missing.
+      await ensureOrderStockHeld(fresh._id, fresh.items, session);
     }
 
     await transitionOrder(
@@ -291,15 +296,16 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
 }
 
 async function executeDelivered(order, { source, actorUserId, note }, session) {
-  const ledgerEntries = buildDeliveryEntries(order._id, order.items);
+  // Release remaining hold for this order + always decrement warehouse stock.
+  const ledgerEntries = await buildDeliveryStockEntries(order._id, order.items, session);
   let ledgerDocs = [];
   try {
-    ledgerDocs = await applyLedgerEntries(ledgerEntries, session);
+    if (ledgerEntries.length) {
+      ledgerDocs = await applyLedgerEntries(ledgerEntries, session);
+    }
   } catch (err) {
-    // Historical Shopify imports / Bosta backfill often never reserved hold stock.
-    // Still mark delivered so COD + courier status stay truthful; log the inventory gap.
+    // Historical imports / courier backfill: still mark delivered; log inventory gap.
     if (source === 'bosta_webhook' || source === 'shopify_import') {
-      const logger = (await import('../utils/logger.js')).default;
       logger.warn(
         { err: err.message, orderId: order._id, source },
         'Delivery stock ledger skipped (insufficient stock) — status still applied'
@@ -496,10 +502,15 @@ export async function releaseOutOfStockOrdersIfRestocked(
     if (!fullyStocked) continue;
 
     try {
-      await transitionOrderStatus(order._id, 'verified_ready_for_shipping', {
-        source: 'system',
-        actorUserId,
-        note: releaseNote,
+      await withTransaction(async (session) => {
+        const fresh = await Order.findById(order._id).session(session);
+        if (!fresh || fresh.internalStatus !== 'out_of_stock') return;
+        await ensureOrderStockHeld(fresh._id, fresh.items, session);
+        await transitionOrder(fresh, 'verified_ready_for_shipping', {
+          source: 'system',
+          actorUserId,
+          note: releaseNote,
+        }, session);
       });
       released.push(String(order._id));
     } catch (err) {
@@ -533,6 +544,10 @@ export async function transitionOrderStatus(orderId, toStatus, meta) {
       return executeDelivered(order, meta, session);
     }
 
+    if (toStatus === 'verified_ready_for_shipping') {
+      await ensureOrderStockHeld(order._id, order.items, session);
+    }
+
     await transitionOrder(order, toStatus, meta, session);
     return Order.findById(orderId).session(session);
   });
@@ -553,6 +568,13 @@ export async function transitionOrderStatus(orderId, toStatus, meta) {
 
 export async function reserveStockForOrder(orderId, items, session) {
   const entries = buildHoldReserveEntries(orderId, items);
+  return applyLedgerEntries(entries, session);
+}
+
+/** Top up on_hold for any units not already reserved against this order. */
+export async function ensureOrderStockHeld(orderId, items, session) {
+  const entries = await buildMissingHoldEntries(orderId, items, session);
+  if (!entries.length) return [];
   return applyLedgerEntries(entries, session);
 }
 
@@ -1440,6 +1462,7 @@ export default {
   confirmReturnedToStock,
   transitionOrderStatus,
   reserveStockForOrder,
+  ensureOrderStockHeld,
   manualStockAdjustment,
   stockIntake,
   setRealStockBatch,

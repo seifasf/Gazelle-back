@@ -2,6 +2,7 @@ import Variant from '../models/Variant.js';
 import InventoryLedger from '../models/InventoryLedger.js';
 import { LEDGER_TYPES } from '../constants/index.js';
 import logger from '../utils/logger.js';
+import mongoose from 'mongoose';
 
 const STOCK_FIELD_MAP = {
   on_hold_reserve: 'onHoldStock',
@@ -11,6 +12,23 @@ const STOCK_FIELD_MAP = {
   real_stock_increment_return: 'realStock',
   online_stock_increment_api: 'onlineStock',
 };
+
+/**
+ * Net ledger quantity for an order line (sum of quantityDelta for given types).
+ */
+export async function netOrderLedgerQty(orderId, variantId, ledgerTypes, session = null) {
+  if (!orderId || !variantId) return 0;
+  const match = {
+    orderId: new mongoose.Types.ObjectId(String(orderId)),
+    variantId: new mongoose.Types.ObjectId(String(variantId)),
+    ledgerType: { $in: ledgerTypes },
+  };
+  const pipeline = [{ $match: match }, { $group: { _id: null, net: { $sum: '$quantityDelta' } } }];
+  const rows = session
+    ? await InventoryLedger.aggregate(pipeline).session(session)
+    : await InventoryLedger.aggregate(pipeline);
+  return Number(rows[0]?.net) || 0;
+}
 
 /**
  * Apply a single ledger entry and update the corresponding variant stock field.
@@ -132,6 +150,7 @@ export function buildHoldReserveEntries(orderId, items) {
 
 /**
  * Release on_hold and decrement real_stock on delivery.
+ * Prefer buildDeliveryStockEntries (idempotent / partial-hold safe) for live deliveries.
  */
 export function buildDeliveryEntries(orderId, items) {
   const entries = [];
@@ -148,6 +167,76 @@ export function buildDeliveryEntries(orderId, items) {
       ledgerType: 'real_stock_decrement',
       quantityDelta: -item.quantity,
     });
+  }
+  return entries;
+}
+
+/**
+ * Build delivery ledger entries that:
+ * - release only remaining hold for this order line
+ * - always decrement real stock for any units not already decremented
+ */
+export async function buildDeliveryStockEntries(orderId, items, session) {
+  const entries = [];
+  for (const item of items || []) {
+    const qty = Number(item.quantity) || 0;
+    if (qty < 1 || !item.variantId) continue;
+
+    const netHold = await netOrderLedgerQty(
+      orderId,
+      item.variantId,
+      ['on_hold_reserve', 'on_hold_release'],
+      session
+    );
+    const releaseQty = Math.min(qty, Math.max(0, netHold));
+    if (releaseQty > 0) {
+      entries.push({
+        variantId: item.variantId,
+        orderId,
+        ledgerType: 'on_hold_release',
+        quantityDelta: -releaseQty,
+      });
+    }
+
+    const alreadyDec = Math.abs(
+      await netOrderLedgerQty(orderId, item.variantId, ['real_stock_decrement'], session)
+    );
+    const needDec = Math.max(0, qty - alreadyDec);
+    if (needDec > 0) {
+      entries.push({
+        variantId: item.variantId,
+        orderId,
+        ledgerType: 'real_stock_decrement',
+        quantityDelta: -needDec,
+      });
+    }
+  }
+  return entries;
+}
+
+/**
+ * Ensure ready-to-ship lines have matching on_hold_reserve (top up missing qty only).
+ */
+export async function buildMissingHoldEntries(orderId, items, session) {
+  const entries = [];
+  for (const item of items || []) {
+    const qty = Number(item.quantity) || 0;
+    if (qty < 1 || !item.variantId) continue;
+    const netHold = await netOrderLedgerQty(
+      orderId,
+      item.variantId,
+      ['on_hold_reserve', 'on_hold_release'],
+      session
+    );
+    const need = Math.max(0, qty - Math.max(0, netHold));
+    if (need > 0) {
+      entries.push({
+        variantId: item.variantId,
+        orderId,
+        ledgerType: 'on_hold_reserve',
+        quantityDelta: need,
+      });
+    }
   }
   return entries;
 }
@@ -202,8 +291,11 @@ export function buildStockIntakeEntries({ variantId, quantityDelta, reasonCode, 
 export default {
   applyLedgerEntries,
   notifyNegativeStockCrossings,
+  netOrderLedgerQty,
   buildHoldReserveEntries,
   buildDeliveryEntries,
+  buildDeliveryStockEntries,
+  buildMissingHoldEntries,
   buildPreDeliveryReleaseEntries,
   buildPostDeliveryReturnEntries,
   buildManualAdjustmentEntry,
