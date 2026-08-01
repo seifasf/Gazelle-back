@@ -2,6 +2,7 @@ import Order from '../models/Order.js';
 import Variant from '../models/Variant.js';
 import { withTransaction } from '../utils/transaction.js';
 import { applyLedgerEntries } from './inventory.service.js';
+import { syncShopifySellableAfterLedger } from './order.service.js';
 
 const EDITABLE = [
   'pending_verification',
@@ -53,7 +54,7 @@ export async function processExchange(orderId, actorUserId, { fromItemId, toVari
     throw err;
   }
 
-  return withTransaction(async (session) => {
+  const result = await withTransaction(async (session) => {
     const order = await Order.findById(orderId).session(session);
     if (!order) {
       const err = new Error('Order not found');
@@ -92,7 +93,7 @@ export async function processExchange(orderId, actorUserId, { fromItemId, toVari
 
     const previousSku = item.sku;
 
-    await applyLedgerEntries(
+    const ledgerDocs = await applyLedgerEntries(
       [
         {
           variantId: item.variantId,
@@ -126,8 +127,11 @@ export async function processExchange(orderId, actorUserId, { fromItemId, toVari
     });
 
     await order.save({ session });
-    return order;
+    return { order, ledgerDocs };
   });
+
+  await syncShopifySellableAfterLedger(result.ledgerDocs);
+  return result.order;
 }
 
 /**
@@ -144,7 +148,7 @@ export async function removeOrderItem(orderId, actorUserId, { itemId, note, quan
     throw err;
   }
 
-  return withTransaction(async (session) => {
+  const result = await withTransaction(async (session) => {
     const order = await Order.findById(orderId).session(session);
     if (!order) {
       const err = new Error('Order not found');
@@ -185,8 +189,9 @@ export async function removeOrderItem(orderId, actorUserId, { itemId, note, quan
     const variant = await Variant.findById(item.variantId).session(session);
     const onHold = Number(variant?.onHoldStock) || 0;
     const releaseQty = Math.min(removeQty, onHold);
+    let ledgerDocs = [];
     if (releaseQty > 0) {
-      await applyLedgerEntries(
+      ledgerDocs = await applyLedgerEntries(
         [
           {
             variantId: item.variantId,
@@ -215,8 +220,11 @@ export async function removeOrderItem(orderId, actorUserId, { itemId, note, quan
     });
 
     await order.save({ session });
-    return order;
+    return { order, ledgerDocs };
   });
+
+  await syncShopifySellableAfterLedger(result.ledgerDocs);
+  return result.order;
 }
 
 /**
@@ -243,7 +251,7 @@ export async function addOrderItem(orderId, actorUserId, { variantId, quantity =
     throw err;
   }
 
-  return withTransaction(async (session) => {
+  const result = await withTransaction(async (session) => {
     const order = await Order.findById(orderId).session(session);
     if (!order) {
       const err = new Error('Order not found');
@@ -267,7 +275,7 @@ export async function addOrderItem(orderId, actorUserId, { variantId, quantity =
       throw err;
     }
 
-    await applyLedgerEntries(
+    const ledgerDocs = await applyLedgerEntries(
       [
         {
           variantId: variant._id,
@@ -306,8 +314,11 @@ export async function addOrderItem(orderId, actorUserId, { variantId, quantity =
     });
 
     await order.save({ session });
-    return order;
+    return { order, ledgerDocs };
   });
+
+  await syncShopifySellableAfterLedger(result.ledgerDocs);
+  return result.order;
 }
 
 export default { processExchange, removeOrderItem, addOrderItem };

@@ -125,6 +125,11 @@ async function afterLedgerApplied(ledgerDocs) {
   await enqueueShopifySync(ledgerDocs);
 }
 
+/** Public: push Shopify sellable (real − hold) after hold/real ledger commits. */
+export async function syncShopifySellableAfterLedger(ledgerDocs) {
+  return afterLedgerApplied(ledgerDocs);
+}
+
 export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCogsSnapshot, shippingMethod }) {
   const order = await Order.findById(orderId).populate('items.variantId');
   if (!order) {
@@ -203,11 +208,12 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
       { session }
     );
 
+    let ledgerDocs = [];
     if (fresh.orderSource === 'manual') {
-      await reserveStockForOrder(fresh._id, fresh.items, session);
+      ledgerDocs = await reserveStockForOrder(fresh._id, fresh.items, session);
     } else {
       // Shopify already reserves at ingest — top up if hold is missing.
-      await ensureOrderStockHeld(fresh._id, fresh.items, session);
+      ledgerDocs = await ensureOrderStockHeld(fresh._id, fresh.items, session);
     }
 
     await transitionOrder(
@@ -216,9 +222,12 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
       { source: 'user_action', actorUserId, note },
       session
     );
-    return Order.findById(orderId).session(session);
+    const updated = await Order.findById(orderId).session(session);
+    updated._ledgerDocs = ledgerDocs;
+    return updated;
   });
 
+  await afterLedgerApplied(verified?._ledgerDocs);
   await notifyOrderVerified(verified);
   return verified;
 }
@@ -521,17 +530,22 @@ export async function releaseOutOfStockOrdersIfRestocked(
     if (!fullyStocked) continue;
 
     try {
-      await withTransaction(async (session) => {
+      let ledgerDocs = [];
+      const didRelease = await withTransaction(async (session) => {
         const fresh = await Order.findById(order._id).session(session);
-        if (!fresh || fresh.internalStatus !== 'out_of_stock') return;
-        await ensureOrderStockHeld(fresh._id, fresh.items, session);
+        if (!fresh || fresh.internalStatus !== 'out_of_stock') return false;
+        ledgerDocs = await ensureOrderStockHeld(fresh._id, fresh.items, session);
         await transitionOrder(fresh, 'verified_ready_for_shipping', {
           source: 'system',
           actorUserId,
           note: releaseNote,
         }, session);
+        return true;
       });
-      released.push(String(order._id));
+      if (didRelease) {
+        await afterLedgerApplied(ledgerDocs);
+        released.push(String(order._id));
+      }
     } catch (err) {
       logger.warn(
         { err: err?.message || err, orderId: String(order._id) },
@@ -563,15 +577,18 @@ export async function transitionOrderStatus(orderId, toStatus, meta) {
       return executeDelivered(order, meta, session);
     }
 
+    let ledgerDocs = [];
     if (toStatus === 'verified_ready_for_shipping') {
-      await ensureOrderStockHeld(order._id, order.items, session);
+      ledgerDocs = await ensureOrderStockHeld(order._id, order.items, session);
     }
 
     await transitionOrder(order, toStatus, meta, session);
-    return Order.findById(orderId).session(session);
+    const fresh = await Order.findById(orderId).session(session);
+    fresh._ledgerDocs = ledgerDocs;
+    return fresh;
   });
 
-  if (toStatus === 'delivered') {
+  if (toStatus === 'delivered' || toStatus === 'verified_ready_for_shipping') {
     await afterLedgerApplied(updated?._ledgerDocs);
   }
   if (toStatus === 'verified_ready_for_shipping') await notifyOrderVerified(updated);
@@ -808,6 +825,7 @@ export async function createManualOrder({
       : items;
 
   const manualOrder = await withTransaction(async (session) => {
+    let populatedLedger = [];
     let priorOrder = null;
     const priorId = exchange ? exchangeFromOrderId : customerReturn ? returnFromOrderId : null;
     if (priorId) {
@@ -996,7 +1014,8 @@ export async function createManualOrder({
       // Inbound only — no warehouse hold. Stock increments when confirmed in warehouse.
     } else {
       // Ready to ship (normal, creator, exchange, local, pickup, Bosta).
-      await reserveStockForOrder(order._id, orderItems, session);
+      const ledgerDocs = await reserveStockForOrder(order._id, orderItems, session);
+      populatedLedger = ledgerDocs;
     }
 
     await recordStatusChange(
@@ -1026,9 +1045,11 @@ export async function createManualOrder({
       .populate('returnFromOrderId', 'shopifyOrderId shopifyOrderName internalStatus shippingFee')
       .populate('items.variantId', 'title color size imageUrl sku realStock onHoldStock');
 
+    populated._ledgerDocs = populatedLedger;
     return populated;
   });
 
+  await afterLedgerApplied(manualOrder?._ledgerDocs);
   await notifyNewOrder(manualOrder, { source: 'manual' });
   if (!manualOrder.isReturnOrder && manualOrder.internalStatus === 'verified_ready_for_shipping') {
     try {
@@ -1515,4 +1536,5 @@ export default {
   delayOrder,
   processDelayCallbacksDue,
   applyOrderDiscount,
+  syncShopifySellableAfterLedger,
 };

@@ -4,7 +4,7 @@ import Product from '../models/Product.js';
 import WebhookReceipt from '../models/WebhookReceipt.js';
 import { withTransaction } from '../utils/transaction.js';
 import { findOrCreateCustomer } from '../services/customer.service.js';
-import { reserveStockForOrder, cancelOrder } from '../services/order.service.js';
+import { reserveStockForOrder, cancelOrder, syncShopifySellableAfterLedger } from '../services/order.service.js';
 import { notifyNewOrder } from '../services/notification.service.js';
 import OrderStatusHistory from '../models/OrderStatusHistory.js';
 import { reportOnlineStockDrift } from '../services/discrepancy.service.js';
@@ -118,6 +118,7 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
   const onlinePaid = paymentMethod === 'online' && isShopifyOrderPaid(payload);
 
   const order = await withTransaction(async (session) => {
+    let ledgerDocs = [];
     const [created] = await Order.create(
       [
         {
@@ -152,7 +153,7 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
     );
 
     if (shouldReserve) {
-      await reserveStockForOrder(created._id, created.items, session);
+      ledgerDocs = await reserveStockForOrder(created._id, created.items, session);
     }
 
     await OrderStatusHistory.create(
@@ -168,15 +169,17 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
       { session }
     );
 
-    return created;
+    return { order: created, ledgerDocs };
   });
+
+  await syncShopifySellableAfterLedger(order.ledgerDocs);
 
   // Only alert on genuine real-time orders — bulk imports must not spam the feed.
   if (source === 'shopify_webhook' && internalStatus === 'pending_verification') {
-    await notifyNewOrder(order, { source: 'shopify' });
+    await notifyNewOrder(order.order, { source: 'shopify' });
   }
 
-  return order;
+  return order.order;
 }
 
 export async function handleOrdersCancelled(payload) {
