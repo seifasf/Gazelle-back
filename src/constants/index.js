@@ -60,6 +60,9 @@ export const MANUAL_ORDER_SOURCES = [
 
 export const SHIPPING_METHODS = ['bosta', 'local_shipping', 'pickup'];
 
+/** Fixed courier fee for Gazelle local shipping (EGP). */
+export const LOCAL_SHIPPING_FEE = 95;
+
 /**
  * OMS order cutover (Cairo calendar day).
  * Order lists + order-based dashboard tiles only include orders placed on/after this day.

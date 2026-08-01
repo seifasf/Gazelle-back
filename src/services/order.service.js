@@ -15,9 +15,14 @@ import {
   buildManualAdjustmentEntry,
   buildStockIntakeEntries,
 } from './inventory.service.js';
-import { TERMINAL_ORDER_STATUSES, ORDER_STATUSES, ORDERS_PLACED_FROM_YMD } from '../constants/index.js';
+import {
+  TERMINAL_ORDER_STATUSES,
+  ORDER_STATUSES,
+  ORDERS_PLACED_FROM_YMD,
+  LOCAL_SHIPPING_FEE,
+  JOB_NAMES,
+} from '../constants/index.js';
 import { getAgenda } from '../config/agenda.js';
-import { JOB_NAMES } from '../constants/index.js';
 import {
   notifyOrderVerified,
   notifyFailedDelivery,
@@ -158,7 +163,14 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
     fresh.verificationLog.push({ outcome, note, actorUserId });
     if (totalCogsSnapshot != null) fresh.totalCogsSnapshot = totalCogsSnapshot;
     if (!fresh.assignedOrdersManagerId) fresh.assignedOrdersManagerId = actorUserId;
-    if (shippingMethod) fresh.shippingMethod = shippingMethod;
+    if (shippingMethod) {
+      fresh.shippingMethod = shippingMethod;
+      if (shippingMethod === 'local_shipping') {
+        fresh.shippingFee = LOCAL_SHIPPING_FEE;
+      } else if (shippingMethod === 'pickup') {
+        fresh.shippingFee = 0;
+      }
+    }
     fresh.delayedUntil = undefined;
     fresh.delayNote = undefined;
     fresh.delayNotifiedOn = undefined;
@@ -819,14 +831,19 @@ export async function createManualOrder({
       feeRaw != null && Number.isFinite(feeRaw) && feeRaw >= 0
         ? feeRaw
         : Number(priorOrder?.shippingFee) || 0;
+    const method = shippingMethod || 'bosta';
     const finalShippingFee = customerReturn
       ? 0
       : exchange
         ? exchangeShippingFee
-        : (Number.isFinite(feeRaw) && feeRaw >= 0 ? feeRaw : 0);
+        : method === 'local_shipping'
+          ? LOCAL_SHIPPING_FEE
+          : method === 'pickup'
+            ? 0
+            : (Number.isFinite(feeRaw) && feeRaw >= 0 ? feeRaw : 0);
 
     const finalShippingAddress =
-      shippingMethod === 'pickup'
+      method === 'pickup'
         ? undefined
         : {
             ...(shippingAddress || {}),
@@ -843,7 +860,6 @@ export async function createManualOrder({
         ? `Return pickup for ${priorLabel}`
         : null;
 
-    const method = shippingMethod || 'bosta';
     const isPickup = method === 'pickup' && !exchange && !customerReturn;
     const now = new Date();
 
