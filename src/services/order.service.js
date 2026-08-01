@@ -1383,8 +1383,55 @@ export async function applyOrderDiscount(orderId, actorUserId, { percent }) {
   return order;
 }
 
+/**
+ * Apply the same verify/cancel outcome to many orders (queue bulk actions).
+ * Each order is processed independently; failures are collected, not fatal for the batch.
+ */
+export async function bulkVerifyOrders(orderIds, actorUserId, { outcome, note, shippingMethod } = {}) {
+  if (!Array.isArray(orderIds) || orderIds.length === 0) {
+    const err = new Error('Select at least one order');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!['confirmed', 'no_response', 'customer_cancelled'].includes(outcome)) {
+    const err = new Error('outcome must be confirmed, no_response, or customer_cancelled');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const uniqueIds = [...new Set(orderIds.map((id) => String(id)).filter(Boolean))];
+  if (uniqueIds.length > 100) {
+    const err = new Error('Maximum 100 orders per bulk action');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const results = { ok: [], failed: [] };
+  const resolvedNote =
+    (note && String(note).trim()) ||
+    (outcome === 'customer_cancelled' ? 'Bulk cancel from verification queue' : undefined);
+
+  for (const id of uniqueIds) {
+    try {
+      const body = { outcome };
+      if (resolvedNote) body.note = resolvedNote;
+      if (shippingMethod && outcome === 'confirmed') body.shippingMethod = shippingMethod;
+      await verifyOrder(id, actorUserId, body);
+      results.ok.push(id);
+    } catch (err) {
+      results.failed.push({
+        id,
+        message: err.message || 'Failed',
+      });
+    }
+  }
+
+  return results;
+}
+
 export default {
   verifyOrder,
+  bulkVerifyOrders,
   cancelOrder,
   markDelivered,
   confirmReturnedToStock,

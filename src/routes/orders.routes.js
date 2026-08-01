@@ -15,6 +15,7 @@ router.get(
   ordersController.findExchangeOrder
 );
 router.get('/', requireRoles('admin', 'orders_manager', 'stock_manager'), ordersController.listOrders);
+router.post('/bulk-verify', requireRoles('admin', 'orders_manager'), ordersController.bulkVerifyOrders);
 router.get('/:id', requireRoles('admin', 'orders_manager', 'stock_manager'), ordersController.getOrder);
 router.get(
   '/:id/history',

@@ -96,6 +96,20 @@ export async function verifyOrder(req, res, next) {
   }
 }
 
+export async function bulkVerifyOrders(req, res, next) {
+  try {
+    const { orderIds, outcome, note, shippingMethod } = req.body || {};
+    const results = await orderService.bulkVerifyOrders(orderIds, req.user._id, {
+      outcome,
+      note,
+      shippingMethod,
+    });
+    res.json({ data: results });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function cancelOrder(req, res, next) {
   try {
     const order = await orderService.cancelOrder(req.params.id, req.user._id, req.body);
@@ -242,6 +256,7 @@ export default {
   findExchangeOrder,
   getOrder,
   verifyOrder,
+  bulkVerifyOrders,
   cancelOrder,
   confirmReturn,
   getStatusHistory,
