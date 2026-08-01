@@ -4,6 +4,7 @@ import { config } from '../../config/index.js';
 import logger from '../../utils/logger.js';
 import { inventorySetQuantities } from './mutations/inventorySet.js';
 import { fetchLocations } from './queries/locations.js';
+import { assertShopifyInventoryWriteAllowed } from './writePolicy.js';
 
 const BATCH_SIZE = 25;
 
@@ -12,13 +13,22 @@ function isRealShopifyInventoryItem(id) {
 }
 
 /**
- * Push OMS warehouse realStock → Shopify available (absolute set).
- * Also updates local onlineStock to match what we pushed.
- * One-shot / admin-triggered — does not change ongoing write policy.
+ * Sellable units on Shopify = warehouse real − OMS holds.
  */
-export async function pushWarehouseStockToShopify({ dryRun = false } = {}) {
-  const settings = await Settings.findOne({ key: 'global' }).lean();
+export function shopifyAvailableFromVariant(variant) {
+  const real = Number(variant?.realStock) || 0;
+  const hold = Math.max(0, Number(variant?.onHoldStock) || 0);
+  return Math.max(0, Math.round(real - hold));
+}
+
+export async function resolveShopifyLocationId() {
+  const settings = await Settings.findOne({ key: 'global' });
   let locationId = settings?.shopifyLocationId || config.SHOPIFY_LOCATION_ID || null;
+
+  // Ignore placeholder / test location ids from older setups.
+  if (!locationId || /\/Location\/test$/i.test(String(locationId))) {
+    locationId = null;
+  }
 
   if (!locationId) {
     const locations = await fetchLocations();
@@ -27,7 +37,7 @@ export async function pushWarehouseStockToShopify({ dryRun = false } = {}) {
     if (locationId) {
       await Settings.findOneAndUpdate(
         { key: 'global' },
-        { shopifyLocationId: locationId },
+        { $set: { shopifyLocationId: locationId } },
         { upsert: true }
       );
     }
@@ -38,22 +48,78 @@ export async function pushWarehouseStockToShopify({ dryRun = false } = {}) {
     err.statusCode = 400;
     throw err;
   }
+  return locationId;
+}
+
+/**
+ * Push one variant's sellable qty (real − hold) to Shopify available.
+ */
+export async function syncVariantAvailableToShopify(variantId) {
+  await assertShopifyInventoryWriteAllowed();
+
+  const variant = await Variant.findById(variantId);
+  if (!variant) {
+    const err = new Error('Variant not found');
+    err.statusCode = 404;
+    throw err;
+  }
+  if (!isRealShopifyInventoryItem(variant.shopifyInventoryItemId)) {
+    return { skipped: true, reason: 'no_shopify_inventory_item', sku: variant.sku };
+  }
+
+  const locationId = await resolveShopifyLocationId();
+  const target = shopifyAvailableFromVariant(variant);
+
+  const result = await inventorySetQuantities({
+    locationId,
+    quantities: [
+      {
+        inventoryItemId: variant.shopifyInventoryItemId,
+        quantity: target,
+      },
+    ],
+    reason: 'correction',
+    referenceDocumentUri: `gid://gazelle/VariantSync/${variant._id}/${Date.now()}`,
+  });
+
+  const userErrors = result?.inventorySetQuantities?.userErrors || [];
+  if (userErrors.length) {
+    const err = new Error(userErrors.map((e) => e.message).join('; '));
+    err.statusCode = 400;
+    throw err;
+  }
+
+  variant.onlineStock = target;
+  variant.shopifyAvailable = target > 0;
+  variant.lastSyncedAt = new Date();
+  await variant.save();
+
+  return { sku: variant.sku, available: target, locationId };
+}
+
+/**
+ * Push OMS sellable stock (real − hold) → Shopify available for the catalog.
+ */
+export async function pushWarehouseStockToShopify({ dryRun = false } = {}) {
+  await assertShopifyInventoryWriteAllowed();
+  const locationId = await resolveShopifyLocationId();
 
   const variants = await Variant.find({})
-    .select('sku realStock onlineStock shopifyInventoryItemId shopifyVariantId')
+    .select('sku realStock onHoldStock onlineStock shopifyInventoryItemId shopifyVariantId')
     .lean();
 
   const eligible = variants.filter((v) => isRealShopifyInventoryItem(v.shopifyInventoryItemId));
   const skipped = variants.length - eligible.length;
 
   const plan = eligible.map((v) => {
-    const target = Math.max(0, Math.round(Number(v.realStock) || 0));
+    const target = shopifyAvailableFromVariant(v);
     return {
       variantId: String(v._id),
       sku: v.sku,
       inventoryItemId: v.shopifyInventoryItemId,
       previousOnline: v.onlineStock ?? 0,
       warehouse: v.realStock ?? 0,
+      onHold: v.onHoldStock ?? 0,
       target,
       changed: target !== (v.onlineStock ?? 0),
     };
@@ -119,7 +185,6 @@ export async function pushWarehouseStockToShopify({ dryRun = false } = {}) {
       logger.error({ err, batch: i }, 'Shopify warehouse stock push batch failed');
     }
 
-    // gentle pacing between batches
     await new Promise((r) => setTimeout(r, 350));
   }
 
@@ -135,4 +200,9 @@ export async function pushWarehouseStockToShopify({ dryRun = false } = {}) {
   };
 }
 
-export default { pushWarehouseStockToShopify };
+export default {
+  shopifyAvailableFromVariant,
+  resolveShopifyLocationId,
+  syncVariantAvailableToShopify,
+  pushWarehouseStockToShopify,
+};

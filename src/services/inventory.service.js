@@ -243,7 +243,7 @@ export async function buildMissingHoldEntries(orderId, items, session) {
 
 /**
  * Pre-delivery cancel / failed delivery: release hold only.
- * Shopify inventory is brand-owned — OMS does not restore online stock.
+ * Shopify available rises when hold drops (synced after ledger apply).
  */
 export function buildPreDeliveryReleaseEntries(orderId, items) {
   return items.map((item) => ({
@@ -255,7 +255,7 @@ export function buildPreDeliveryReleaseEntries(orderId, items) {
 }
 
 /**
- * Post-delivery return: increment warehouse real stock only.
+ * Post-delivery return / refund received at warehouse: +real stock (then Shopify sync).
  */
 export function buildPostDeliveryReturnEntries(orderId, items) {
   return items.map((item) => ({

@@ -84,20 +84,39 @@ async function transitionOrder(order, toStatus, meta, session) {
 }
 
 async function enqueueShopifySync(ledgerDocs) {
-  // Open-stock mode: OMS does not push inventory to Shopify (brand-owned).
-  // Kept as a no-op-safe helper for any leftover pending online ledger rows.
-  const pending = (ledgerDocs || []).filter(
-    (doc) => doc.ledgerType === 'online_stock_increment_api' && doc.shopifySyncStatus === 'pending'
-  );
-  if (pending.length === 0) return;
+  const docs = Array.isArray(ledgerDocs) ? ledgerDocs : [];
+  const variantIds = [
+    ...new Set(
+      docs
+        .map((d) => (d?.variantId != null ? String(d.variantId) : null))
+        .filter(Boolean)
+    ),
+  ];
+  if (!variantIds.length) return;
 
-  try {
-    const agenda = getAgenda();
-    for (const doc of pending) {
-      await agenda.now(JOB_NAMES.SHOPIFY_OUTBOUND_INVENTORY, { ledgerId: doc._id.toString() });
+  // Prefer immediate sync so returns / deliveries update Shopify without waiting on Agenda.
+  const { syncVariantAvailableToShopify } = await import(
+    '../integrations/shopify/pushWarehouseStock.service.js'
+  );
+  const { getShopifyWritePolicy } = await import('../integrations/shopify/writePolicy.js');
+  const policy = await getShopifyWritePolicy();
+  if (policy !== 'full') return;
+
+  for (const variantId of variantIds) {
+    try {
+      await syncVariantAvailableToShopify(variantId);
+    } catch (err) {
+      logger.warn(
+        { err: err?.message || err, variantId },
+        'Immediate Shopify stock sync failed — queueing retry'
+      );
+      try {
+        const agenda = getAgenda();
+        await agenda.now(JOB_NAMES.SHOPIFY_OUTBOUND_INVENTORY, { variantId });
+      } catch {
+        // Agenda may not be initialized in scripts/tests
+      }
     }
-  } catch {
-    // Agenda may not be initialized in tests
   }
 }
 

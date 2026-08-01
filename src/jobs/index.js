@@ -5,13 +5,10 @@ import { syncOrderStatesFromBosta } from '../integrations/bosta/orderStates.serv
 import { syncCatalog } from '../integrations/shopify/sync.service.js';
 import { importShopifyOrdersSince } from '../integrations/shopify/setup.service.js';
 import InventoryLedger from '../models/InventoryLedger.js';
-import Variant from '../models/Variant.js';
 import Order from '../models/Order.js';
 import Settings from '../models/Settings.js';
 import WebhookReceipt from '../models/WebhookReceipt.js';
-import { inventoryAdjustQuantities } from '../integrations/shopify/mutations/inventoryAdjust.js';
 import { assertShopifyInventoryWriteAllowed } from '../integrations/shopify/writePolicy.js';
-import { config } from '../config/index.js';
 import { JOB_NAMES } from '../constants/index.js';
 import { checkRestockNeeded, checkSlowMovers } from '../services/adminJobs.service.js';
 import logger from '../utils/logger.js';
@@ -52,11 +49,10 @@ export function registerJobs(agenda) {
   });
 
   agenda.define(JOB_NAMES.SHOPIFY_OUTBOUND_INVENTORY, async (job) => {
-    // Open-stock mode: OMS never pushes warehouse stock to Shopify unless policy=full.
+    const { variantId, ledgerId } = job.attrs.data || {};
     try {
       await assertShopifyInventoryWriteAllowed();
     } catch {
-      const { ledgerId } = job.attrs.data || {};
       if (ledgerId) {
         await InventoryLedger.updateOne(
           { _id: ledgerId, shopifySyncStatus: 'pending' },
@@ -66,33 +62,33 @@ export function registerJobs(agenda) {
       return;
     }
 
-    const { ledgerId } = job.attrs.data;
-    const ledger = await InventoryLedger.findById(ledgerId);
-    if (!ledger || ledger.shopifySyncStatus === 'synced') return;
+    const { syncVariantAvailableToShopify } = await import(
+      '../integrations/shopify/pushWarehouseStock.service.js'
+    );
 
-    const variant = await Variant.findById(ledger.variantId);
-    if (!variant) throw new Error('Variant not found for ledger sync');
-
-    const settings = await Settings.findOne({ key: 'global' });
-    const locationId = settings?.shopifyLocationId || config.SHOPIFY_LOCATION_ID;
-    if (!locationId) throw new Error('Shopify location ID not configured');
+    let id = variantId;
+    if (!id && ledgerId) {
+      const ledger = await InventoryLedger.findById(ledgerId);
+      if (!ledger) return;
+      id = String(ledger.variantId);
+    }
+    if (!id) return;
 
     try {
-      await inventoryAdjustQuantities({
-        inventoryItemId: variant.shopifyInventoryItemId,
-        locationId,
-        delta: ledger.quantityDelta,
-        idempotencyKey: ledger._id.toString(),
-      });
-
-      ledger.shopifySyncStatus = 'synced';
-      variant.onlineStock += ledger.quantityDelta;
-      await variant.save();
-      await ledger.save();
+      await syncVariantAvailableToShopify(id);
+      if (ledgerId) {
+        await InventoryLedger.updateOne(
+          { _id: ledgerId },
+          { $set: { shopifySyncStatus: 'synced', shopifySyncError: null } }
+        );
+      }
     } catch (error) {
-      ledger.shopifySyncStatus = 'failed';
-      ledger.shopifySyncError = error.message;
-      await ledger.save();
+      if (ledgerId) {
+        await InventoryLedger.updateOne(
+          { _id: ledgerId },
+          { $set: { shopifySyncStatus: 'failed', shopifySyncError: error.message } }
+        );
+      }
       throw error;
     }
   });
