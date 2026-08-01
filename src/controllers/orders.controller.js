@@ -28,7 +28,17 @@ function clampStatusFilterForRole(role, status) {
 
 export async function listOrders(req, res, next) {
   try {
-    const { status, limit, skip, search, orderSource, shippingMethod, isExchangeOrder, isReturnOrder } = req.query;
+    const {
+      status,
+      limit,
+      skip,
+      search,
+      orderSource,
+      shippingMethod,
+      isExchangeOrder,
+      isReturnOrder,
+      delayed,
+    } = req.query;
     const statusFilter = clampStatusFilterForRole(req.user.role, status);
 
     const result = await orderService.listOrders({
@@ -38,8 +48,10 @@ export async function listOrders(req, res, next) {
       shippingMethod,
       isExchangeOrder,
       isReturnOrder,
+      delayed,
       limit: Number(limit) || 50,
       skip: Number(skip) || 0,
+      sort: delayed === '1' || delayed === 'true' ? { delayedUntil: 1 } : undefined,
     });
     res.json(result);
   } catch (err) {

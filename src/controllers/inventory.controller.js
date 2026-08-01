@@ -120,7 +120,7 @@ export async function stockIntakeBatch(req, res, next) {
   }
 }
 
-/** Set absolute warehouse realStock for many variants (no Shopify write). */
+/** Set absolute warehouse realStock for many variants; syncs sellable qty to Shopify when policy is full. */
 export async function stockSetBatch(req, res, next) {
   try {
     const { items, reasonCode } = req.body || {};

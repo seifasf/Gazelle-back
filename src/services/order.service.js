@@ -650,7 +650,7 @@ export async function stockIntake({
 
 /**
  * Set absolute warehouse realStock for many variants (open-stock count / Excel import).
- * Never writes to Shopify.
+ * When shopifyWritePolicy=full, pushes sellable qty (realStock − onHoldStock) to Shopify.
  */
 export async function setRealStockBatch({ items, reasonCode = 'stock_count', actorUserId }) {
   if (!Array.isArray(items) || !items.length) {
@@ -661,6 +661,7 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
 
   const results = [];
   const allCrossings = [];
+  const ledgerForShopify = [];
 
   for (const item of items) {
     const variantId = item.variantId;
@@ -704,6 +705,9 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
     if (outcome.ledgerDocs?._negativeCrossings?.length) {
       allCrossings.push(...outcome.ledgerDocs._negativeCrossings);
     }
+    if (outcome.changed && Array.isArray(outcome.ledgerDocs)) {
+      ledgerForShopify.push(...outcome.ledgerDocs);
+    }
     results.push({
       variantId: outcome.variantId,
       sku: outcome.sku,
@@ -714,6 +718,7 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
   }
 
   await notifyNegativeStockCrossings(allCrossings);
+  await enqueueShopifySync(ledgerForShopify);
   await checkVariantsLowStock(results.map((r) => r.variantId));
 
   const increasedIds = results
@@ -1142,6 +1147,13 @@ export async function getOrderStateCounts() {
   counts.fulfillment_ready = fulfillmentReady;
   counts.pickup_ready = pickupReady;
 
+  // Delayed callbacks still sit in verify / no-response with a future (or today) date.
+  counts.delayed = await Order.countDocuments({
+    placedAt: { $gte: cutoff },
+    internalStatus: { $in: ['pending_verification', 'no_response'] },
+    delayedUntil: { $exists: true, $ne: null },
+  });
+
   return counts;
 }
 
@@ -1152,6 +1164,7 @@ export async function listOrders({
   shippingMethod,
   isExchangeOrder,
   isReturnOrder,
+  delayed,
   limit = 50,
   skip = 0,
   sort = { placedAt: -1 },
@@ -1170,6 +1183,12 @@ export async function listOrders({
   if (shippingMethod) filter.shippingMethod = shippingMethod;
   if (isExchangeOrder === true || isExchangeOrder === 'true') filter.isExchangeOrder = true;
   if (isReturnOrder === true || isReturnOrder === 'true') filter.isReturnOrder = true;
+  if (delayed === true || delayed === '1' || delayed === 'true') {
+    filter.delayedUntil = { $exists: true, $ne: null };
+    if (!status) {
+      filter.internalStatus = { $in: ['pending_verification', 'no_response'] };
+    }
+  }
   if (search) {
     const term = String(search).trim();
     if (term) {

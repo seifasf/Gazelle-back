@@ -367,8 +367,6 @@ export async function pickAndPackOrder(orderId, actorUserId) {
     throw err;
   }
 
-  const stockWarnings = await checkStockAvailability(order);
-
   if (order.shippingMethod === 'pickup') {
     order.assignedStockManagerId = actorUserId;
     await order.save();
@@ -377,7 +375,7 @@ export async function pickAndPackOrder(orderId, actorUserId) {
       actorUserId,
       note: 'Customer pickup — scanned & handed over by stock manager',
     });
-    return { queued: false, pickup: true, orderId, stockWarnings };
+    return { queued: false, pickup: true, orderId, stockWarnings: [] };
   }
 
   if (order.shippingMethod === 'local_shipping') {
@@ -392,10 +390,36 @@ export async function pickAndPackOrder(orderId, actorUserId) {
       note: 'Handed to local shipping',
     });
 
-    return { queued: false, localShipping: true, orderId, stockWarnings };
+    return { queued: false, localShipping: true, orderId, stockWarnings: [] };
   }
 
-  // Bosta — reuse delivery from print-policy step when present; otherwise create + transition.
+  // Fast path: policy already printed → Bosta delivery exists → status only (no Shopify/Bosta re-fetch).
+  if (order.bostaDeliveryId && order.bostaShipmentStatus === 'created') {
+    if (actorUserId && !order.assignedStockManagerId) {
+      order.assignedStockManagerId = actorUserId;
+      await order.save();
+    } else if (actorUserId) {
+      await Order.updateOne(
+        { _id: orderId, assignedStockManagerId: { $exists: false } },
+        { $set: { assignedStockManagerId: actorUserId } }
+      );
+    }
+    await orderService.transitionOrderStatus(orderId, 'picked_up_by_bosta', {
+      source: 'user_action',
+      actorUserId,
+      note: 'Pick & pack confirmed — Bosta AWB already printed',
+    });
+    return {
+      queued: false,
+      bosta: true,
+      orderId,
+      deliveryId: order.bostaDeliveryId,
+      trackingNumber: order.bostaTrackingNumber,
+      stockWarnings: [],
+    };
+  }
+
+  // No AWB yet — create shipment (slower path).
   try {
     const shipment = await createBostaShipmentForOrder(orderId, actorUserId);
     return {
@@ -404,12 +428,12 @@ export async function pickAndPackOrder(orderId, actorUserId) {
       orderId,
       deliveryId: shipment.deliveryId,
       trackingNumber: shipment.trackingNumber,
-      stockWarnings,
+      stockWarnings: [],
     };
   } catch (error) {
     const err = new Error(error.message || 'Failed to create Bosta shipment');
     err.statusCode = error.statusCode || 502;
-    err.stockWarnings = stockWarnings;
+    err.stockWarnings = [];
     throw err;
   }
 }

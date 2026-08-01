@@ -30,13 +30,16 @@ export function isOrderPrepaidForBosta(order) {
  * Cash the courier should collect from the customer (never pay the customer).
  * - Prepaid / online paid → 0
  * - Customer return / refund pickup → always 0 (no cash to client)
- * - Exchange → shipping only (goods free on the OMS order)
+ * - Exchange → shipping fee only (never goods — even if totalSellingPrice is wrong)
  * - Creator / normal COD → goods + shipping
  */
 export function bostaCodAmountForOrder(order) {
   if (!order) return 0;
   if (isOrderPrepaidForBosta(order)) return 0;
   if (order.isReturnOrder) return 0;
+  if (order.isExchangeOrder) {
+    return Math.max(0, Number(order.shippingFee) || 0);
+  }
   return Math.max(0, (order.totalSellingPrice || 0) + (order.shippingFee || 0));
 }
 
@@ -628,6 +631,15 @@ export async function createDelivery(order, customer) {
     notes: description,
   };
 
+  // Bosta Flex otherwise prints a second customer shipping fee (~EGP 80) on the AWB
+  // on top of our COD. Shipping is already in COD (exchange = fee only; SEND = goods+fee).
+  // These fields are create-only (Bosta rejects later updates).
+  if (order.isExchangeOrder || codAmount > 0 || isOrderPrepaidForBosta(order) || order.isReturnOrder) {
+    payload.isCustomerPayShipping = false;
+    payload.customerShippingFee = 0;
+    payload.businessPaidShipping = true;
+  }
+
   // CRP (type 25): Bosta requires pickupAddress (customer) — dropOff alone fails with city error.
   if (deliveryType === BOSTA_DELIVERY_TYPE.CUSTOMER_RETURN_PICKUP) {
     payload.pickupAddress = { ...dropOffAddress };
@@ -655,6 +667,28 @@ export async function createDelivery(order, customer) {
     return response?.data || response;
   } catch (err) {
     const msg = err?.message || 'Bosta delivery create failed';
+
+    // Older Bosta accounts may reject Flex opt-out fields — retry once without them.
+    if (
+      payload.isCustomerPayShipping != null &&
+      /isCustomerPayShipping|customerShippingFee|businessPaidShipping|flexShipping/i.test(msg)
+    ) {
+      const {
+        isCustomerPayShipping: _a,
+        customerShippingFee: _b,
+        businessPaidShipping: _c,
+        ...withoutFlexOptOut
+      } = payload;
+      try {
+        const response = await bostaRequest('/deliveries', {
+          method: 'POST',
+          body: withoutFlexOptOut,
+        });
+        return response?.data || response;
+      } catch {
+        /* fall through to normal error handling with original err */
+      }
+    }
 
     // Uncovered (4009) / Zone Not Found (3002): bad district or zone pairing.
     // Retry once with zone = district name (no districtId) — Bosta geocodes Smouha etc. that way.
