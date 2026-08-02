@@ -3,6 +3,7 @@ import * as exchangeService from '../services/exchange.service.js';
 
 const STOCK_MANAGER_ORDER_STATUSES = new Set([
   'verified_ready_for_shipping',
+  'awaiting_bosta_pickup',
   'out_of_stock',
   'picked_up_by_bosta',
   'in_transit',

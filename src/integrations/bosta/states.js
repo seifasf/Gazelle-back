@@ -47,9 +47,11 @@ const RETURN_TYPES = new Set([
 
 /** Built-in fallback when DB BostaStatusMapping has no row. */
 export const DEFAULT_STATE_TO_INTERNAL = {
-  [BOSTA_STATE.PICKUP_REQUESTED]: 'picked_up_by_bosta',
-  [BOSTA_STATE.WAITING_FOR_ROUTE]: 'picked_up_by_bosta',
-  [BOSTA_STATE.ROUTE_ASSIGNED]: 'picked_up_by_bosta',
+  // Created on Bosta / pickup requested — AWB exists, not collected yet.
+  [BOSTA_STATE.PICKUP_REQUESTED]: 'awaiting_bosta_pickup',
+  [BOSTA_STATE.WAITING_FOR_ROUTE]: 'awaiting_bosta_pickup',
+  [BOSTA_STATE.ROUTE_ASSIGNED]: 'awaiting_bosta_pickup',
+  // Courier collected from warehouse ("Received" on Bosta dashboard).
   [BOSTA_STATE.PICKED_UP_FROM_BUSINESS]: 'picked_up_by_bosta',
   [BOSTA_STATE.PICKING_UP_FROM_CONSIGNEE]: 'returning_to_origin',
   [BOSTA_STATE.PICKED_UP_FROM_CONSIGNEE]: 'returning_to_origin',
@@ -85,6 +87,10 @@ export const DEFAULT_STATE_TO_INTERNAL = {
   Delivered: 'delivered',
   'In transit': 'in_transit',
   'Picked up': 'in_transit',
+  'Pickup requested': 'awaiting_bosta_pickup',
+  'Waiting for route': 'awaiting_bosta_pickup',
+  'Route assigned': 'awaiting_bosta_pickup',
+  'Picked up from business': 'picked_up_by_bosta',
 };
 
 export function normalizeBostaType(type) {

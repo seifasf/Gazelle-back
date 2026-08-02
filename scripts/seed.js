@@ -14,7 +14,7 @@ import { DEFAULT_FACTORIES } from '../src/constants/index.js';
 import bcrypt from 'bcrypt';
 
 const DEFAULT_BOSTA_MAPPINGS = [
-  { bostaState: 'PICKED_UP', internalStatus: 'picked_up_by_bosta', description: 'Courier picked up package' },
+  { bostaState: 'PICKED_UP', internalStatus: 'in_transit', description: 'Out for delivery (type-dependent; see code 41)' },
   { bostaState: 'IN_TRANSIT', internalStatus: 'in_transit', description: 'Package in transit' },
   { bostaState: 'DELIVERED', internalStatus: 'delivered', description: 'Successfully delivered' },
   { bostaState: 'FAILED', internalStatus: 'failed_delivery', description: 'Delivery attempt failed' },
@@ -22,9 +22,13 @@ const DEFAULT_BOSTA_MAPPINGS = [
   { bostaState: 'RETURNED_TO_BUSINESS', internalStatus: 'returning_to_origin', description: 'Returned to sender' },
   { bostaState: 'Terminated', internalStatus: 'returning_to_origin', description: 'Terminated after failed attempts / return' },
   { bostaState: 'Returned to business', internalStatus: 'returning_to_origin', description: 'Package returned to business' },
+  { bostaState: 'Pickup requested', internalStatus: 'awaiting_bosta_pickup', description: 'AWB created — awaiting courier' },
   // Numeric Bosta state codes (webhooks send state as a number or { code, value })
-  { bostaState: '21', internalStatus: 'picked_up_by_bosta', description: 'Picked up from business (code 21)' },
-  { bostaState: '41', internalStatus: 'picked_up_by_bosta', description: 'Picked up (code 41)' },
+  { bostaState: '10', internalStatus: 'awaiting_bosta_pickup', description: 'Pickup requested / Created (code 10)' },
+  { bostaState: '11', internalStatus: 'awaiting_bosta_pickup', description: 'Waiting for route (code 11)' },
+  { bostaState: '20', internalStatus: 'awaiting_bosta_pickup', description: 'Route assigned (code 20)' },
+  { bostaState: '21', internalStatus: 'picked_up_by_bosta', description: 'Picked up from business / Received (code 21)' },
+  { bostaState: '41', internalStatus: 'in_transit', description: 'Picked up / out for delivery (code 41)' },
   { bostaState: '24', internalStatus: 'in_transit', description: 'Received at warehouse (code 24)' },
   { bostaState: '30', internalStatus: 'in_transit', description: 'In transit between hubs (code 30)' },
   { bostaState: '45', internalStatus: 'delivered', description: 'Delivered (code 45)' },

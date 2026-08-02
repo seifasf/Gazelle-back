@@ -90,8 +90,12 @@ function extractBostaEventAt(payload, state) {
 
 export async function mapBostaStateToInternal(bostaState, meta = {}) {
   const code = extractBostaStateCode(bostaState);
-  // Type-sensitive codes must follow webhook docs (not stale DB seed rows).
+  // Early pickup + type-sensitive codes must follow built-in map (not stale DB seed rows).
   if (
+    code === 10 ||
+    code === 11 ||
+    code === 20 ||
+    code === 21 ||
     code === 41 ||
     code === 47 ||
     code === 22 ||
@@ -158,6 +162,13 @@ async function transitionToward(orderId, fromStatus, toStatus, meta) {
 
   const bridges = {
     // pending_verification is intentionally omitted — humans must verify first.
+    awaiting_bosta_pickup: {
+      in_transit: ['picked_up_by_bosta'],
+      delivered: ['picked_up_by_bosta', 'in_transit'],
+      failed_delivery: ['picked_up_by_bosta', 'in_transit'],
+      returning_to_origin: ['picked_up_by_bosta', 'in_transit'],
+      returned_awaiting_receipt: ['picked_up_by_bosta', 'in_transit', 'returning_to_origin'],
+    },
     picked_up_by_bosta: {
       delivered: ['in_transit'],
       failed_delivery: ['in_transit'],
@@ -170,11 +181,17 @@ async function transitionToward(orderId, fromStatus, toStatus, meta) {
       returned_awaiting_receipt: ['returning_to_origin'],
     },
     verified_ready_for_shipping: {
-      in_transit: ['picked_up_by_bosta'],
-      delivered: ['picked_up_by_bosta', 'in_transit'],
-      failed_delivery: ['picked_up_by_bosta', 'in_transit'],
-      returning_to_origin: ['picked_up_by_bosta', 'in_transit'],
-      returned_awaiting_receipt: ['picked_up_by_bosta', 'in_transit', 'returning_to_origin'],
+      picked_up_by_bosta: ['awaiting_bosta_pickup'],
+      in_transit: ['awaiting_bosta_pickup', 'picked_up_by_bosta'],
+      delivered: ['awaiting_bosta_pickup', 'picked_up_by_bosta', 'in_transit'],
+      failed_delivery: ['awaiting_bosta_pickup', 'picked_up_by_bosta', 'in_transit'],
+      returning_to_origin: ['awaiting_bosta_pickup', 'picked_up_by_bosta', 'in_transit'],
+      returned_awaiting_receipt: [
+        'awaiting_bosta_pickup',
+        'picked_up_by_bosta',
+        'in_transit',
+        'returning_to_origin',
+      ],
     },
     delivered: {
       returned_awaiting_receipt: ['returning_to_origin'],

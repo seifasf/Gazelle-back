@@ -320,9 +320,20 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
 
 /**
  * Ensure Bosta delivery exists, then fetch the AWB (بوليصة) PDF URL.
+ * Moves Ready → Awaiting Bosta pickup once the delivery exists.
  */
 export async function prepareAwbForOrder(orderId, actorUserId) {
   const shipment = await ensureBostaDeliveryForOrder(orderId, actorUserId);
+  const order = await Order.findById(orderId).select('internalStatus');
+  if (order?.internalStatus === 'verified_ready_for_shipping') {
+    await orderService.transitionOrderStatus(orderId, 'awaiting_bosta_pickup', {
+      source: 'user_action',
+      actorUserId,
+      note: shipment.created
+        ? 'Bosta AWB created — awaiting courier pickup'
+        : 'Bosta AWB printed — awaiting courier pickup',
+    });
+  }
   const awb = await getAwb(shipment.deliveryId, shipment.trackingNumber);
   return {
     url: awb?.url || null,
@@ -334,17 +345,24 @@ export async function prepareAwbForOrder(orderId, actorUserId) {
 }
 
 /**
- * Create the Bosta delivery (if needed) and move the order to picked_up_by_bosta.
- * Used by pick-pack and the Agenda job.
+ * Create the Bosta delivery (if needed) and move the order to awaiting_bosta_pickup.
+ * Used by pick-pack and the Agenda job. Courier collection → picked_up_by_bosta via webhook.
  */
 export async function createBostaShipmentForOrder(orderId, actorUserId) {
   const shipment = await ensureBostaDeliveryForOrder(orderId, actorUserId);
 
-  await orderService.transitionOrderStatus(orderId, 'picked_up_by_bosta', {
-    source: 'system',
-    actorUserId,
-    note: shipment.created ? 'Bosta shipment created' : 'Bosta shipment confirmed for pickup',
-  });
+  const order = await Order.findById(orderId).select('internalStatus');
+  if (order?.internalStatus === 'verified_ready_for_shipping') {
+    await orderService.transitionOrderStatus(orderId, 'awaiting_bosta_pickup', {
+      source: 'system',
+      actorUserId,
+      note: shipment.created
+        ? 'Bosta shipment created — awaiting courier pickup'
+        : 'Bosta shipment confirmed — awaiting courier pickup',
+    });
+  } else if (order?.internalStatus === 'awaiting_bosta_pickup') {
+    // Already waiting — keep status.
+  }
 
   return {
     deliveryId: shipment.deliveryId,
@@ -393,7 +411,7 @@ export async function pickAndPackOrder(orderId, actorUserId) {
     return { queued: false, localShipping: true, orderId, stockWarnings: [] };
   }
 
-  // Fast path: policy already printed → Bosta delivery exists → status only (no Shopify/Bosta re-fetch).
+  // Fast path: policy already printed → Bosta delivery exists → awaiting courier pickup.
   if (order.bostaDeliveryId && order.bostaShipmentStatus === 'created') {
     if (actorUserId && !order.assignedStockManagerId) {
       order.assignedStockManagerId = actorUserId;
@@ -404,14 +422,15 @@ export async function pickAndPackOrder(orderId, actorUserId) {
         { $set: { assignedStockManagerId: actorUserId } }
       );
     }
-    await orderService.transitionOrderStatus(orderId, 'picked_up_by_bosta', {
+    await orderService.transitionOrderStatus(orderId, 'awaiting_bosta_pickup', {
       source: 'user_action',
       actorUserId,
-      note: 'Pick & pack confirmed — Bosta AWB already printed',
+      note: 'Pick & pack confirmed — Bosta AWB printed, awaiting courier pickup',
     });
     return {
       queued: false,
       bosta: true,
+      awaitingPickup: true,
       orderId,
       deliveryId: order.bostaDeliveryId,
       trackingNumber: order.bostaTrackingNumber,
@@ -419,12 +438,13 @@ export async function pickAndPackOrder(orderId, actorUserId) {
     };
   }
 
-  // No AWB yet — create shipment (slower path).
+  // No AWB yet — create shipment (slower path) → awaiting_bosta_pickup.
   try {
     const shipment = await createBostaShipmentForOrder(orderId, actorUserId);
     return {
       queued: false,
       bosta: true,
+      awaitingPickup: true,
       orderId,
       deliveryId: shipment.deliveryId,
       trackingNumber: shipment.trackingNumber,

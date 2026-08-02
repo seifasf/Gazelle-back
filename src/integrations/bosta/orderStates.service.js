@@ -60,14 +60,17 @@ async function linkAndSyncOrder(order, delivery, note) {
   // Bosta policy (businessReference = Mongo order id) or the order is already
   // linked to THIS delivery. Phone/COD guesses of old Woo deliveries used to
   // jump orders straight to delivered.
-  if (order.internalStatus === 'verified_ready_for_shipping') {
+  if (
+    order.internalStatus === 'verified_ready_for_shipping' ||
+    order.internalStatus === 'awaiting_bosta_pickup'
+  ) {
     const alreadyThis =
       order.bostaDeliveryId && String(order.bostaDeliveryId) === deliveryId;
     const gazelleOwned = ref && ref === String(order._id);
     if (!alreadyThis && !gazelleOwned) {
       logger.info(
-        { orderId: order._id, deliveryId, ref },
-        'Skipping Bosta link on ready-to-ship — not a Gazelle-created delivery'
+        { orderId: order._id, deliveryId, ref, status: order.internalStatus },
+        'Skipping Bosta link on ready/awaiting — not a Gazelle-created delivery'
       );
       return {
         orderId: order._id,
