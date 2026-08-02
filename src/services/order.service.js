@@ -263,6 +263,7 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
       'no_response',
       'verified_ready_for_shipping',
       'out_of_stock',
+      'local_shipping',
     ];
     if (!cancellable.includes(order.internalStatus)) {
       const err = new Error('Order cannot be cancelled at this stage');
