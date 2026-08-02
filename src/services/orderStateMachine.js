@@ -21,13 +21,17 @@ export const ORDER_TRANSITIONS = {
   ],
   // Hold for missing SKUs — edit items, cancel, or send back to Ready to ship.
   out_of_stock: ['verified_ready_for_shipping', 'cancelled'],
-  // AWB created on Bosta — courier has not collected from warehouse yet.
+  // AWB created on Bosta — courier has not collected yet.
+  // Warehouse can pull back to Ready / OOS / Pending if something is wrong.
   awaiting_bosta_pickup: [
     'picked_up_by_bosta',
     'in_transit',
     'delivered',
     'failed_delivery',
     'returning_to_origin',
+    'verified_ready_for_shipping',
+    'out_of_stock',
+    'pending_verification',
     'cancelled',
   ],
   // Local courier has the package — confirm delivery or cancel.

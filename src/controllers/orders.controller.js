@@ -256,13 +256,22 @@ export async function transitionStatus(req, res, next) {
     const toStatus = req.body.toStatus;
     const role = req.user.role;
 
-    // Stock can only park as out_of_stock (via fulfillment) or return OOS → ready.
+    // Stock: Out of stock ↔ Ready, plus Awaiting Bosta → Ready / OOS / Pending.
     if (role === 'stock_manager') {
+      const Order = (await import('../models/Order.js')).default;
+      const current = await Order.findById(req.params.id).select('internalStatus');
+      const fromStatus = current?.internalStatus;
       const allowed =
-        (toStatus === 'verified_ready_for_shipping') ||
-        (toStatus === 'out_of_stock');
+        toStatus === 'verified_ready_for_shipping'
+        || toStatus === 'out_of_stock'
+        || (
+          fromStatus === 'awaiting_bosta_pickup'
+          && ['verified_ready_for_shipping', 'out_of_stock', 'pending_verification'].includes(toStatus)
+        );
       if (!allowed) {
-        return res.status(403).json({ error: 'Stock managers can only move Out of stock ↔ Ready to ship' });
+        return res.status(403).json({
+          error: 'Stock managers can move Ready ↔ Out of stock, or pull Awaiting Bosta pickup back to Ready / Out of stock / Pending',
+        });
       }
     }
 
