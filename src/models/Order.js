@@ -98,9 +98,14 @@ const orderSchema = new mongoose.Schema(
     totalCogsSnapshot: { type: Number, min: 0 },
     cancellationReason: String,
     isCreatorOrder: { type: Boolean, default: false },
-    /** Manual exchange shipment against a previous order — goods free; Bosta type EXCHANGE. */
+    /** Manual exchange shipment against a previous order — Bosta type EXCHANGE. */
     isExchangeOrder: { type: Boolean, default: false, index: true },
     exchangeFromOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', index: true },
+    /**
+     * When exchanging to a cheaper item: cash credit to the customer (old − new).
+     * Net Bosta COD = totalSellingPrice + shippingFee − exchangeCreditAmount (floored at 0).
+     */
+    exchangeCreditAmount: { type: Number, min: 0, default: 0 },
     /**
      * Manual customer-return pickup (refund/return) — Bosta type CRP, COD always 0.
      * Courier picks items up; no cash to the customer.

@@ -27,18 +27,21 @@ export function isOrderPrepaidForBosta(order) {
 }
 
 /**
- * Cash the courier should collect from the customer (never pay the customer).
+ * Cash the courier should collect from the customer.
  * - Prepaid / online paid → 0
  * - Customer return / refund pickup → always 0 (no cash to client)
- * - Exchange → price difference (new − old, floored at 0) stored in totalSellingPrice + shipping
+ * - Exchange → (new − old) + shipping; if old > new the difference is a credit
+ *   (exchangeCreditAmount) subtracted from COD so customer still pays shipping net of refund
  * - Creator / normal COD → goods + shipping
  */
 export function bostaCodAmountForOrder(order) {
   if (!order) return 0;
   if (isOrderPrepaidForBosta(order)) return 0;
   if (order.isReturnOrder) return 0;
-  // Exchange: totalSellingPrice is the upgrade diff only (see createManualOrder).
-  return Math.max(0, (Number(order.totalSellingPrice) || 0) + (Number(order.shippingFee) || 0));
+  const goods = Number(order.totalSellingPrice) || 0;
+  const ship = Number(order.shippingFee) || 0;
+  const credit = order.isExchangeOrder ? Number(order.exchangeCreditAmount) || 0 : 0;
+  return Math.max(0, Math.round((goods + ship - credit) * 100) / 100);
 }
 
 /** Bosta delivery type codes (live API — verified against Gazelle Bosta account). */
@@ -107,7 +110,19 @@ function buildPackageDescription(order, variantsById = new Map()) {
   const tags = [];
   if (order.isReturnOrder) tags.push('RETURN PICKUP · COD 0 · NO CASH TO CUSTOMER');
   else if (order.isExchangeOrder) {
-    tags.push(cod > 0 ? `EXCHANGE · COD ${cod} (diff + shipping)` : 'EXCHANGE · COD 0');
+    const credit = Number(order.exchangeCreditAmount) || 0;
+    const upgrade = Number(order.totalSellingPrice) || 0;
+    const ship = Number(order.shippingFee) || 0;
+    if (credit > upgrade + ship) {
+      const netRefund = Math.round((credit - upgrade - ship) * 100) / 100;
+      tags.push(`EXCHANGE · COD 0 · PAY CUSTOMER ${netRefund} (credit − shipping)`);
+    } else if (credit > 0) {
+      tags.push(`EXCHANGE · COD ${cod} (shipping − credit ${credit})`);
+    } else if (upgrade > 0) {
+      tags.push(`EXCHANGE · COD ${cod} (upgrade ${upgrade} + shipping)`);
+    } else {
+      tags.push(cod > 0 ? `EXCHANGE · COD ${cod} (shipping)` : 'EXCHANGE · COD 0');
+    }
   } else if (order.isCreatorOrder) {
     tags.push(cod > 0 ? `CREATOR · COD ${cod}` : 'CREATOR/GIFT · COD 0');
   } else if (isOrderPrepaidForBosta(order)) {

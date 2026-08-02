@@ -889,7 +889,8 @@ export async function createManualOrder({
       throw err;
     }
 
-    // Exchange COD goods = max(0, new items − collected items). Example: X=8, Y=10 → pay 2 + shipping.
+    // Exchange: signed (new − old). Upgrade → totalSellingPrice; downgrade → exchangeCreditAmount.
+    // COD = upgrade + shipping − credit (customer still pays shipping when old is more expensive).
     let returnGoodsValue = 0;
     if (exchange && Array.isArray(bostaReturnItems)) {
       const priorUnitByVariant = new Map();
@@ -911,9 +912,11 @@ export async function createManualOrder({
       }
     }
 
-    const exchangePriceDiff = exchange
-      ? Math.max(0, Math.round((outboundGoodsValue - returnGoodsValue) * 100) / 100)
+    const signedDiff = exchange
+      ? Math.round((outboundGoodsValue - returnGoodsValue) * 100) / 100
       : 0;
+    const exchangePriceDiff = exchange ? Math.max(0, signedDiff) : 0;
+    const exchangeCreditAmount = exchange ? Math.max(0, -signedDiff) : 0;
 
     const total = customerReturn
       ? 0
@@ -924,7 +927,7 @@ export async function createManualOrder({
             0
           );
 
-    // Exchange: customer pays price difference + shipping (from prior order / place).
+    // Exchange: COD = (new−old) + shipping; if old > new, credit reduces COD but shipping still applies.
     // Return pickup: no COD / no shipping collect — courier must not give cash to customer.
     const feeRaw = shippingFee != null ? Number(shippingFee) : null;
     const exchangeShippingFee =
@@ -1016,6 +1019,7 @@ export async function createManualOrder({
         isCreatorOrder: exchange || customerReturn ? false : Boolean(isCreatorOrder),
         isExchangeOrder: exchange,
         exchangeFromOrderId: exchange ? priorOrder._id : undefined,
+        exchangeCreditAmount: exchange ? exchangeCreditAmount : 0,
         isReturnOrder: customerReturn,
         returnFromOrderId: customerReturn ? priorOrder._id : undefined,
         bostaReturnItems: normalizedReturnItems,
@@ -1036,7 +1040,9 @@ export async function createManualOrder({
               : isPickup
                 ? 'Pickup auto-verified · Ready to ship · print Gazelle policy on Fulfillment'
                 : exchange
-                  ? `Exchange auto-verified · Ready to ship · goods diff EGP ${total} + shipping EGP ${finalShippingFee} · Bosta EXCHANGE`
+                  ? exchangeCreditAmount > 0
+                    ? `Exchange auto-verified · Ready to ship · customer credit EGP ${exchangeCreditAmount} · shipping EGP ${finalShippingFee} · net COD EGP ${Math.max(0, total + finalShippingFee - exchangeCreditAmount)} · Bosta EXCHANGE`
+                    : `Exchange auto-verified · Ready to ship · upgrade EGP ${total} + shipping EGP ${finalShippingFee} · Bosta EXCHANGE`
                   : 'Manual order auto-verified · Ready to ship',
             actorUserId,
           },
@@ -1065,7 +1071,9 @@ export async function createManualOrder({
           : isPickup
             ? `Pickup from ${manualSource} · Ready to ship`
             : exchange
-              ? `Exchange from ${manualSource} (for ${priorLabel}) · Ready to ship · diff EGP ${total} + shipping EGP ${finalShippingFee}`
+              ? exchangeCreditAmount > 0
+                ? `Exchange from ${manualSource} (for ${priorLabel}) · Ready to ship · credit EGP ${exchangeCreditAmount} · shipping EGP ${finalShippingFee}`
+                : `Exchange from ${manualSource} (for ${priorLabel}) · Ready to ship · upgrade EGP ${total} + shipping EGP ${finalShippingFee}`
               : `Manual order from ${manualSource} · Ready to ship`,
       },
       session
