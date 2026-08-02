@@ -30,17 +30,15 @@ export function isOrderPrepaidForBosta(order) {
  * Cash the courier should collect from the customer (never pay the customer).
  * - Prepaid / online paid → 0
  * - Customer return / refund pickup → always 0 (no cash to client)
- * - Exchange → shipping fee only (never goods — even if totalSellingPrice is wrong)
+ * - Exchange → price difference (new − old, floored at 0) stored in totalSellingPrice + shipping
  * - Creator / normal COD → goods + shipping
  */
 export function bostaCodAmountForOrder(order) {
   if (!order) return 0;
   if (isOrderPrepaidForBosta(order)) return 0;
   if (order.isReturnOrder) return 0;
-  if (order.isExchangeOrder) {
-    return Math.max(0, Number(order.shippingFee) || 0);
-  }
-  return Math.max(0, (order.totalSellingPrice || 0) + (order.shippingFee || 0));
+  // Exchange: totalSellingPrice is the upgrade diff only (see createManualOrder).
+  return Math.max(0, (Number(order.totalSellingPrice) || 0) + (Number(order.shippingFee) || 0));
 }
 
 /** Bosta delivery type codes (live API — verified against Gazelle Bosta account). */
@@ -109,7 +107,7 @@ function buildPackageDescription(order, variantsById = new Map()) {
   const tags = [];
   if (order.isReturnOrder) tags.push('RETURN PICKUP · COD 0 · NO CASH TO CUSTOMER');
   else if (order.isExchangeOrder) {
-    tags.push(cod > 0 ? `EXCHANGE · COD ${cod} (shipping only)` : 'EXCHANGE · COD 0');
+    tags.push(cod > 0 ? `EXCHANGE · COD ${cod} (diff + shipping)` : 'EXCHANGE · COD 0');
   } else if (order.isCreatorOrder) {
     tags.push(cod > 0 ? `CREATOR · COD ${cod}` : 'CREATOR/GIFT · COD 0');
   } else if (isOrderPrepaidForBosta(order)) {
@@ -505,7 +503,7 @@ export async function createDelivery(order, customer) {
   }
 
   // Paid Shopify / online → COD 0. Return pickups → COD 0 (never pay the customer).
-  // Creator / exchange follow order totals (exchange = shipping only when goods are 0).
+  // Creator / exchange follow order totals (exchange goods = price diff in totalSellingPrice).
   const codAmount = bostaCodAmountForOrder(order);
   if (isOrderPrepaidForBosta(order) && codAmount !== 0) {
     const err = new Error('Paid order must have Bosta COD = 0');
@@ -632,7 +630,7 @@ export async function createDelivery(order, customer) {
   };
 
   // Bosta Flex otherwise prints a second customer shipping fee (~EGP 80) on the AWB
-  // on top of our COD. Shipping is already in COD (exchange = fee only; SEND = goods+fee).
+  // on top of our COD. Shipping is already in COD (exchange = diff+fee; SEND = goods+fee).
   // These fields are create-only (Bosta rejects later updates).
   if (order.isExchangeOrder || codAmount > 0 || isOrderPrepaidForBosta(order) || order.isReturnOrder) {
     payload.isCustomerPayShipping = false;

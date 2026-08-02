@@ -860,6 +860,7 @@ export async function createManualOrder({
     }
 
     const orderItems = [];
+    let outboundGoodsValue = 0;
     for (const item of outboundItemsInput || []) {
       const variant = await Variant.findById(item.variantId).session(session);
       if (!variant) {
@@ -867,10 +868,16 @@ export async function createManualOrder({
         err.statusCode = 404;
         throw err;
       }
+      const catalogUnit = Number(variant.sellingPrice) || 0;
+      const inputUnit = Number(item.unitSellingPrice);
+      const unitForDiff =
+        Number.isFinite(inputUnit) && inputUnit > 0 ? inputUnit : catalogUnit;
+      outboundGoodsValue += unitForDiff * (Number(item.quantity) || 0);
       orderItems.push({
         variantId: variant._id,
         sku: variant.sku,
         quantity: item.quantity,
+        // Exchange line prices stay 0 on the order; upgrade amount lives in totalSellingPrice.
         unitSellingPrice: exchange || customerReturn ? 0 : (item.unitSellingPrice ?? variant.sellingPrice),
         unitCogs: variant.cogs,
       });
@@ -882,14 +889,42 @@ export async function createManualOrder({
       throw err;
     }
 
-    const total = exchange || customerReturn
-      ? 0
-      : totalSellingPrice ?? orderItems.reduce(
-          (sum, i) => sum + i.unitSellingPrice * i.quantity,
-          0
-        );
+    // Exchange COD goods = max(0, new items − collected items). Example: X=8, Y=10 → pay 2 + shipping.
+    let returnGoodsValue = 0;
+    if (exchange && Array.isArray(bostaReturnItems)) {
+      const priorUnitByVariant = new Map();
+      for (const pi of priorOrder?.items || []) {
+        const vid = String(pi.variantId?._id || pi.variantId || '');
+        if (!vid) continue;
+        priorUnitByVariant.set(vid, Number(pi.unitSellingPrice) || 0);
+      }
+      for (const r of bostaReturnItems) {
+        const vid = String(r.variantId || '');
+        const qty = Number(r.quantity) || 0;
+        if (!vid || qty < 1) continue;
+        let unit = priorUnitByVariant.has(vid) ? priorUnitByVariant.get(vid) : null;
+        if (unit == null) {
+          const variant = await Variant.findById(vid).session(session);
+          unit = Number(variant?.sellingPrice) || 0;
+        }
+        returnGoodsValue += unit * qty;
+      }
+    }
 
-    // Exchange: items free, customer pays shipping by place (from Shopify prior order).
+    const exchangePriceDiff = exchange
+      ? Math.max(0, Math.round((outboundGoodsValue - returnGoodsValue) * 100) / 100)
+      : 0;
+
+    const total = customerReturn
+      ? 0
+      : exchange
+        ? exchangePriceDiff
+        : totalSellingPrice ?? orderItems.reduce(
+            (sum, i) => sum + i.unitSellingPrice * i.quantity,
+            0
+          );
+
+    // Exchange: customer pays price difference + shipping (from prior order / place).
     // Return pickup: no COD / no shipping collect — courier must not give cash to customer.
     const feeRaw = shippingFee != null ? Number(shippingFee) : null;
     const exchangeShippingFee =
@@ -1001,7 +1036,7 @@ export async function createManualOrder({
               : isPickup
                 ? 'Pickup auto-verified · Ready to ship · print Gazelle policy on Fulfillment'
                 : exchange
-                  ? `Exchange auto-verified · Ready to ship · shipping EGP ${finalShippingFee} · Bosta EXCHANGE`
+                  ? `Exchange auto-verified · Ready to ship · goods diff EGP ${total} + shipping EGP ${finalShippingFee} · Bosta EXCHANGE`
                   : 'Manual order auto-verified · Ready to ship',
             actorUserId,
           },
@@ -1030,7 +1065,7 @@ export async function createManualOrder({
           : isPickup
             ? `Pickup from ${manualSource} · Ready to ship`
             : exchange
-              ? `Exchange from ${manualSource} (for ${priorLabel}) · Ready to ship · shipping EGP ${finalShippingFee}`
+              ? `Exchange from ${manualSource} (for ${priorLabel}) · Ready to ship · diff EGP ${total} + shipping EGP ${finalShippingFee}`
               : `Manual order from ${manualSource} · Ready to ship`,
       },
       session
