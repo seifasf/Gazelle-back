@@ -556,6 +556,113 @@ export async function exportInventoryCountExcel() {
   return { buffer, filename: `gazelle-jard-${stamp}.xlsx` };
 }
 
+/**
+ * Pieces that appear on out-of-stock orders and still lack enough warehouse stock.
+ */
+export async function exportOutOfStockPiecesExcel() {
+  const ExcelJS = (await import('exceljs')).default;
+  const { workbookBuffer, styleHeaderRow } = await import('../utils/excelExport.js');
+  const { ORDERS_PLACED_FROM_YMD } = await import('../constants/index.js');
+  const Order = (await import('../models/Order.js')).default;
+
+  const cutoff = new Date(`${ORDERS_PLACED_FROM_YMD}T00:00:00+03:00`);
+  const orders = await Order.find({
+    placedAt: { $gte: cutoff },
+    internalStatus: 'out_of_stock',
+  })
+    .select('shopifyOrderName shopifyOrderId items')
+    .populate({
+      path: 'items.variantId',
+      select: 'sku title color size realStock onHoldStock imageUrl productId',
+      populate: { path: 'productId', select: 'title' },
+    })
+    .lean();
+
+  /** @type {Map<string, { sku: string, title: string, color: string, size: string, realStock: number, onHold: number, unitsNeeded: number, orderCount: number, orderNames: Set<string> }>} */
+  const bySku = new Map();
+
+  for (const order of orders) {
+    const orderLabel = order.shopifyOrderName || order.shopifyOrderId || String(order._id);
+    for (const item of order.items || []) {
+      const v = item.variantId && typeof item.variantId === 'object' ? item.variantId : null;
+      const sku = v?.sku || item.sku || 'UNKNOWN';
+      const key = String(v?._id || sku);
+      const qty = Number(item.quantity) || 0;
+      if (qty < 1) continue;
+
+      let row = bySku.get(key);
+      if (!row) {
+        row = {
+          sku,
+          title: v?.productId?.title || v?.title || item.title || sku,
+          color: v?.color || item.color || '',
+          size: v?.size != null ? String(v.size) : item.size != null ? String(item.size) : '',
+          realStock: Number(v?.realStock) || 0,
+          onHold: Number(v?.onHoldStock) || 0,
+          unitsNeeded: 0,
+          orderCount: 0,
+          orderNames: new Set(),
+        };
+        bySku.set(key, row);
+      }
+      row.unitsNeeded += qty;
+      if (!row.orderNames.has(orderLabel)) {
+        row.orderNames.add(orderLabel);
+        row.orderCount += 1;
+      }
+      if (v) {
+        row.realStock = Number(v.realStock) || 0;
+        row.onHold = Number(v.onHoldStock) || 0;
+      }
+    }
+  }
+
+  const rows = [...bySku.values()]
+    .map((r) => ({
+      sku: r.sku,
+      title: r.title,
+      color: r.color,
+      size: r.size,
+      realStock: r.realStock,
+      onHold: r.onHold,
+      available: r.realStock - r.onHold,
+      unitsNeeded: r.unitsNeeded,
+      shortfall: Math.max(0, r.unitsNeeded - Math.max(0, r.realStock)),
+      orderCount: r.orderCount,
+      orders: [...r.orderNames].join(', '),
+    }))
+    .filter((r) => r.shortfall > 0 || r.realStock <= 0)
+    .sort((a, b) => b.shortfall - a.shortfall || a.sku.localeCompare(b.sku));
+
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'Gazelle OMS';
+  const sheet = workbook.addWorksheet('OOS pieces');
+  sheet.columns = [
+    { header: 'SKU', key: 'sku', width: 18 },
+    { header: 'Product', key: 'title', width: 36 },
+    { header: 'Color', key: 'color', width: 14 },
+    { header: 'Size', key: 'size', width: 10 },
+    { header: 'Warehouse', key: 'realStock', width: 12 },
+    { header: 'On hold', key: 'onHold', width: 10 },
+    { header: 'Available', key: 'available', width: 12 },
+    { header: 'Units on OOS orders', key: 'unitsNeeded', width: 18 },
+    { header: 'Shortfall', key: 'shortfall', width: 12 },
+    { header: 'OOS orders', key: 'orderCount', width: 12 },
+    { header: 'Order #s', key: 'orders', width: 40 },
+  ];
+  styleHeaderRow(sheet);
+  for (const r of rows) sheet.addRow(r);
+
+  const buffer = await workbookBuffer(workbook);
+  const ymd = new Date().toISOString().slice(0, 10);
+  return {
+    buffer,
+    filename: `gazelle-oos-pieces-${ymd}.xlsx`,
+    count: rows.length,
+    orders: orders.length,
+  };
+}
+
 export default {
   listVariants,
   getVariantById,
@@ -570,4 +677,5 @@ export default {
   getStockQueueCounts,
   exportCatalogStockExcel,
   exportInventoryCountExcel,
+  exportOutOfStockPiecesExcel,
 };
