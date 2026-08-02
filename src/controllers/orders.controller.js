@@ -83,7 +83,30 @@ export async function createManualOrder(req, res, next) {
 export async function findExchangeOrder(req, res, next) {
   try {
     const order = await orderService.findOrderForExchange(req.query.q || req.query.search);
-    res.json({ data: order });
+    const city = order?.shippingAddress?.city;
+    const priorFee = Number(order?.shippingFee);
+    const suggested =
+      Number.isFinite(priorFee) && priorFee > 0
+        ? priorFee
+        : (await orderService.suggestShippingFeeByCity(city)) || null;
+    res.json({
+      data: order,
+      suggestedShippingFee: suggested,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function suggestShippingFee(req, res, next) {
+  try {
+    const fee = await orderService.suggestShippingFeeByCity(req.query.city);
+    res.json({
+      data: {
+        city: String(req.query.city || '').trim() || null,
+        shippingFee: fee,
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -275,6 +298,7 @@ export default {
   getStateCounts,
   createManualOrder,
   findExchangeOrder,
+  suggestShippingFee,
   getOrder,
   verifyOrder,
   bulkVerifyOrders,

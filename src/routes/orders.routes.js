@@ -14,6 +14,11 @@ router.get(
   requireRoles('admin', 'orders_manager'),
   ordersController.findExchangeOrder
 );
+router.get(
+  '/shipping-fee-suggest',
+  requireRoles('admin', 'orders_manager'),
+  ordersController.suggestShippingFee
+);
 router.get('/', requireRoles('admin', 'orders_manager', 'stock_manager'), ordersController.listOrders);
 router.post('/bulk-verify', requireRoles('admin', 'orders_manager'), ordersController.bulkVerifyOrders);
 router.get('/:id', requireRoles('admin', 'orders_manager', 'stock_manager'), ordersController.getOrder);

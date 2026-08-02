@@ -928,17 +928,19 @@ export async function createManualOrder({
           );
 
     // Exchange: COD = (new−old) + shipping; if old > new, credit reduces COD but shipping still applies.
+    // Shipping is place-based (prior Shopify city rate / city history) — not a fixed EGP amount.
     // Return pickup: no COD / no shipping collect — courier must not give cash to customer.
     const feeRaw = shippingFee != null ? Number(shippingFee) : null;
-    const exchangeShippingFee =
-      feeRaw != null && Number.isFinite(feeRaw) && feeRaw >= 0
-        ? feeRaw
-        : Number(priorOrder?.shippingFee) || 0;
     const method = shippingMethod || 'bosta';
     const finalShippingFee = customerReturn
       ? 0
       : exchange
-        ? exchangeShippingFee
+        ? await resolveExchangeShippingFee({
+            // Treat 0 / missing as “look up by place” so we never invent a flat fee blindly.
+            shippingFee: Number.isFinite(feeRaw) && feeRaw > 0 ? feeRaw : null,
+            priorOrder,
+            city: shippingAddress?.city || priorOrder?.shippingAddress?.city,
+          })
         : method === 'local_shipping'
           ? LOCAL_SHIPPING_FEE
           : method === 'pickup'
@@ -1174,6 +1176,50 @@ export async function findOrderForExchange(query) {
 
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Most common recent Shopify/OMS shipping fee for a destination city (place-based, not fixed).
+ */
+export async function suggestShippingFeeByCity(city) {
+  const c = String(city || '').trim();
+  if (!c) return null;
+  const rows = await Order.aggregate([
+    {
+      $match: {
+        shippingFee: { $gt: 0 },
+        'shippingAddress.city': { $regex: new RegExp(`^${escapeRegex(c)}$`, 'i') },
+      },
+    },
+    { $group: { _id: '$shippingFee', n: { $sum: 1 } } },
+    { $sort: { n: -1, _id: -1 } },
+    { $limit: 1 },
+  ]);
+  const fee = rows[0]?._id;
+  return Number.isFinite(Number(fee)) && Number(fee) > 0 ? Number(fee) : null;
+}
+
+/**
+ * Resolve exchange shipping: explicit fee → prior order city rate → city history → default.
+ */
+export async function resolveExchangeShippingFee({
+  shippingFee,
+  priorOrder,
+  city,
+} = {}) {
+  const feeRaw = shippingFee != null ? Number(shippingFee) : null;
+  if (Number.isFinite(feeRaw) && feeRaw > 0) {
+    return Math.round(feeRaw * 100) / 100;
+  }
+  const prior = Number(priorOrder?.shippingFee);
+  if (Number.isFinite(prior) && prior > 0) {
+    return Math.round(prior * 100) / 100;
+  }
+  const suggested = await suggestShippingFeeByCity(
+    city || priorOrder?.shippingAddress?.city
+  );
+  if (suggested != null) return suggested;
+  return DEFAULT_BOSTA_SHIPPING_FEE;
 }
 
 function ordersPlacedFromCutoff() {
@@ -1571,6 +1617,8 @@ export default {
   releaseOutOfStockOrdersIfRestocked,
   createManualOrder,
   findOrderForExchange,
+  suggestShippingFeeByCity,
+  resolveExchangeShippingFee,
   getOrderStateCounts,
   getOrderById,
   listOrders,
