@@ -460,8 +460,9 @@ export async function pickAndPackOrder(orderId, actorUserId) {
 
 export async function getPickList() {
   const { ORDERS_PLACED_FROM_YMD } = await import('../constants/index.js');
+  const OrderStatusHistory = (await import('../models/OrderStatusHistory.js')).default;
   const cutoff = new Date(`${ORDERS_PLACED_FROM_YMD}T00:00:00+03:00`);
-  return Order.find({
+  const orders = await Order.find({
     internalStatus: 'verified_ready_for_shipping',
     placedAt: { $gte: cutoff },
   })
@@ -473,6 +474,37 @@ export async function getPickList() {
       select: 'sku title color size imageUrl productId',
       populate: { path: 'productId', select: 'title' },
     });
+
+  // Backfill “from OOS” for ready orders that returned before the stamp field existed.
+  const missingStamp = orders.filter((o) => !o.returnedFromOutOfStockAt);
+  if (missingStamp.length) {
+    const ids = missingStamp.map((o) => o._id);
+    const rows = await OrderStatusHistory.aggregate([
+      {
+        $match: {
+          orderId: { $in: ids },
+          fromStatus: 'out_of_stock',
+          toStatus: 'verified_ready_for_shipping',
+        },
+      },
+      { $sort: { createdAt: -1 } },
+      { $group: { _id: '$orderId', at: { $first: '$createdAt' } } },
+    ]);
+    const atById = new Map(rows.map((r) => [String(r._id), r.at]));
+    for (const order of missingStamp) {
+      const at = atById.get(String(order._id));
+      if (at) {
+        order.returnedFromOutOfStockAt = at;
+        // Persist so later pick-lists skip the history scan for this order.
+        Order.updateOne(
+          { _id: order._id, returnedFromOutOfStockAt: { $exists: false } },
+          { $set: { returnedFromOutOfStockAt: at } }
+        ).catch(() => {});
+      }
+    }
+  }
+
+  return orders;
 }
 
 /**

@@ -87,6 +87,8 @@ const orderSchema = new mongoose.Schema(
     bostaShipmentError: String,
     localShippingNote: String,
     localShippingMarkedAt: Date,
+    /** Set when an order returns from out_of_stock → Ready to ship (Fulfillment “From OOS” tab). */
+    returnedFromOutOfStockAt: { type: Date, index: true },
     assignedOrdersManagerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     assignedStockManagerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     totalSellingPrice: { type: Number, required: true, min: 0 },

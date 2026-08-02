@@ -51,23 +51,36 @@ async function transitionOrder(order, toStatus, meta, session) {
   const fromStatus = order.internalStatus;
   assertTransition(fromStatus, toStatus);
 
-  const updates = {
+  const $set = {
     internalStatus: toStatus,
     lastStatusUpdateAt: new Date(),
   };
+  const $unset = {};
 
   if (toStatus === 'verified_ready_for_shipping') {
-    updates.verifiedAt = new Date();
+    $set.verifiedAt = new Date();
+    if (fromStatus === 'out_of_stock') {
+      $set.returnedFromOutOfStockAt = new Date();
+    }
+  }
+  if (
+    fromStatus === 'verified_ready_for_shipping'
+    && toStatus !== 'verified_ready_for_shipping'
+  ) {
+    $unset.returnedFromOutOfStockAt = 1;
   }
   if (toStatus === 'delivered') {
-    updates.deliveredAt = new Date();
-    updates.closedAt = new Date();
+    $set.deliveredAt = new Date();
+    $set.closedAt = new Date();
   }
   if (TERMINAL_ORDER_STATUSES.includes(toStatus)) {
-    updates.closedAt = new Date();
+    $set.closedAt = new Date();
   }
 
-  await Order.updateOne({ _id: order._id }, updates, { session });
+  const mongoUpdate = { $set };
+  if (Object.keys($unset).length) mongoUpdate.$unset = $unset;
+
+  await Order.updateOne({ _id: order._id }, mongoUpdate, { session });
   await recordStatusChange(
     {
       orderId: order._id,
