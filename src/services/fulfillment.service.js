@@ -402,7 +402,7 @@ export async function pickAndPackOrder(orderId, actorUserId) {
     order.assignedStockManagerId = actorUserId;
     await order.save();
 
-    await orderService.transitionOrderStatus(orderId, 'picked_up_by_bosta', {
+    await orderService.transitionOrderStatus(orderId, 'local_shipping', {
       source: 'user_action',
       actorUserId,
       note: 'Handed to local shipping',

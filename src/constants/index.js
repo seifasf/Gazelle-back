@@ -5,6 +5,7 @@ export const ORDER_STATUSES = [
   'verified_ready_for_shipping',
   'awaiting_bosta_pickup',
   'picked_up_by_bosta',
+  'local_shipping',
   'in_transit',
   'delivered',
   'out_of_stock',

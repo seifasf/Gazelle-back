@@ -6,6 +6,7 @@ const STOCK_MANAGER_ORDER_STATUSES = new Set([
   'awaiting_bosta_pickup',
   'out_of_stock',
   'picked_up_by_bosta',
+  'local_shipping',
   'in_transit',
   'returning_to_origin',
   'returned_awaiting_receipt',

@@ -10,9 +10,10 @@ export const ORDER_TRANSITIONS = {
   no_response: ['pending_verification', 'verified_ready_for_shipping', 'cancelled'],
   // Pickup orders can be marked as delivered directly (no courier step).
   // Warehouse can park an order as out_of_stock until inventory is fixed.
-  // Bosta: print AWB → awaiting_bosta_pickup; local courier still jumps to picked_up.
+  // Bosta: print AWB → awaiting_bosta_pickup; local courier → local_shipping.
   verified_ready_for_shipping: [
     'awaiting_bosta_pickup',
+    'local_shipping',
     'picked_up_by_bosta',
     'delivered',
     'out_of_stock',
@@ -29,6 +30,8 @@ export const ORDER_TRANSITIONS = {
     'returning_to_origin',
     'cancelled',
   ],
+  // Local courier has the package (not Bosta — never use picked_up_by_bosta for these).
+  local_shipping: ['in_transit', 'delivered', 'failed_delivery', 'returning_to_origin'],
   // Bosta webhooks can skip steps (e.g. exception → RTO without a separate in_transit event).
   picked_up_by_bosta: ['in_transit', 'delivered', 'failed_delivery', 'returning_to_origin'],
   in_transit: ['delivered', 'failed_delivery', 'returning_to_origin'],
