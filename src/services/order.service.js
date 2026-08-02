@@ -1352,7 +1352,12 @@ export async function listOrders({
       .sort(sort)
       .skip(skip)
       .limit(limit)
-      .populate('customerId', 'fullName phone riskFlag lifetimeCancelled'),
+      .populate('customerId', 'fullName phone riskFlag lifetimeCancelled')
+      .populate({
+        path: 'items.variantId',
+        select: 'title color size sku productId',
+        populate: { path: 'productId', select: 'title' },
+      }),
     Order.countDocuments(filter),
   ]);
   return { orders, total };
