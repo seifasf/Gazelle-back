@@ -942,21 +942,21 @@ export async function createManualOrder({
           );
 
     // Exchange: COD = (new−old) + shipping; if old > new, credit reduces COD but shipping still applies.
-    // Shipping is place-based (prior Shopify city rate / city history) — not a fixed EGP amount.
+    // Bosta exchange shipping is place-based; local shipping is always LOCAL_SHIPPING_FEE.
     // Return pickup: no COD / no shipping collect — courier must not give cash to customer.
     const feeRaw = shippingFee != null ? Number(shippingFee) : null;
     const method = shippingMethod || 'bosta';
     const finalShippingFee = customerReturn
       ? 0
-      : exchange
-        ? await resolveExchangeShippingFee({
-            // Treat 0 / missing as “look up by place” so we never invent a flat fee blindly.
-            shippingFee: Number.isFinite(feeRaw) && feeRaw > 0 ? feeRaw : null,
-            priorOrder,
-            city: shippingAddress?.city || priorOrder?.shippingAddress?.city,
-          })
-        : method === 'local_shipping'
-          ? LOCAL_SHIPPING_FEE
+      : method === 'local_shipping'
+        ? LOCAL_SHIPPING_FEE
+        : exchange
+          ? await resolveExchangeShippingFee({
+              // Treat 0 / missing as “look up by place” so we never invent a flat fee blindly.
+              shippingFee: Number.isFinite(feeRaw) && feeRaw > 0 ? feeRaw : null,
+              priorOrder,
+              city: shippingAddress?.city || priorOrder?.shippingAddress?.city,
+            })
           : method === 'pickup'
             ? 0
             : Number.isFinite(feeRaw) && feeRaw > 0
@@ -980,6 +980,12 @@ export async function createManualOrder({
       : customerReturn
         ? `Return pickup for ${priorLabel}`
         : null;
+
+    if (exchange && method === 'pickup') {
+      const err = new Error('Exchange cannot use customer pickup — choose Bosta or Local shipping');
+      err.statusCode = 400;
+      throw err;
+    }
 
     const isPickup = method === 'pickup' && !exchange && !customerReturn;
     const now = new Date();
@@ -1057,8 +1063,8 @@ export async function createManualOrder({
                 ? 'Pickup auto-verified · Ready to ship · print Gazelle policy on Fulfillment'
                 : exchange
                   ? exchangeCreditAmount > 0
-                    ? `Exchange auto-verified · Ready to ship · customer credit EGP ${exchangeCreditAmount} · shipping EGP ${finalShippingFee} · net COD EGP ${Math.max(0, total + finalShippingFee - exchangeCreditAmount)} · Bosta EXCHANGE`
-                    : `Exchange auto-verified · Ready to ship · upgrade EGP ${total} + shipping EGP ${finalShippingFee} · Bosta EXCHANGE`
+                    ? `Exchange auto-verified · Ready to ship · customer credit EGP ${exchangeCreditAmount} · shipping EGP ${finalShippingFee} · net COD EGP ${Math.max(0, total + finalShippingFee - exchangeCreditAmount)} · ${method === 'local_shipping' ? 'Local courier' : 'Bosta EXCHANGE'}`
+                    : `Exchange auto-verified · Ready to ship · upgrade EGP ${total} + shipping EGP ${finalShippingFee} · ${method === 'local_shipping' ? 'Local courier' : 'Bosta EXCHANGE'}`
                   : 'Manual order auto-verified · Ready to ship',
             actorUserId,
           },
