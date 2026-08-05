@@ -228,6 +228,11 @@ export async function addItem(req, res, next) {
 export async function updateShippingAddress(req, res, next) {
   try {
     const Order = (await import('../models/Order.js')).default;
+    const {
+      SHIPPING_METHODS,
+      LOCAL_SHIPPING_FEE,
+      DEFAULT_BOSTA_SHIPPING_FEE,
+    } = await import('../constants/index.js');
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ error: 'Order not found' });
     if (
@@ -237,8 +242,51 @@ export async function updateShippingAddress(req, res, next) {
     ) {
       return res.status(400).json({ error: 'Cannot edit address at this stage' });
     }
+
+    const {
+      shippingMethod,
+      line1,
+      line2,
+      city,
+      zone,
+      phone,
+      fullName,
+    } = req.body || {};
+
+    const prevMethod = order.shippingMethod || 'bosta';
+    if (shippingMethod != null && shippingMethod !== '') {
+      if (!SHIPPING_METHODS.includes(shippingMethod)) {
+        return res.status(400).json({ error: 'Invalid shipping method' });
+      }
+      if (order.isExchangeOrder && shippingMethod === 'pickup') {
+        return res.status(400).json({ error: 'Exchange orders cannot use pickup' });
+      }
+      if (order.isReturnOrder && shippingMethod !== 'bosta') {
+        return res.status(400).json({ error: 'Return pickups must use Bosta' });
+      }
+      order.shippingMethod = shippingMethod;
+      if (shippingMethod === 'local_shipping') {
+        order.shippingFee = LOCAL_SHIPPING_FEE;
+      } else if (shippingMethod === 'pickup') {
+        order.shippingFee = 0;
+      } else if (shippingMethod === 'bosta' && prevMethod !== 'bosta') {
+        const suggested = await orderService.suggestShippingFeeByCity(
+          city || order.shippingAddress?.city
+        );
+        order.shippingFee = suggested || DEFAULT_BOSTA_SHIPPING_FEE;
+      }
+    }
+
     const prev = order.shippingAddress?.toObject?.() || order.shippingAddress || {};
-    order.shippingAddress = { ...prev, ...req.body };
+    const nextAddress = { ...prev };
+    if (line1 !== undefined) nextAddress.line1 = line1;
+    if (line2 !== undefined) nextAddress.line2 = line2;
+    if (city !== undefined) nextAddress.city = city;
+    if (zone !== undefined) nextAddress.zone = zone;
+    if (phone !== undefined) nextAddress.phone = phone;
+    if (fullName !== undefined) nextAddress.fullName = fullName;
+    order.shippingAddress = nextAddress;
+
     // Address fix after a failed Bosta create — clear so stock can retry scan & ship.
     if (order.bostaShipmentStatus === 'failed' && !order.bostaDeliveryId) {
       order.bostaShipmentStatus = 'none';

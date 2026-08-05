@@ -34,8 +34,15 @@ export const ORDER_TRANSITIONS = {
     'pending_verification',
     'cancelled',
   ],
-  // Local courier has the package — confirm delivery or cancel.
-  local_shipping: ['delivered', 'cancelled', 'in_transit', 'failed_delivery', 'returning_to_origin'],
+  // Local courier has the package — confirm delivery, cancel, or pull back to Pending for exchange.
+  local_shipping: [
+    'delivered',
+    'cancelled',
+    'pending_verification',
+    'in_transit',
+    'failed_delivery',
+    'returning_to_origin',
+  ],
   // Bosta webhooks can skip steps (e.g. exception → RTO without a separate in_transit event).
   picked_up_by_bosta: ['in_transit', 'delivered', 'failed_delivery', 'returning_to_origin'],
   in_transit: ['delivered', 'failed_delivery', 'returning_to_origin'],
