@@ -1123,6 +1123,26 @@ export async function createManualOrder({
       /* non-blocking */
     }
   }
+
+  // Refund / return pickups: create Bosta CRP (type 25, COD 0) immediately.
+  // Status stays Returning to Warehouse — do not move to awaiting_bosta_pickup.
+  if (manualOrder.isReturnOrder) {
+    try {
+      const { ensureBostaDeliveryForOrder } = await import('./fulfillment.service.js');
+      await ensureBostaDeliveryForOrder(manualOrder._id, actorUserId);
+    } catch (err) {
+      logger.error(
+        { err: err?.message || err, orderId: String(manualOrder._id) },
+        'Return order created but Bosta CRP failed — print CRP from Returns to retry'
+      );
+    }
+    const refreshed = await Order.findById(manualOrder._id)
+      .populate('customerId')
+      .populate('returnFromOrderId', 'shopifyOrderId shopifyOrderName internalStatus shippingFee')
+      .populate('items.variantId', 'title color size imageUrl sku realStock onHoldStock');
+    if (refreshed) return refreshed;
+  }
+
   return manualOrder;
 }
 

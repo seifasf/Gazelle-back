@@ -22,7 +22,11 @@ router.get(
 );
 router.get('/pick-list', requireRoles('admin', 'stock_manager'), fulfillmentController.getPickList);
 router.post('/:id/pick-pack', requireRoles('admin', 'stock_manager'), fulfillmentController.pickAndPack);
-router.post('/:id/prepare-awb', requireRoles('admin', 'stock_manager'), fulfillmentController.prepareAwb);
+router.post(
+  '/:id/prepare-awb',
+  requireRoles('admin', 'stock_manager', 'orders_manager'),
+  fulfillmentController.prepareAwb
+);
 router.post('/:id/out-of-stock', requireRoles('admin', 'stock_manager'), fulfillmentController.markOutOfStock);
 // Read-only shipment status for orders managers (order detail integrations panel).
 router.get(

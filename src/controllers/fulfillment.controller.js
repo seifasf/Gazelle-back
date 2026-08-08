@@ -84,6 +84,16 @@ export async function pickAndPack(req, res, next) {
 
 export async function prepareAwb(req, res, next) {
   try {
+    if (req.user.role === 'orders_manager') {
+      const Order = (await import('../models/Order.js')).default;
+      const order = await Order.findById(req.params.id).select('isReturnOrder');
+      if (!order) return res.status(404).json({ error: 'Order not found' });
+      if (!order.isReturnOrder) {
+        return res.status(403).json({
+          error: 'Orders managers can only create/print Bosta CRP for return / refund orders',
+        });
+      }
+    }
     const awb = await fulfillmentService.prepareAwbForOrder(req.params.id, req.user._id);
     res.json({ data: awb });
   } catch (err) {
