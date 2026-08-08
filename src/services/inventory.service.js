@@ -288,6 +288,112 @@ export function buildStockIntakeEntries({ variantId, quantityDelta, reasonCode, 
   ];
 }
 
+/**
+ * Open on-hold units by order + SKU (net reserve − release from ledger).
+ */
+export async function listOnHoldItems({ search, limit = 500 } = {}) {
+  const Order = (await import('../models/Order.js')).default;
+  const Variant = (await import('../models/Variant.js')).default;
+  await import('../models/Customer.js');
+  await import('../models/Product.js');
+
+  const capped = Math.min(Math.max(Number(limit) || 500, 1), 2000);
+  const rows = await InventoryLedger.aggregate([
+    {
+      $match: {
+        orderId: { $ne: null },
+        ledgerType: { $in: ['on_hold_reserve', 'on_hold_release'] },
+      },
+    },
+    {
+      $group: {
+        _id: { orderId: '$orderId', variantId: '$variantId' },
+        quantity: { $sum: '$quantityDelta' },
+        lastAt: { $max: '$createdAt' },
+      },
+    },
+    { $match: { quantity: { $gt: 0 } } },
+    { $sort: { lastAt: -1 } },
+    { $limit: capped },
+  ]);
+
+  if (!rows.length) return { items: [], total: 0, totalUnits: 0 };
+
+  const orderIds = [...new Set(rows.map((r) => String(r._id.orderId)))];
+  const variantIds = [...new Set(rows.map((r) => String(r._id.variantId)))];
+
+  const [orders, variants] = await Promise.all([
+    Order.find({ _id: { $in: orderIds } })
+      .select(
+        'shopifyOrderName shopifyOrderId internalStatus shippingMethod placedAt customerId shippingAddress.fullName'
+      )
+      .populate('customerId', 'fullName phone')
+      .lean(),
+    Variant.find({ _id: { $in: variantIds } })
+      .select('sku title color size imageUrl realStock onHoldStock productId')
+      .populate('productId', 'title imageUrl')
+      .lean(),
+  ]);
+
+  const orderMap = new Map(orders.map((o) => [String(o._id), o]));
+  const variantMap = new Map(variants.map((v) => [String(v._id), v]));
+
+  let items = rows
+    .map((r) => {
+      const order = orderMap.get(String(r._id.orderId)) || null;
+      const variant = variantMap.get(String(r._id.variantId)) || null;
+      const orderNumber =
+        order?.shopifyOrderName
+        || (order?.shopifyOrderId
+          ? String(order.shopifyOrderId).startsWith('MAN-')
+            ? String(order.shopifyOrderId)
+            : `#${order.shopifyOrderId}`
+          : null);
+      return {
+        orderId: String(r._id.orderId),
+        orderNumber: orderNumber || String(r._id.orderId).slice(-8),
+        orderStatus: order?.internalStatus || null,
+        shippingMethod: order?.shippingMethod || null,
+        placedAt: order?.placedAt || null,
+        customerName:
+          order?.customerId?.fullName || order?.shippingAddress?.fullName || null,
+        variantId: String(r._id.variantId),
+        sku: variant?.sku || '—',
+        title: variant?.productId?.title || variant?.title || variant?.sku || '—',
+        color: variant?.color || null,
+        size: variant?.size ?? null,
+        imageUrl: variant?.imageUrl || variant?.productId?.imageUrl || null,
+        quantity: r.quantity,
+        variantOnHold: variant?.onHoldStock ?? null,
+        variantRealStock: variant?.realStock ?? null,
+        lastHoldAt: r.lastAt,
+      };
+    })
+    .filter((row) => row.quantity > 0);
+
+  const term = String(search || '').trim().toLowerCase();
+  if (term) {
+    items = items.filter((row) => {
+      const hay = [
+        row.orderNumber,
+        row.sku,
+        row.title,
+        row.color,
+        row.size,
+        row.customerName,
+        row.orderStatus,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return hay.includes(term);
+    });
+  }
+
+  const totalUnits = items.reduce((s, r) => s + (r.quantity || 0), 0);
+  return { items, total: items.length, totalUnits };
+}
+
 export default {
   applyLedgerEntries,
   notifyNegativeStockCrossings,
@@ -300,4 +406,5 @@ export default {
   buildPostDeliveryReturnEntries,
   buildManualAdjustmentEntry,
   buildStockIntakeEntries,
+  listOnHoldItems,
 };

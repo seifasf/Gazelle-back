@@ -170,6 +170,19 @@ export async function listDiscrepancies(req, res, next) {
   }
 }
 
+export async function listOnHoldItems(req, res, next) {
+  try {
+    const inventoryService = await import('../services/inventory.service.js');
+    const result = await inventoryService.listOnHoldItems({
+      search: req.query.search,
+      limit: Number(req.query.limit) || 500,
+    });
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getQueueCounts(req, res, next) {
   try {
     const data = await productService.getStockQueueCounts();
@@ -297,6 +310,7 @@ export default {
   lookupVariantFamilyBySku,
   getLedger,
   listDiscrepancies,
+  listOnHoldItems,
   getQueueCounts,
   listCatalog,
   catalogFilters,
