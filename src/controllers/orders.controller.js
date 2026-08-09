@@ -352,6 +352,18 @@ export async function applyDiscount(req, res, next) {
   }
 }
 
+export async function partialLocalDelivery(req, res, next) {
+  try {
+    const order = await orderService.partialLocalDelivery(req.params.id, req.user._id, req.body);
+    const summary = order?._partialSummary || null;
+    const data = typeof order?.toObject === 'function' ? order.toObject() : order;
+    if (summary) data.partialSummary = summary;
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export default {
   listOrders,
   getStateCounts,
@@ -372,4 +384,5 @@ export default {
   transitionStatus,
   delayOrder,
   applyDiscount,
+  partialLocalDelivery,
 };

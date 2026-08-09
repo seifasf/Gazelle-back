@@ -384,6 +384,161 @@ export async function markDelivered(orderId, source, actorUserId, note, existing
   return delivered;
 }
 
+/**
+ * Local shipping partial delivery:
+ * - deliveredQuantity → finalize stock (release hold + decrement real)
+ * - remaining units → release hold only (back to sellable warehouse/Shopify)
+ * Order is marked delivered with only the delivered lines/qty kept.
+ */
+export async function partialLocalDelivery(orderId, actorUserId, { deliveries = [], note } = {}) {
+  const delivered = await withTransaction(async (session) => {
+    const order = await Order.findById(orderId).session(session);
+    if (!order) {
+      const err = new Error('Order not found');
+      err.statusCode = 404;
+      throw err;
+    }
+    if (order.shippingMethod !== 'local_shipping') {
+      const err = new Error('Partial delivery is only for local shipping orders');
+      err.statusCode = 400;
+      throw err;
+    }
+    if (order.internalStatus !== 'local_shipping') {
+      const err = new Error('Order must be in Local shipping to partial-deliver');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const totalUnits = (order.items || []).reduce((s, i) => s + (Number(i.quantity) || 0), 0);
+    if (totalUnits < 2) {
+      const err = new Error('Partial delivery needs more than one piece on the order');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const byItemId = new Map(
+      (Array.isArray(deliveries) ? deliveries : []).map((d) => [
+        String(d.itemId || d._id || ''),
+        Math.floor(Number(d.deliveredQuantity ?? d.deliveredQty ?? d.quantity)),
+      ])
+    );
+
+    const deliveredLines = [];
+    const undeliveredLines = [];
+    const deliveredLabels = [];
+    const returnedLabels = [];
+
+    for (const item of order.items || []) {
+      const lineQty = Number(item.quantity) || 0;
+      if (lineQty < 1 || !item.variantId) continue;
+
+      const key = String(item._id);
+      if (!byItemId.has(key)) {
+        const err = new Error(`Missing delivery qty for item ${item.sku || key}`);
+        err.statusCode = 400;
+        throw err;
+      }
+      const deliveredQty = byItemId.get(key);
+      if (!Number.isFinite(deliveredQty) || deliveredQty < 0 || deliveredQty > lineQty) {
+        const err = new Error(
+          `Delivered qty for ${item.sku || 'item'} must be between 0 and ${lineQty}`
+        );
+        err.statusCode = 400;
+        throw err;
+      }
+      const returnedQty = lineQty - deliveredQty;
+
+      if (deliveredQty > 0) {
+        deliveredLines.push({
+          variantId: item.variantId,
+          sku: item.sku,
+          quantity: deliveredQty,
+          unitSellingPrice: item.unitSellingPrice,
+          unitCogs: item.unitCogs,
+        });
+        deliveredLabels.push(`${item.sku}×${deliveredQty}`);
+      }
+      if (returnedQty > 0) {
+        undeliveredLines.push({
+          variantId: item.variantId,
+          sku: item.sku,
+          quantity: returnedQty,
+        });
+        returnedLabels.push(`${item.sku}×${returnedQty}`);
+      }
+    }
+
+    const deliveredUnits = deliveredLines.reduce((s, i) => s + i.quantity, 0);
+    const returnedUnits = undeliveredLines.reduce((s, i) => s + i.quantity, 0);
+    if (deliveredUnits < 1) {
+      const err = new Error('Select at least one piece as delivered (or cancel the order)');
+      err.statusCode = 400;
+      throw err;
+    }
+    if (returnedUnits < 1) {
+      const err = new Error('All pieces marked delivered — use full Delivered instead');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // Finalize stock for delivered units; release hold only for returned units.
+    const deliveryEntries = await buildDeliveryStockEntries(order._id, deliveredLines, session);
+    const releaseEntries = buildPreDeliveryReleaseEntries(order._id, undeliveredLines);
+    const ledgerEntries = [...deliveryEntries, ...releaseEntries];
+    let ledgerDocs = [];
+    if (ledgerEntries.length) {
+      ledgerDocs = await applyLedgerEntries(ledgerEntries, session);
+    }
+
+    const newTotal = deliveredLines.reduce(
+      (s, i) => s + (Number(i.unitSellingPrice) || 0) * i.quantity,
+      0
+    );
+    const newCogs = deliveredLines.reduce(
+      (s, i) => s + (Number(i.unitCogs) || 0) * i.quantity,
+      0
+    );
+
+    const staffNote =
+      (typeof note === 'string' && note.trim()) ||
+      `Partial local delivery · delivered ${deliveredLabels.join(', ')} · returned to stock ${returnedLabels.join(', ')}`;
+
+    order.items = deliveredLines;
+    order.totalSellingPrice = Math.round(newTotal * 100) / 100;
+    order.totalCogsSnapshot = Math.round(newCogs * 100) / 100;
+    order.verificationLog = order.verificationLog || [];
+    order.verificationLog.push({
+      outcome: 'confirmed',
+      note: staffNote,
+      actorUserId,
+    });
+    await order.save({ session });
+
+    await transitionOrder(
+      order,
+      'delivered',
+      { source: 'user_action', actorUserId, note: staffNote },
+      session
+    );
+    await Customer.updateOne({ _id: order.customerId }, { $inc: { lifetimeDelivered: 1 } }, { session });
+
+    const fresh = await Order.findById(order._id).session(session);
+    await recordDeliveryJournal(fresh, actorUserId);
+    fresh._ledgerDocs = ledgerDocs;
+    fresh._partialSummary = {
+      deliveredUnits,
+      returnedUnits,
+      deliveredLabels,
+      returnedLabels,
+    };
+    return fresh;
+  });
+
+  await afterLedgerApplied(delivered?._ledgerDocs);
+  await checkVariantsLowStock((delivered?.items || []).map((i) => i.variantId));
+  return delivered;
+}
+
 export async function confirmReturnedToStock(orderId, actorUserId, note) {
   const result = await withTransaction(async (session) => {
     const order = await Order.findById(orderId).session(session);
@@ -1652,6 +1807,7 @@ export default {
   bulkVerifyOrders,
   cancelOrder,
   markDelivered,
+  partialLocalDelivery,
   confirmReturnedToStock,
   transitionOrderStatus,
   reserveStockForOrder,

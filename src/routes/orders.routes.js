@@ -31,6 +31,11 @@ router.post('/:id/claim', requireRoles('admin', 'orders_manager', 'stock_manager
 router.post('/:id/verify', requireRoles('admin', 'orders_manager'), ordersController.verifyOrder);
 router.post('/:id/delay', requireRoles('admin', 'orders_manager'), ordersController.delayOrder);
 router.post('/:id/cancel', requireRoles('admin', 'orders_manager'), ordersController.cancelOrder);
+router.post(
+  '/:id/partial-local-delivery',
+  requireRoles('admin', 'orders_manager'),
+  ordersController.partialLocalDelivery
+);
 router.post('/:id/exchange', requireRoles('admin', 'orders_manager'), ordersController.exchangeItem);
 router.post('/:id/remove-item', requireRoles('admin', 'orders_manager'), ordersController.removeItem);
 router.post('/:id/add-item', requireRoles('admin', 'orders_manager'), ordersController.addItem);
