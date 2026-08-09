@@ -7,7 +7,7 @@ export function isBostaConfigured() {
   return Boolean(config.BOSTA_API_KEY);
 }
 
-export async function bostaRequest(path, { method = 'GET', body, query } = {}) {
+export async function bostaRequest(path, { method = 'GET', body, query, quiet = false } = {}) {
   if (!config.BOSTA_API_KEY) {
     throw new Error('Bosta API key not configured');
   }
@@ -46,7 +46,9 @@ export async function bostaRequest(path, { method = 'GET', body, query } = {}) {
   }
 
   if (!response.ok) {
-    logger.error({ status: response.status, data, path }, 'Bosta API error');
+    if (!quiet) {
+      logger.error({ status: response.status, data, path }, 'Bosta API error');
+    }
     const err = new Error(data.message || `Bosta API error: ${response.status}`);
     err.statusCode = response.status;
     throw err;

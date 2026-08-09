@@ -428,7 +428,9 @@ export async function pollStuckOrders(thresholdHours = 2) {
   const results = [];
   for (const order of stuck) {
     try {
-      const delivery = await getDelivery(order.bostaDeliveryId);
+      // Prefer tracking — GET /deliveries/:id 404s on Bosta v2 for many valid shipments.
+      const key = order.bostaTrackingNumber || order.bostaDeliveryId;
+      const delivery = await getDelivery(key);
       const payload = delivery?.data || delivery;
       const state = payload?.state || payload?.status;
       if (state) {

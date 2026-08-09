@@ -1,6 +1,7 @@
 import { bostaRequest } from './client.js';
 import { config } from '../../config/index.js';
 import Settings from '../../models/Settings.js';
+import Order from '../../models/Order.js';
 import { bostaWebhookUrl } from './webhookPayload.js';
 import { fetchBostaDistricts } from './cities.service.js';
 
@@ -824,19 +825,49 @@ export async function getDelivery(deliveryIdOrTracking) {
     throw err;
   }
 
-  // Prefer business tracking lookup — GET /deliveries/:id often 404s for plugin-created shipments.
-  if (/^\d{8,}$/.test(key)) {
-    const byTracking = await bostaRequest(`/deliveries/business/${encodeURIComponent(key)}`);
+  const byBusinessTracking = async (tracking, { quiet = false } = {}) => {
+    const byTracking = await bostaRequest(
+      `/deliveries/business/${encodeURIComponent(tracking)}`,
+      { quiet }
+    );
     return byTracking?.data || byTracking;
+  };
+
+  // Prefer business tracking lookup — GET /deliveries/:id often 404s on v2
+  // (PHP SDK get() also takes tracking numbers, not Mongo-style delivery ids).
+  if (/^\d{8,}$/.test(key)) {
+    return byBusinessTracking(key);
+  }
+
+  // Alphanumeric Bosta delivery id → resolve OMS tracking, then business lookup.
+  try {
+    const order = await Order.findOne({ bostaDeliveryId: key })
+      .select('bostaTrackingNumber')
+      .lean();
+    const tracking =
+      order?.bostaTrackingNumber != null ? String(order.bostaTrackingNumber).trim() : '';
+    if (tracking) {
+      return byBusinessTracking(tracking);
+    }
+  } catch {
+    /* continue */
+  }
+
+  // Quiet probes — expected 404s must not spam "Bosta API error".
+  try {
+    return await byBusinessTracking(key, { quiet: true });
+  } catch {
+    /* continue */
   }
 
   try {
-    const response = await bostaRequest(`/deliveries/${encodeURIComponent(key)}`);
+    const response = await bostaRequest(`/deliveries/${encodeURIComponent(key)}`, {
+      quiet: true,
+    });
     return response?.data || response;
   } catch (err) {
-    // Fall back: treat key as tracking if id lookup fails.
-    const byTracking = await bostaRequest(`/deliveries/business/${encodeURIComponent(key)}`);
-    return byTracking?.data || byTracking;
+    err.message = err.message || `Bosta delivery not found: ${key}`;
+    throw err;
   }
 }
 
