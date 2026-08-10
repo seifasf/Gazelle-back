@@ -1155,10 +1155,10 @@ export async function createManualOrder({
                 goodsTotal: total,
               })
             : (() => {
-                // Prefer Shopify zone (incl. free ≥ 2999); allow explicit override only when not free.
-                if (zoneResolved.free) return 0;
+                // Always use Shopify zone from destination city (ignore stale client defaults like 90).
+                if (destCity) return zoneResolved.fee;
                 if (Number.isFinite(feeRaw) && feeRaw > 0) return feeRaw;
-                return zoneResolved.fee;
+                return DEFAULT_BOSTA_SHIPPING_FEE;
               })();
 
     const finalShippingAddress =
