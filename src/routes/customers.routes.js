@@ -8,6 +8,7 @@ const router = Router();
 router.use(authenticate);
 
 router.get('/', requireRoles('admin', 'orders_manager'), customersController.listCustomers);
+router.get('/lookup/by-phone', requireRoles('admin', 'orders_manager'), customersController.lookupByPhone);
 router.get('/:id', requireRoles('admin', 'orders_manager'), customersController.getCustomer);
 router.get('/:id/orders', requireRoles('admin', 'orders_manager'), customersController.getCustomerOrders);
 router.patch('/:id/risk-flag', requireRoles('admin', 'orders_manager'), customersController.updateRiskFlag);

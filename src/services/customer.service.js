@@ -3,11 +3,79 @@ import Order from '../models/Order.js';
 import { shopifyRest } from '../integrations/shopify/client.js';
 import { isShopifyConfigured } from '../integrations/shopify/credentials.js';
 import logger from '../utils/logger.js';
+import { isManualOrderRef } from '../utils/orderRefs.js';
+import { normalizeEgPhoneDigits, phoneMatchRegexes } from '../utils/phone.js';
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Find an existing customer by phone (handles 010 / +2010 / 2010 variants).
+ * Returns customer + last shipping address from their most recent order when available.
+ */
+export async function findCustomerByPhone(phone) {
+  const core = normalizeEgPhoneDigits(phone);
+  if (core.length < 7) return null;
+
+  const regexes = phoneMatchRegexes(phone);
+  const or = [
+    { phone: core },
+    { phone: `0${core}` },
+    { phone: `20${core}` },
+    { phone: `+20${core}` },
+    ...regexes.map((re) => ({ phone: { $regex: re } })),
+  ];
+
+  const customer = await Customer.findOne({ $or: or }).sort({ updatedAt: -1 }).lean();
+  if (!customer) return null;
+
+  const lastOrder = await Order.findOne({ customerId: customer._id })
+    .sort({ placedAt: -1 })
+    .select('shippingAddress shippingMethod shippingFee shopifyOrderName shopifyOrderId placedAt')
+    .lean();
+
+  const addr =
+    lastOrder?.shippingAddress ||
+    (customer.addresses || []).find((a) => a.isDefault) ||
+    (customer.addresses || [])[0] ||
+    null;
+
+  return {
+    customer,
+    shippingAddress: addr
+      ? {
+          line1: addr.line1 || '',
+          line2: addr.line2 || '',
+          city: addr.city || '',
+          zone: addr.zone || '',
+          fullName: addr.fullName || customer.fullName || '',
+          phone: addr.phone || customer.phone || '',
+        }
+      : null,
+    lastOrder: lastOrder
+      ? {
+          _id: lastOrder._id,
+          shopifyOrderName: lastOrder.shopifyOrderName,
+          shopifyOrderId: lastOrder.shopifyOrderId,
+          shippingMethod: lastOrder.shippingMethod,
+          shippingFee: lastOrder.shippingFee,
+          placedAt: lastOrder.placedAt,
+        }
+      : null,
+  };
+}
 
 export async function findOrCreateCustomer({ fullName, phone, email, shopifyCustomerId, shippingAddress }) {
   let customer = shopifyCustomerId
     ? await Customer.findOne({ shopifyCustomerId: String(shopifyCustomerId) })
     : null;
+  if (!customer) {
+    const byPhone = await findCustomerByPhone(phone);
+    customer = byPhone?.customer
+      ? await Customer.findById(byPhone.customer._id)
+      : null;
+  }
   if (!customer) customer = await Customer.findOne({ phone, fullName });
 
   if (!customer) {
@@ -31,6 +99,7 @@ export async function findOrCreateCustomer({ fullName, phone, email, shopifyCust
     });
   } else {
     const patch = {};
+    if (fullName && fullName !== customer.fullName) patch.fullName = fullName;
     if (email && !customer.email) patch.email = email;
     if (shopifyCustomerId && !customer.shopifyCustomerId) patch.shopifyCustomerId = String(shopifyCustomerId);
     if (Object.keys(patch).length) {
@@ -105,7 +174,7 @@ export async function getCustomerShopifyOrders(customerId) {
       _id: o._id,
       shopifyOrderId: o.shopifyOrderId,
       shopifyOrderName: o.shopifyOrderName,
-      name: o.shopifyOrderName || (o.shopifyOrderId?.startsWith('MAN-') ? o.shopifyOrderId : `#${o.shopifyOrderId}`),
+      name: o.shopifyOrderName || (isManualOrderRef(o.shopifyOrderId) ? o.shopifyOrderId : `#${o.shopifyOrderId}`),
       bostaTrackingNumber: o.bostaTrackingNumber || null,
       totalPrice: o.totalSellingPrice,
       internalStatus: o.internalStatus,
@@ -207,11 +276,15 @@ export function buildCustomerSegmentFilter(segment) {
 export async function listCustomers({ search, riskFlag, segment, limit = 50, skip = 0 }) {
   const parts = [];
   if (search) {
+    const term = String(search).trim();
+    const regex = { $regex: escapeRegex(term), $options: 'i' };
+    const phoneOr = phoneMatchRegexes(term).map((re) => ({ phone: { $regex: re } }));
     parts.push({
       $or: [
-        { fullName: { $regex: search, $options: 'i' } },
-        { phone: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } },
+        { fullName: regex },
+        { phone: regex },
+        { email: regex },
+        ...phoneOr,
       ],
     });
   }
@@ -229,6 +302,7 @@ export async function listCustomers({ search, riskFlag, segment, limit = 50, ski
 
 export default {
   findOrCreateCustomer,
+  findCustomerByPhone,
   getCustomerById,
   getCustomerShopifyOrders,
   updateCustomerRiskFlag,

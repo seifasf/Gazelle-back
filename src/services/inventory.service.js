@@ -2,6 +2,7 @@ import Variant from '../models/Variant.js';
 import InventoryLedger from '../models/InventoryLedger.js';
 import { LEDGER_TYPES } from '../constants/index.js';
 import logger from '../utils/logger.js';
+import { isManualOrderRef } from '../utils/orderRefs.js';
 import mongoose from 'mongoose';
 
 const STOCK_FIELD_MAP = {
@@ -325,7 +326,7 @@ export async function listOnHoldItems({ search, limit = 500 } = {}) {
   const [orders, variants] = await Promise.all([
     Order.find({ _id: { $in: orderIds } })
       .select(
-        'shopifyOrderName shopifyOrderId internalStatus shippingMethod placedAt customerId shippingAddress.fullName'
+        'shopifyOrderName shopifyOrderId internalStatus shippingMethod placedAt customerId shippingAddress.fullName shippingAddress.phone'
       )
       .populate('customerId', 'fullName phone')
       .lean(),
@@ -345,7 +346,7 @@ export async function listOnHoldItems({ search, limit = 500 } = {}) {
       const orderNumber =
         order?.shopifyOrderName
         || (order?.shopifyOrderId
-          ? String(order.shopifyOrderId).startsWith('MAN-')
+          ? isManualOrderRef(order.shopifyOrderId)
             ? String(order.shopifyOrderId)
             : `#${order.shopifyOrderId}`
           : null);
@@ -357,6 +358,8 @@ export async function listOnHoldItems({ search, limit = 500 } = {}) {
         placedAt: order?.placedAt || null,
         customerName:
           order?.customerId?.fullName || order?.shippingAddress?.fullName || null,
+        customerPhone:
+          order?.customerId?.phone || order?.shippingAddress?.phone || null,
         variantId: String(r._id.variantId),
         sku: variant?.sku || '—',
         title: variant?.productId?.title || variant?.title || variant?.sku || '—',
@@ -381,6 +384,7 @@ export async function listOnHoldItems({ search, limit = 500 } = {}) {
         row.color,
         row.size,
         row.customerName,
+        row.customerPhone,
         row.orderStatus,
       ]
         .filter(Boolean)

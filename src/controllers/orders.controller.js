@@ -86,11 +86,8 @@ export async function findExchangeOrder(req, res, next) {
   try {
     const order = await orderService.findOrderForExchange(req.query.q || req.query.search);
     const city = order?.shippingAddress?.city;
-    const priorFee = Number(order?.shippingFee);
-    const suggested =
-      Number.isFinite(priorFee) && priorFee > 0
-        ? priorFee
-        : (await orderService.suggestShippingFeeByCity(city)) || null;
+    const goods = Number(order?.totalSellingPrice) || 0;
+    const suggested = (await orderService.suggestShippingFeeByCity(city, goods));
     res.json({
       data: order,
       suggestedShippingFee: suggested,
@@ -102,11 +99,16 @@ export async function findExchangeOrder(req, res, next) {
 
 export async function suggestShippingFee(req, res, next) {
   try {
-    const fee = await orderService.suggestShippingFeeByCity(req.query.city);
+    const goodsTotal = Number(req.query.goodsTotal ?? req.query.subtotal ?? 0);
+    const fee = await orderService.suggestShippingFeeByCity(
+      req.query.city,
+      Number.isFinite(goodsTotal) ? goodsTotal : 0
+    );
     res.json({
       data: {
         city: String(req.query.city || '').trim() || null,
         shippingFee: fee,
+        goodsTotal: Number.isFinite(goodsTotal) ? goodsTotal : 0,
       },
     });
   } catch (err) {
@@ -270,10 +272,12 @@ export async function updateShippingAddress(req, res, next) {
       } else if (shippingMethod === 'pickup') {
         order.shippingFee = 0;
       } else if (shippingMethod === 'bosta' && prevMethod !== 'bosta') {
+        const goods = Number(order.totalSellingPrice) || 0;
         const suggested = await orderService.suggestShippingFeeByCity(
-          city || order.shippingAddress?.city
+          city || order.shippingAddress?.city,
+          goods
         );
-        order.shippingFee = suggested || DEFAULT_BOSTA_SHIPPING_FEE;
+        order.shippingFee = suggested ?? DEFAULT_BOSTA_SHIPPING_FEE;
       }
     }
 
@@ -286,6 +290,19 @@ export async function updateShippingAddress(req, res, next) {
     if (phone !== undefined) nextAddress.phone = phone;
     if (fullName !== undefined) nextAddress.fullName = fullName;
     order.shippingAddress = nextAddress;
+
+    // Recalc Bosta fee when destination city changes (not local / pickup / returns).
+    if (
+      order.shippingMethod === 'bosta' &&
+      !order.isReturnOrder &&
+      city !== undefined &&
+      String(city || '').trim() &&
+      String(city).trim() !== String(prev.city || '').trim()
+    ) {
+      const goods = Number(order.totalSellingPrice) || 0;
+      const suggested = await orderService.suggestShippingFeeByCity(city, goods);
+      if (suggested != null) order.shippingFee = suggested;
+    }
 
     // Address fix after a failed Bosta create — clear so stock can retry scan & ship.
     if (order.bostaShipmentStatus === 'failed' && !order.bostaDeliveryId) {

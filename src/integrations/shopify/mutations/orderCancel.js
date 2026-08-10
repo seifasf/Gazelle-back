@@ -1,5 +1,6 @@
 import { shopifyGraphQL } from '../client.js';
 import logger from '../../../utils/logger.js';
+import { isManualOrderRef } from '../../../utils/orderRefs.js';
 
 const ORDER_CANCEL = `
   mutation OrderCancel(
@@ -34,7 +35,7 @@ const REASON_MAP = {
 
 function toShopifyOrderGid(shopifyOrderId) {
   const id = String(shopifyOrderId || '').trim();
-  if (!id || id.startsWith('MAN-')) return null;
+  if (!id || isManualOrderRef(id)) return null;
   if (id.startsWith('gid://')) return id;
   if (/^\d+$/.test(id)) return `gid://shopify/Order/${id}`;
   return null;

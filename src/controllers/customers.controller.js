@@ -9,6 +9,17 @@ export async function listCustomers(req, res, next) {
   }
 }
 
+export async function lookupByPhone(req, res, next) {
+  try {
+    const phone = req.query.phone || req.query.q;
+    const result = await customerService.findCustomerByPhone(phone);
+    if (!result) return res.json({ data: null });
+    res.json({ data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getCustomer(req, res, next) {
   try {
     const result = await customerService.getCustomerById(req.params.id);
@@ -36,4 +47,4 @@ export async function updateRiskFlag(req, res, next) {
   }
 }
 
-export default { listCustomers, getCustomer, getCustomerOrders, updateRiskFlag };
+export default { listCustomers, lookupByPhone, getCustomer, getCustomerOrders, updateRiskFlag };

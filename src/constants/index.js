@@ -66,10 +66,10 @@ export const SHIPPING_METHODS = ['bosta', 'local_shipping', 'pickup'];
 export const LOCAL_SHIPPING_FEE = 95;
 
 /**
- * Default Bosta / Shopify city shipping when a manual order has no fee entered.
- * Matches the most common Shopify shipping_lines amount in OMS.
+ * Default Bosta / Shopify city shipping when zone lookup has no city yet.
+ * Matches Cairo-50 standard rate.
  */
-export const DEFAULT_BOSTA_SHIPPING_FEE = 90;
+export const DEFAULT_BOSTA_SHIPPING_FEE = 95;
 
 /**
  * OMS order cutover (Cairo calendar day).

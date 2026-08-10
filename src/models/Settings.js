@@ -25,6 +25,8 @@ const settingsSchema = new mongoose.Schema(
     bostaCities: [{ id: String, name: String, nameAr: String, code: String, alias: String }],
     bostaPollingThresholdHours: { type: Number, default: 48 },
     defaultLowStockThreshold: { type: Number, default: 5 },
+    /** Next sequential number for manual order codes (M-1000, M-1001, …). */
+    manualOrderNextSeq: { type: Number },
   },
   { timestamps: true }
 );

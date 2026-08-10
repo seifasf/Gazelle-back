@@ -4,6 +4,8 @@ import Variant from '../models/Variant.js';
 import Customer from '../models/Customer.js';
 import mongoose from 'mongoose';
 import { withTransaction } from '../utils/transaction.js';
+import { isManualOrderRef } from '../utils/orderRefs.js';
+import Settings from '../models/Settings.js';
 import { assertTransition, isTerminalStatus } from './orderStateMachine.js';
 import {
   applyLedgerEntries,
@@ -25,6 +27,8 @@ import {
   DEFAULT_BOSTA_SHIPPING_FEE,
   JOB_NAMES,
 } from '../constants/index.js';
+import { resolveShopifyZoneShippingFee } from '../constants/shippingZones.js';
+import { phoneMatchRegexes, normalizeEgPhoneDigits } from '../utils/phone.js';
 import { getAgenda } from '../config/agenda.js';
 import {
   notifyOrderVerified,
@@ -927,6 +931,32 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
   return { results, count: results.length, oosReleased };
 }
 
+/** Sequential manual codes: M-1000, M-1001, … (atomic via Settings). */
+async function allocateManualOrderRef(session) {
+  const START = 1000;
+  const doc = await Settings.findOneAndUpdate(
+    { key: 'global' },
+    [
+      {
+        $set: {
+          key: { $ifNull: ['$key', 'global'] },
+          manualOrderNextSeq: {
+            $add: [{ $ifNull: ['$manualOrderNextSeq', START - 1] }, 1],
+          },
+        },
+      },
+    ],
+    { new: true, upsert: true, session }
+  );
+  const n = doc?.manualOrderNextSeq;
+  if (!n || !Number.isFinite(n)) {
+    const err = new Error('Failed to allocate manual order number');
+    err.statusCode = 500;
+    throw err;
+  }
+  return `M-${n}`;
+}
+
 export async function createManualOrder({
   manualSource,
   shippingMethod,
@@ -945,7 +975,6 @@ export async function createManualOrder({
   returnFromOrderId = null,
   bostaReturnItems = null,
 }) {
-  const ref = `MAN-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const exchange = Boolean(isExchangeOrder);
   const customerReturn = Boolean(isReturnOrder);
 
@@ -994,6 +1023,7 @@ export async function createManualOrder({
       : items;
 
   const manualOrder = await withTransaction(async (session) => {
+    const ref = await allocateManualOrderRef(session);
     let populatedLedger = [];
     let priorOrder = null;
     const priorId = exchange ? exchangeFromOrderId : customerReturn ? returnFromOrderId : null;
@@ -1007,6 +1037,14 @@ export async function createManualOrder({
     }
 
     let customerDoc = await Customer.findOne({ phone: customer.phone }).session(session);
+    if (!customerDoc) {
+      const core = normalizeEgPhoneDigits(customer.phone);
+      if (core.length >= 7) {
+        customerDoc = await Customer.findOne({
+          $or: phoneMatchRegexes(customer.phone).map((re) => ({ phone: { $regex: re } })),
+        }).session(session);
+      }
+    }
     if (!customerDoc) {
       [customerDoc] = await Customer.create(
         [{
@@ -1097,26 +1135,31 @@ export async function createManualOrder({
           );
 
     // Exchange: COD = (new−old) + shipping; if old > new, credit reduces COD but shipping still applies.
-    // Bosta exchange shipping is place-based; local shipping is always LOCAL_SHIPPING_FEE.
+    // Bosta shipping = Shopify zone rates (free ≥ 2999 on zones 1–4). Local = fixed LOCAL_SHIPPING_FEE.
     // Return pickup: no COD / no shipping collect — courier must not give cash to customer.
     const feeRaw = shippingFee != null ? Number(shippingFee) : null;
     const method = shippingMethod || 'bosta';
+    const destCity = shippingAddress?.city || priorOrder?.shippingAddress?.city;
+    const zoneResolved = resolveShopifyZoneShippingFee(destCity, total);
     const finalShippingFee = customerReturn
       ? 0
       : method === 'local_shipping'
         ? LOCAL_SHIPPING_FEE
-        : exchange
-          ? await resolveExchangeShippingFee({
-              // Treat 0 / missing as “look up by place” so we never invent a flat fee blindly.
-              shippingFee: Number.isFinite(feeRaw) && feeRaw > 0 ? feeRaw : null,
-              priorOrder,
-              city: shippingAddress?.city || priorOrder?.shippingAddress?.city,
-            })
-          : method === 'pickup'
-            ? 0
-            : Number.isFinite(feeRaw) && feeRaw > 0
-              ? feeRaw
-              : DEFAULT_BOSTA_SHIPPING_FEE;
+        : method === 'pickup'
+          ? 0
+          : exchange
+            ? await resolveExchangeShippingFee({
+                shippingFee: Number.isFinite(feeRaw) && feeRaw > 0 ? feeRaw : null,
+                priorOrder,
+                city: destCity,
+                goodsTotal: total,
+              })
+            : (() => {
+                // Prefer Shopify zone (incl. free ≥ 2999); allow explicit override only when not free.
+                if (zoneResolved.free) return 0;
+                if (Number.isFinite(feeRaw) && feeRaw > 0) return feeRaw;
+                return zoneResolved.fee;
+              })();
 
     const finalShippingAddress =
       method === 'pickup'
@@ -1181,6 +1224,7 @@ export async function createManualOrder({
     const [order] = await Order.create(
       [{
         shopifyOrderId: ref,
+        shopifyOrderName: ref,
         orderSource: 'manual',
         manualSource,
         shippingMethod: method,
@@ -1304,7 +1348,7 @@ export async function createManualOrder({
 /**
  * Resolve a prior order for exchange / return by Shopify order number.
  * Always searches Shopify for the entered id (any age), then upserts into OMS.
- * Local-only fallback for manual orders (MAN-…) or Mongo ids.
+ * Local-only fallback for manual orders (M-1000 / legacy MAN-…) or Mongo ids.
  */
 export async function findOrderForExchange(query) {
   const raw = String(query || '').trim();
@@ -1316,7 +1360,7 @@ export async function findOrderForExchange(query) {
 
   const withHash = raw.startsWith('#') ? raw : `#${raw.replace(/^#/, '')}`;
   const digits = raw.replace(/\D/g, '');
-  const isManualOrMongo = /^MAN-/i.test(raw) || /^[a-f\d]{24}$/i.test(raw);
+  const isManualOrMongo = isManualOrderRef(raw) || /^[a-f\d]{24}$/i.test(raw);
 
   async function populateOrder(docOrId) {
     const id = docOrId?._id || docOrId;
@@ -1374,46 +1418,36 @@ function escapeRegex(value) {
 }
 
 /**
- * Most common recent Shopify/OMS shipping fee for a destination city (place-based, not fixed).
+ * Shopify zone shipping for a destination city (Bosta / online).
+ * Local courier stays LOCAL_SHIPPING_FEE and is handled by callers.
  */
-export async function suggestShippingFeeByCity(city) {
-  const c = String(city || '').trim();
-  if (!c) return null;
-  const rows = await Order.aggregate([
-    {
-      $match: {
-        shippingFee: { $gt: 0 },
-        'shippingAddress.city': { $regex: new RegExp(`^${escapeRegex(c)}$`, 'i') },
-      },
-    },
-    { $group: { _id: '$shippingFee', n: { $sum: 1 } } },
-    { $sort: { n: -1, _id: -1 } },
-    { $limit: 1 },
-  ]);
-  const fee = rows[0]?._id;
-  return Number.isFinite(Number(fee)) && Number(fee) > 0 ? Number(fee) : null;
+export async function suggestShippingFeeByCity(city, goodsTotal = 0) {
+  const { fee } = resolveShopifyZoneShippingFee(city, goodsTotal);
+  return fee;
 }
 
 /**
- * Resolve exchange shipping: explicit fee → prior order city rate → city history → default.
+ * Resolve exchange / Bosta shipping: explicit fee → Shopify zone by city → prior → default.
  */
 export async function resolveExchangeShippingFee({
   shippingFee,
   priorOrder,
   city,
+  goodsTotal = 0,
 } = {}) {
   const feeRaw = shippingFee != null ? Number(shippingFee) : null;
   if (Number.isFinite(feeRaw) && feeRaw > 0) {
     return Math.round(feeRaw * 100) / 100;
   }
+  const destCity = city || priorOrder?.shippingAddress?.city;
+  const zone = resolveShopifyZoneShippingFee(destCity, goodsTotal);
+  if (destCity && (zone.fee === 0 || zone.fee > 0)) {
+    return zone.fee;
+  }
   const prior = Number(priorOrder?.shippingFee);
   if (Number.isFinite(prior) && prior > 0) {
     return Math.round(prior * 100) / 100;
   }
-  const suggested = await suggestShippingFeeByCity(
-    city || priorOrder?.shippingAddress?.city
-  );
-  if (suggested != null) return suggested;
   return DEFAULT_BOSTA_SHIPPING_FEE;
 }
 
@@ -1505,6 +1539,7 @@ export async function listOrders({
           { fullName: regex },
           { phone: regex },
           { email: regex },
+          ...phoneMatchRegexes(term).map((re) => ({ phone: { $regex: re } })),
         ],
       })
         .select('_id')
@@ -1515,6 +1550,7 @@ export async function listOrders({
       const withHash = digits.startsWith('#') ? digits : `#${digits}`;
       const digitsRegex = digits ? { $regex: escapeRegex(digits), $options: 'i' } : null;
       const hashRegex = digits ? { $regex: escapeRegex(withHash), $options: 'i' } : null;
+      const phoneRes = phoneMatchRegexes(term);
 
       filter.$or = [
         { shopifyOrderId: regex },
@@ -1525,6 +1561,7 @@ export async function listOrders({
         { 'shippingAddress.phone': regex },
         { 'shippingAddress.city': regex },
         { 'items.sku': regex },
+        ...phoneRes.map((re) => ({ 'shippingAddress.phone': { $regex: re } })),
         ...(customerIds.length ? [{ customerId: { $in: customerIds } }] : []),
       ];
 

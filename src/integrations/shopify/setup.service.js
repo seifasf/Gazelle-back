@@ -11,6 +11,7 @@ import { isShopifyConfigured } from './credentials.js';
 import { shopifyRest, shopifyRestPaginated } from './client.js';
 import { handleOrdersCreate, mapImportedOrderStatus } from '../../webhooks/shopify.handlers.js';
 import logger from '../../utils/logger.js';
+import { isManualOrderRef } from '../../utils/orderRefs.js';
 
 export async function testShopifyConnection() {
   if (!(await isShopifyConfigured())) {
@@ -468,7 +469,7 @@ export async function importShopifyOrderByName(query) {
   }
 
   // Manual OMS refs are not Shopify orders.
-  if (/^MAN-/i.test(raw) || /^[a-f\d]{24}$/i.test(raw)) {
+  if (isManualOrderRef(raw) || /^[a-f\d]{24}$/i.test(raw)) {
     return null;
   }
 
