@@ -27,7 +27,24 @@ export async function findCustomerByPhone(phone) {
     ...regexes.map((re) => ({ phone: { $regex: re } })),
   ];
 
-  const customer = await Customer.findOne({ $or: or }).sort({ updatedAt: -1 }).lean();
+  let customer = await Customer.findOne({ $or: or }).sort({ updatedAt: -1 }).lean();
+
+  // Fallback: phone only on a past order's shipping address.
+  if (!customer) {
+    const orderHit = await Order.findOne({
+      $or: [
+        { 'shippingAddress.phone': { $regex: core } },
+        ...regexes.map((re) => ({ 'shippingAddress.phone': { $regex: re } })),
+      ],
+    })
+      .sort({ placedAt: -1 })
+      .select('customerId')
+      .lean();
+    if (orderHit?.customerId) {
+      customer = await Customer.findById(orderHit.customerId).lean();
+    }
+  }
+
   if (!customer) return null;
 
   const lastOrder = await Order.findOne({ customerId: customer._id })
