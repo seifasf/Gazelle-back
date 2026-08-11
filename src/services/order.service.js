@@ -1470,6 +1470,33 @@ export async function getOrderStateCounts() {
   }
   counts.total = rows.reduce((sum, r) => sum + r.count, 0);
 
+  // Refund pickups have their own tab — keep classic return lanes free of isReturnOrder.
+  const [returningExRefund, awaitingExRefund, stockedExRefund, refundOrders] = await Promise.all([
+    Order.countDocuments({
+      placedAt: { $gte: cutoff },
+      internalStatus: 'returning_to_origin',
+      isReturnOrder: { $ne: true },
+    }),
+    Order.countDocuments({
+      placedAt: { $gte: cutoff },
+      internalStatus: 'returned_awaiting_receipt',
+      isReturnOrder: { $ne: true },
+    }),
+    Order.countDocuments({
+      placedAt: { $gte: cutoff },
+      internalStatus: 'returned_to_stock',
+      isReturnOrder: { $ne: true },
+    }),
+    Order.countDocuments({
+      placedAt: { $gte: cutoff },
+      isReturnOrder: true,
+    }),
+  ]);
+  counts.returning_to_origin = returningExRefund;
+  counts.returned_awaiting_receipt = awaitingExRefund;
+  counts.returned_to_stock = stockedExRefund;
+  counts.refund_orders = refundOrders;
+
   // Fulfillment queue excludes customer pickup (handled on the order page).
   const [fulfillmentReady, pickupReady] = await Promise.all([
     Order.countDocuments({
@@ -1522,6 +1549,9 @@ export async function listOrders({
   if (shippingMethod) filter.shippingMethod = shippingMethod;
   if (isExchangeOrder === true || isExchangeOrder === 'true') filter.isExchangeOrder = true;
   if (isReturnOrder === true || isReturnOrder === 'true') filter.isReturnOrder = true;
+  if (isReturnOrder === false || isReturnOrder === 'false') {
+    filter.isReturnOrder = { $ne: true };
+  }
   if (delayed === true || delayed === '1' || delayed === 'true') {
     filter.delayedUntil = { $exists: true, $ne: null };
     if (!status) {
