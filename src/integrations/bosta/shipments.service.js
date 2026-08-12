@@ -4,6 +4,7 @@ import Settings from '../../models/Settings.js';
 import Order from '../../models/Order.js';
 import { bostaWebhookUrl } from './webhookPayload.js';
 import { fetchBostaDistricts } from './cities.service.js';
+import logger from '../../utils/logger.js';
 
 function splitName(fullName) {
   const parts = (fullName || 'Customer').trim().split(/\s+/);
@@ -776,6 +777,7 @@ export async function createDelivery(order, customer) {
 
 /**
  * Update وصف الشحنة on an existing Bosta delivery (v0 PUT — v2 has no update route).
+ * In-transit shipments often reject `notes` — retry without notes if needed.
  */
 export async function updateDeliveryPackageDescription(deliveryId, order) {
   const id = String(deliveryId || '').trim();
@@ -784,12 +786,111 @@ export async function updateDeliveryPackageDescription(deliveryId, order) {
   const variantsById = await loadVariantsForOrder(order);
   const itemsCount = (order.items || []).reduce((s, i) => s + (i.quantity || 0), 0);
   const description = buildPackageDescription(order, variantsById);
-  const body = {
+  const baseBody = {
     allowToOpenPackage: true,
     specs: { packageDetails: { itemsCount, description } },
-    notes: description,
     // Keep COD in sync — paid Shopify orders must stay 0 on the AWB.
     cod: bostaCodAmountForOrder(order),
+  };
+
+  const base = (config.BOSTA_API_BASE_URL || 'https://app.bosta.co/api/v2').replace(/\/api\/v2\/?$/, '');
+  const url = `${base}/api/v0/deliveries/${encodeURIComponent(id)}`;
+
+  async function put(body) {
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        Authorization: config.BOSTA_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await response.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = { raw: text };
+    }
+    return { response, data };
+  }
+
+  let { response, data } = await put({ ...baseBody, notes: description });
+  if (!response.ok && /notes/i.test(String(data?.message || ''))) {
+    ({ response, data } = await put(baseBody));
+  }
+  if (!response.ok) {
+    const err = new Error(data.message || `Bosta delivery update failed: ${response.status}`);
+    err.statusCode = response.status;
+    throw err;
+  }
+  return { description, data };
+}
+
+/**
+ * Push OMS shipping address + COD onto an existing Bosta AWB (v0 PUT).
+ * Used when OM corrects destination after the AWB was already created.
+ */
+export async function updateDeliveryAddressAndCod(deliveryId, order, customer) {
+  const id = String(deliveryId || '').trim();
+  if (!id || !order) return null;
+
+  const shipping = order.shippingAddress || {};
+  let city = typeof shipping.city === 'string' ? shipping.city.trim() : '';
+  let zone = typeof shipping.zone === 'string' ? shipping.zone.trim() : '';
+  let line1 = typeof shipping.line1 === 'string' ? shipping.line1.trim() : '';
+  if (!line1 || !city) {
+    const err = new Error('Shipping address needs street and city to update Bosta');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const phone = shipping.phone || customer?.phone;
+  const { firstName, lastName } = splitName(shipping.fullName || customer?.fullName);
+
+  let resolved = await resolveBostaCityId(city);
+  if (!resolved || isCountryLabel(city)) {
+    const fromZone = zone ? await resolveBostaCityId(zone) : null;
+    if (fromZone) {
+      const originalCity = city;
+      resolved = { ...fromZone, aliased: true };
+      city = fromZone.resolvedName;
+      zone = [originalCity !== city ? originalCity : null, zone !== city ? zone : null]
+        .filter(Boolean)
+        .join(' · ');
+    }
+  }
+
+  const bostaCityName = resolved?.resolvedName || city;
+  const cityId = resolved?.cityId || null;
+  if (line1.length < 10) {
+    line1 = [line1, zone, bostaCityName].filter(Boolean).join(', ');
+  }
+  const zoneHint = compactCity(zone) && compactCity(zone) !== compactCity(bostaCityName) ? zone : '';
+  const district = await resolveBostaDistrict(cityId, bostaCityName, zoneHint, shipping.line2, line1);
+
+  const dropOffAddress = {
+    city: bostaCityName,
+    ...(cityId ? { cityId } : {}),
+    firstLine: line1,
+    secondLine: shipping.line2 || '',
+    zone: district?.zoneName || zoneHint || (resolved?.aliased ? shipping.city : '') || '',
+  };
+  if (district?.districtId) {
+    dropOffAddress.districtId = district.districtId;
+    dropOffAddress.districtName = district.districtName;
+    if (district.zoneId) dropOffAddress.zoneId = district.zoneId;
+  }
+
+  const body = {
+    allowToOpenPackage: true,
+    cod: bostaCodAmountForOrder(order),
+    dropOffAddress,
+    receiver: {
+      firstName,
+      lastName,
+      ...(phone ? { phone } : {}),
+    },
   };
 
   const base = (config.BOSTA_API_BASE_URL || 'https://app.bosta.co/api/v2').replace(/\/api\/v2\/?$/, '');
@@ -810,11 +911,20 @@ export async function updateDeliveryPackageDescription(deliveryId, order) {
     data = { raw: text };
   }
   if (!response.ok) {
-    const err = new Error(data.message || `Bosta delivery update failed: ${response.status}`);
+    const err = new Error(data.message || `Bosta address update failed: ${response.status}`);
     err.statusCode = response.status;
     throw err;
   }
-  return { description, data };
+  logger.info(
+    {
+      deliveryId: id,
+      orderId: String(order._id),
+      city: bostaCityName,
+      cod: body.cod,
+    },
+    'Updated Bosta delivery address + COD'
+  );
+  return { dropOffAddress, cod: body.cod, data };
 }
 
 export async function getDelivery(deliveryIdOrTracking) {
@@ -946,6 +1056,7 @@ export default {
   getDelivery,
   getAwb,
   updateDeliveryPackageDescription,
+  updateDeliveryAddressAndCod,
   isOrderPrepaidForBosta,
   bostaCodAmountForOrder,
   bostaDeliveryTypeForOrder,

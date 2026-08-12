@@ -235,10 +235,10 @@ export async function updateShippingAddress(req, res, next) {
       LOCAL_SHIPPING_FEE,
       DEFAULT_BOSTA_SHIPPING_FEE,
     } = await import('../constants/index.js');
-    const order = await Order.findById(req.params.id);
+    const order = await Order.findById(req.params.id).populate('customerId');
     if (!order) return res.status(404).json({ error: 'Order not found' });
     if (
-      !['pending_verification', 'no_response', 'verified_ready_for_shipping', 'out_of_stock'].includes(
+      !['pending_verification', 'no_response', 'verified_ready_for_shipping', 'out_of_stock', 'awaiting_bosta_pickup'].includes(
         order.internalStatus
       )
     ) {
@@ -291,17 +291,22 @@ export async function updateShippingAddress(req, res, next) {
     if (fullName !== undefined) nextAddress.fullName = fullName;
     order.shippingAddress = nextAddress;
 
-    // Recalc Bosta fee when destination city changes (not local / pickup / returns).
-    if (
-      order.shippingMethod === 'bosta' &&
-      !order.isReturnOrder &&
-      city !== undefined &&
-      String(city || '').trim() &&
-      String(city).trim() !== String(prev.city || '').trim()
-    ) {
-      const goods = Number(order.totalSellingPrice) || 0;
-      const suggested = await orderService.suggestShippingFeeByCity(city, goods);
-      if (suggested != null) order.shippingFee = suggested;
+    const addressChanged =
+      String(nextAddress.line1 || '') !== String(prev.line1 || '')
+      || String(nextAddress.line2 || '') !== String(prev.line2 || '')
+      || String(nextAddress.city || '') !== String(prev.city || '')
+      || String(nextAddress.zone || '') !== String(prev.zone || '')
+      || String(nextAddress.phone || '') !== String(prev.phone || '')
+      || String(nextAddress.fullName || '') !== String(prev.fullName || '');
+
+    // Always recalculate Shopify zone fee for Bosta when destination is known.
+    if (order.shippingMethod === 'bosta' && !order.isReturnOrder) {
+      const destCity = String(nextAddress.city || '').trim();
+      if (destCity) {
+        const goods = Number(order.totalSellingPrice) || 0;
+        const suggested = await orderService.suggestShippingFeeByCity(destCity, goods);
+        if (suggested != null) order.shippingFee = suggested;
+      }
     }
 
     // Address fix after a failed Bosta create — clear so stock can retry scan & ship.
@@ -309,8 +314,41 @@ export async function updateShippingAddress(req, res, next) {
       order.bostaShipmentStatus = 'none';
       order.bostaShipmentError = null;
     }
+
+    if (addressChanged) {
+      order.verificationLog = order.verificationLog || [];
+      order.verificationLog.push({
+        outcome: 'confirmed',
+        note: `Address updated → ${[nextAddress.line1, nextAddress.zone, nextAddress.city].filter(Boolean).join(' · ')} · shipping EGP ${order.shippingFee ?? 0}`,
+        actorUserId: req.user?._id,
+      });
+    }
+
     await order.save();
-    res.json({ data: order });
+
+    let bostaSync = null;
+    if (
+      addressChanged
+      && order.shippingMethod === 'bosta'
+      && order.bostaDeliveryId
+    ) {
+      try {
+        const { updateDeliveryAddressAndCod } = await import('../integrations/bosta/shipments.service.js');
+        bostaSync = await updateDeliveryAddressAndCod(
+          order.bostaDeliveryId,
+          order,
+          order.customerId
+        );
+      } catch (err) {
+        // OMS address/fee already saved — surface Bosta failure so OM can retry / call support.
+        return res.json({
+          data: order,
+          warning: `Address saved in Gazelle, but Bosta AWB was not updated: ${err.message}. Reprint/check AWB or contact Bosta if the parcel is already moving.`,
+        });
+      }
+    }
+
+    res.json({ data: order, ...(bostaSync ? { bostaUpdated: true } : {}) });
   } catch (err) {
     next(err);
   }
