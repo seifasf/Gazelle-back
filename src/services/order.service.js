@@ -957,6 +957,56 @@ async function allocateManualOrderRef(session) {
   return `M-${n}`;
 }
 
+/** Parse YYYY-MM-DD as Cairo noon; reject past dates. */
+function parseCairoDelayDate(delayedUntil) {
+  const ymd = String(delayedUntil || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) {
+    const err = new Error('delayedUntil must be YYYY-MM-DD');
+    err.statusCode = 400;
+    throw err;
+  }
+  const until = new Date(`${ymd}T12:00:00+03:00`);
+  if (Number.isNaN(until.getTime())) {
+    const err = new Error('Invalid delay date');
+    err.statusCode = 400;
+    throw err;
+  }
+  const todayYmd = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Cairo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+  if (ymd < todayYmd) {
+    const err = new Error('Delay date must be today or later');
+    err.statusCode = 400;
+    throw err;
+  }
+  return { ymd, until };
+}
+
+/** Ready-to-ship orders with a future ship-after date stay out of pick/fulfillment. */
+function cairoTodayEnd() {
+  const todayYmd = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Cairo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+  return new Date(`${todayYmd}T23:59:59.999+03:00`);
+}
+
+function shipAfterNotDueFilter() {
+  const todayEnd = cairoTodayEnd();
+  return {
+    $or: [
+      { delayedUntil: null },
+      { delayedUntil: { $exists: false } },
+      { delayedUntil: { $lte: todayEnd } },
+    ],
+  };
+}
+
 export async function createManualOrder({
   manualSource,
   shippingMethod,
@@ -974,6 +1024,8 @@ export async function createManualOrder({
   isReturnOrder = false,
   returnFromOrderId = null,
   bostaReturnItems = null,
+  delayedUntil: delayedUntilInput = null,
+  delayNote: delayNoteInput = null,
 }) {
   const exchange = Boolean(isExchangeOrder);
   const customerReturn = Boolean(isReturnOrder);
@@ -1185,12 +1237,20 @@ export async function createManualOrder({
       throw err;
     }
 
+    let shipDelay = null;
+    if (delayedUntilInput && !customerReturn) {
+      shipDelay = parseCairoDelayDate(delayedUntilInput);
+    }
+    const delayNoteText =
+      typeof delayNoteInput === 'string' ? delayNoteInput.trim().slice(0, 500) : '';
+
     const isPickup = method === 'pickup' && !exchange && !customerReturn;
     const now = new Date();
 
     // Manual orders skip call-center verify:
     // - normal / exchange / local / bosta / customer pickup → Ready to ship
     // - refund / return → Returning to Warehouse (track inbound)
+    // - optional ship-after date → still Ready (stock held) but hidden from pick until that day
     let initialStatus = 'verified_ready_for_shipping';
     if (customerReturn) initialStatus = 'returning_to_origin';
 
@@ -1249,6 +1309,12 @@ export async function createManualOrder({
         items: orderItems,
         placedAt: now,
         assignedOrdersManagerId: actorUserId,
+        ...(shipDelay
+          ? {
+              delayedUntil: shipDelay.until,
+              delayNote: delayNoteText || `Ship after ${shipDelay.ymd}`,
+            }
+          : {}),
         verificationLog: [
           ...(note ? [{ outcome: 'confirmed', note, actorUserId }] : []),
           ...(linkNote
@@ -1264,7 +1330,9 @@ export async function createManualOrder({
                   ? exchangeCreditAmount > 0
                     ? `Exchange auto-verified · Ready to ship · customer credit EGP ${exchangeCreditAmount} · shipping EGP ${finalShippingFee} · net COD EGP ${Math.max(0, total + finalShippingFee - exchangeCreditAmount)} · ${method === 'local_shipping' ? 'Local courier' : 'Bosta EXCHANGE'}`
                     : `Exchange auto-verified · Ready to ship · upgrade EGP ${total} + shipping EGP ${finalShippingFee} · ${method === 'local_shipping' ? 'Local courier' : 'Bosta EXCHANGE'}`
-                  : 'Manual order auto-verified · Ready to ship',
+                  : shipDelay
+                    ? `Manual order auto-verified · Ready to ship after ${shipDelay.ymd}${delayNoteText ? ` — ${delayNoteText}` : ''}`
+                    : 'Manual order auto-verified · Ready to ship',
             actorUserId,
           },
         ],
@@ -1497,27 +1565,38 @@ export async function getOrderStateCounts() {
   counts.returned_to_stock = stockedExRefund;
   counts.refund_orders = refundOrders;
 
-  // Fulfillment queue excludes customer pickup (handled on the order page).
+  // Fulfillment queue excludes customer pickup (handled on the order page)
+  // and orders with a future ship-after date.
+  const shipReady = shipAfterNotDueFilter();
   const [fulfillmentReady, pickupReady] = await Promise.all([
     Order.countDocuments({
       placedAt: { $gte: cutoff },
       internalStatus: 'verified_ready_for_shipping',
       shippingMethod: { $ne: 'pickup' },
+      ...shipReady,
     }),
     Order.countDocuments({
       placedAt: { $gte: cutoff },
       internalStatus: 'verified_ready_for_shipping',
       shippingMethod: 'pickup',
+      ...shipReady,
     }),
   ]);
   counts.fulfillment_ready = fulfillmentReady;
   counts.pickup_ready = pickupReady;
 
-  // Delayed callbacks still sit in verify / no-response with a future (or today) date.
+  // Delayed: verify callbacks + ready-to-ship orders waiting for ship-after date.
+  const todayEnd = cairoTodayEnd();
   counts.delayed = await Order.countDocuments({
     placedAt: { $gte: cutoff },
-    internalStatus: { $in: ['pending_verification', 'no_response'] },
     delayedUntil: { $exists: true, $ne: null },
+    $or: [
+      { internalStatus: { $in: ['pending_verification', 'no_response'] } },
+      {
+        internalStatus: 'verified_ready_for_shipping',
+        delayedUntil: { $gt: todayEnd },
+      },
+    ],
   });
 
   return counts;
@@ -1555,8 +1634,29 @@ export async function listOrders({
   if (delayed === true || delayed === '1' || delayed === 'true') {
     filter.delayedUntil = { $exists: true, $ne: null };
     if (!status) {
-      filter.internalStatus = { $in: ['pending_verification', 'no_response'] };
+      const todayEnd = cairoTodayEnd();
+      filter.$and = [
+        ...(filter.$and || []),
+        {
+          $or: [
+            { internalStatus: { $in: ['pending_verification', 'no_response'] } },
+            {
+              internalStatus: 'verified_ready_for_shipping',
+              delayedUntil: { $gt: todayEnd },
+            },
+          ],
+        },
+      ];
     }
+  }
+  // Ready-to-ship queue hides future ship-after dates (manual delay shipping).
+  const readyOnly =
+    filter.internalStatus === 'verified_ready_for_shipping'
+    || (Array.isArray(filter.internalStatus?.$in)
+      && filter.internalStatus.$in.length === 1
+      && filter.internalStatus.$in[0] === 'verified_ready_for_shipping');
+  if (readyOnly) {
+    filter.$and = [...(filter.$and || []), shipAfterNotDueFilter()];
   }
   if (search) {
     const term = String(search).trim();
@@ -1666,33 +1766,7 @@ export async function delayOrder(orderId, actorUserId, { delayedUntil, note }) {
     throw err;
   }
 
-  const ymd = String(delayedUntil || '').slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) {
-    const err = new Error('delayedUntil must be YYYY-MM-DD');
-    err.statusCode = 400;
-    throw err;
-  }
-
-  // Store as noon UTC-ish for the Cairo calendar day via Egypt offset approximation:
-  // Use start-of-day Cairo by constructing ISO with +03:00 (EET/EEST approx; fine for date-only).
-  const until = new Date(`${ymd}T12:00:00+03:00`);
-  if (Number.isNaN(until.getTime())) {
-    const err = new Error('Invalid delay date');
-    err.statusCode = 400;
-    throw err;
-  }
-
-  const todayYmd = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Africa/Cairo',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
-  if (ymd < todayYmd) {
-    const err = new Error('Delay date must be today or later');
-    err.statusCode = 400;
-    throw err;
-  }
+  const { ymd, until } = parseCairoDelayDate(delayedUntil);
 
   order.delayedUntil = until;
   order.delayNote = typeof note === 'string' ? note.trim().slice(0, 500) : '';

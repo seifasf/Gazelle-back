@@ -462,9 +462,23 @@ export async function getPickList() {
   const { ORDERS_PLACED_FROM_YMD } = await import('../constants/index.js');
   const OrderStatusHistory = (await import('../models/OrderStatusHistory.js')).default;
   const cutoff = new Date(`${ORDERS_PLACED_FROM_YMD}T00:00:00+03:00`);
+  const todayYmd = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Cairo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+  const todayEnd = new Date(`${todayYmd}T23:59:59.999+03:00`);
+
   const orders = await Order.find({
     internalStatus: 'verified_ready_for_shipping',
     placedAt: { $gte: cutoff },
+    // Hide manual/Shopify ship-after delays until the Cairo calendar day arrives.
+    $or: [
+      { delayedUntil: null },
+      { delayedUntil: { $exists: false } },
+      { delayedUntil: { $lte: todayEnd } },
+    ],
   })
     // Newest ready-to-ship first so newly joined orders are easy to spot/select.
     .sort({ verifiedAt: -1, placedAt: -1 })

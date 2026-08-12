@@ -47,15 +47,65 @@ async function applyLedgerEntry(entry, session) {
 
   const stockField = STOCK_FIELD_MAP[ledgerType];
   const variant = await Variant.findById(variantId).session(session);
+  // Cancel / release on old orders (manual import, deleted SKUs) must not block OMS cancel.
   if (!variant) {
+    if (ledgerType === 'on_hold_release') {
+      logger.warn(
+        { variantId: String(variantId), orderId: orderId ? String(orderId) : null },
+        'Skipping hold release — variant deleted; writing ledger only'
+      );
+      const ledgerDoc = await InventoryLedger.create(
+        [
+          {
+            variantId,
+            orderId,
+            ledgerType,
+            quantityDelta,
+            reasonCode: reasonCode || 'variant_missing_on_release',
+            actorUserId,
+            shopifySyncStatus: shopifySyncStatus || 'synced',
+          },
+        ],
+        { session }
+      );
+      return {
+        ledger: ledgerDoc[0],
+        variantId,
+        stockField,
+        previous: 0,
+        next: 0,
+        orderId: orderId || null,
+        skippedVariant: true,
+      };
+    }
     const err = new Error(`Variant not found: ${variantId}`);
     err.statusCode = 404;
     throw err;
   }
 
   const previous = variant[stockField] ?? 0;
-  const newValue = previous + quantityDelta;
-  if (stockField === 'onHoldStock' && newValue < 0) {
+  let appliedDelta = quantityDelta;
+  let newValue = previous + quantityDelta;
+  // Clamp hold release so partial / stale holds never block cancel.
+  if (stockField === 'onHoldStock' && quantityDelta < 0 && newValue < 0) {
+    appliedDelta = -previous;
+    newValue = 0;
+    if (appliedDelta === 0) {
+      logger.warn(
+        { variantId: String(variantId), orderId: orderId ? String(orderId) : null },
+        'No on-hold left to release — skipping stock update'
+      );
+      return {
+        ledger: null,
+        variantId,
+        stockField,
+        previous,
+        next: previous,
+        orderId: orderId || null,
+        skippedEmptyHold: true,
+      };
+    }
+  } else if (stockField === 'onHoldStock' && newValue < 0) {
     const err = new Error(
       `Stock would go negative: ${stockField}=${previous} delta=${quantityDelta}`
     );
@@ -69,7 +119,7 @@ async function applyLedgerEntry(entry, session) {
         variantId,
         orderId,
         ledgerType,
-        quantityDelta,
+        quantityDelta: appliedDelta,
         reasonCode,
         actorUserId,
         shopifySyncStatus,
@@ -78,7 +128,11 @@ async function applyLedgerEntry(entry, session) {
     { session }
   );
 
-  await Variant.updateOne({ _id: variantId }, { $inc: { [stockField]: quantityDelta } }, { session });
+  await Variant.updateOne(
+    { _id: variantId },
+    { $inc: { [stockField]: appliedDelta } },
+    { session }
+  );
 
   return {
     ledger: ledgerDoc[0],
@@ -100,7 +154,7 @@ export async function applyLedgerEntries(entries, session) {
 
   for (const entry of entries) {
     const applied = await applyLedgerEntry(entry, session);
-    results.push(applied.ledger);
+    if (applied.ledger) results.push(applied.ledger);
 
     if (
       applied.stockField === 'realStock' &&

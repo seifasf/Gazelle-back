@@ -70,16 +70,34 @@ export async function cancelShopifyOrder({
   const result = data?.orderCancel;
   const errors = [...(result?.orderCancelUserErrors || [])];
 
-  if (errors.length) {
-    const message = errors.map((e) => e.message).join('; ');
-    logger.error({ shopifyOrderId, errors }, 'Shopify orderCancel userErrors');
+  // Already cancelled on Shopify is a success for OMS (idempotent).
+  const softOk = errors.filter((e) => {
+    const msg = String(e?.message || '').toLowerCase();
+    const code = String(e?.code || '').toUpperCase();
+    return (
+      msg.includes('already been cancel')
+      || msg.includes('already canceled')
+      || msg.includes('already cancelled')
+      || code === 'ORDER_IS_CANCELED'
+      || code === 'ORDER_IS_CANCELLED'
+    );
+  });
+  const hardErrors = errors.filter((e) => !softOk.includes(e));
+
+  if (hardErrors.length) {
+    const message = hardErrors.map((e) => e.message).join('; ');
+    logger.error({ shopifyOrderId, errors: hardErrors }, 'Shopify orderCancel userErrors');
     const err = new Error(`Shopify cancel failed: ${message}`);
     err.statusCode = 502;
-    err.shopifyErrors = errors;
+    err.shopifyErrors = hardErrors;
     throw err;
   }
 
-  return { skipped: false, job: result?.job || null };
+  if (softOk.length) {
+    logger.info({ shopifyOrderId }, 'Shopify order already cancelled — treating as success');
+  }
+
+  return { skipped: false, job: result?.job || null, alreadyCancelled: softOk.length > 0 };
 }
 
 export default { cancelShopifyOrder, toShopifyOrderGid };
