@@ -47,12 +47,12 @@ async function applyLedgerEntry(entry, session) {
 
   const stockField = STOCK_FIELD_MAP[ledgerType];
   const variant = await Variant.findById(variantId).session(session);
-  // Cancel / release on old orders (manual import, deleted SKUs) must not block OMS cancel.
+  // Cancel / release / return on old orders (deleted SKUs) must not block OMS.
   if (!variant) {
-    if (ledgerType === 'on_hold_release') {
+    if (ledgerType === 'on_hold_release' || ledgerType === 'real_stock_increment_return') {
       logger.warn(
-        { variantId: String(variantId), orderId: orderId ? String(orderId) : null },
-        'Skipping hold release — variant deleted; writing ledger only'
+        { variantId: String(variantId), orderId: orderId ? String(orderId) : null, ledgerType },
+        'Skipping stock update — variant deleted; writing ledger only'
       );
       const ledgerDoc = await InventoryLedger.create(
         [
@@ -61,7 +61,7 @@ async function applyLedgerEntry(entry, session) {
             orderId,
             ledgerType,
             quantityDelta,
-            reasonCode: reasonCode || 'variant_missing_on_release',
+            reasonCode: reasonCode || 'variant_missing_on_stock_op',
             actorUserId,
             shopifySyncStatus: shopifySyncStatus || 'synced',
           },
@@ -322,6 +322,63 @@ export function buildPostDeliveryReturnEntries(orderId, items) {
 }
 
 /**
+ * Restock only units that were sold (real_stock_decrement) and not yet returned.
+ * Prefer this over deliveredAt — that flag can be missing after imports / status repairs.
+ */
+export async function buildOutstandingReturnRestockEntries(orderId, items, session) {
+  const entries = [];
+  for (const item of items || []) {
+    const qty = Number(item.quantity) || 0;
+    if (qty < 1 || !item.variantId) continue;
+
+    const decremented = Math.abs(
+      await netOrderLedgerQty(orderId, item.variantId, ['real_stock_decrement'], session)
+    );
+    const alreadyReturned = Math.max(
+      0,
+      await netOrderLedgerQty(orderId, item.variantId, ['real_stock_increment_return'], session)
+    );
+    const need = Math.max(0, Math.min(qty, decremented - alreadyReturned));
+    if (need > 0) {
+      entries.push({
+        variantId: item.variantId,
+        orderId,
+        ledgerType: 'real_stock_increment_return',
+        quantityDelta: need,
+      });
+    }
+  }
+  return entries;
+}
+
+/**
+ * Release only remaining on-hold for this order's lines (idempotent).
+ */
+export async function buildOutstandingHoldReleaseEntries(orderId, items, session) {
+  const entries = [];
+  for (const item of items || []) {
+    const qty = Number(item.quantity) || 0;
+    if (qty < 1 || !item.variantId) continue;
+    const netHold = await netOrderLedgerQty(
+      orderId,
+      item.variantId,
+      ['on_hold_reserve', 'on_hold_release'],
+      session
+    );
+    const releaseQty = Math.min(qty, Math.max(0, netHold));
+    if (releaseQty > 0) {
+      entries.push({
+        variantId: item.variantId,
+        orderId,
+        ledgerType: 'on_hold_release',
+        quantityDelta: -releaseQty,
+      });
+    }
+  }
+  return entries;
+}
+
+/**
  * Manual warehouse adjustment on real_stock.
  */
 export function buildManualAdjustmentEntry({ variantId, quantityDelta, reasonCode, actorUserId }) {
@@ -462,6 +519,8 @@ export default {
   buildMissingHoldEntries,
   buildPreDeliveryReleaseEntries,
   buildPostDeliveryReturnEntries,
+  buildOutstandingReturnRestockEntries,
+  buildOutstandingHoldReleaseEntries,
   buildManualAdjustmentEntry,
   buildStockIntakeEntries,
   listOnHoldItems,

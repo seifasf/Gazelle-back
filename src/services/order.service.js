@@ -16,6 +16,8 @@ import {
   buildMissingHoldEntries,
   buildPreDeliveryReleaseEntries,
   buildPostDeliveryReturnEntries,
+  buildOutstandingReturnRestockEntries,
+  buildOutstandingHoldReleaseEntries,
   buildManualAdjustmentEntry,
   buildStockIntakeEntries,
 } from './inventory.service.js';
@@ -582,61 +584,92 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
 
     /**
      * What physically arrives at the warehouse:
-     * - Exchange (delivered): COLLECT lines (bostaReturnItems) — outbound already sold on deliver
-     * - Exchange (never delivered): outbound package came back — release hold only
-     * - Refund CRP: pickup lines (bostaReturnItems or items) → +real stock
-     * - Post-delivery RTO: order.items → +real stock
-     * - Pre-delivery refused: release hold on order.items only
+     * - Exchange (sold): COLLECT lines (bostaReturnItems) → +real stock
+     * - Exchange (never sold): outbound package came back → release hold only
+     * - Refund CRP: pickup lines → +real stock
+     * - Post-sale RTO: order.items that were decremented → +real stock
+     * - Pre-sale refused: release remaining hold on order.items only
+     *
+     * Use ledger truth (decrement vs return) — do not trust deliveredAt alone.
      */
     const collectLines =
       Array.isArray(order.bostaReturnItems) && order.bostaReturnItems.length > 0
         ? order.bostaReturnItems
         : order.items;
 
-    let ledgerEntries;
+    const fmtLines = (lines) =>
+      (lines || []).map((i) => `${i.sku || '?'}×${i.quantity || 0}`).join(', ') || 'none';
+
+    let ledgerEntries = [];
     let restockVariantIds = [];
     let confirmNote;
 
-    if (order.isExchangeOrder && order.deliveredAt) {
-      if (!collectLines?.length) {
-        const err = new Error('Exchange has no collect items to restock — check bostaReturnItems');
-        err.statusCode = 400;
-        throw err;
+    if (order.isExchangeOrder) {
+      const collectRestock = await buildOutstandingReturnRestockEntries(
+        order._id,
+        collectLines,
+        session
+      );
+      const outboundRestock = await buildOutstandingReturnRestockEntries(
+        order._id,
+        order.items,
+        session
+      );
+      const outboundHold = await buildOutstandingHoldReleaseEntries(order._id, order.items, session);
+
+      // Sold exchange: restock what the courier collected (preferred) and/or sold outbound.
+      if (collectRestock.length || (order.deliveredAt && collectLines?.length)) {
+        ledgerEntries = collectRestock.length
+          ? collectRestock
+          : await buildOutstandingReturnRestockEntries(order._id, collectLines, session);
+        // If collect lines never decremented (customer return of different SKUs), still +real
+        // for the collect quantities when this is an explicit exchange collect.
+        if (!ledgerEntries.length && collectLines?.length) {
+          ledgerEntries = buildPostDeliveryReturnEntries(order._id, collectLines);
+        }
+        restockVariantIds = (collectLines || []).map((i) => i.variantId).filter(Boolean);
+        confirmNote =
+          note || `Exchange collect received — restocked ${fmtLines(collectLines)}`;
+      } else if (outboundRestock.length) {
+        ledgerEntries = outboundRestock;
+        restockVariantIds = (order.items || []).map((i) => i.variantId).filter(Boolean);
+        confirmNote =
+          note || `Exchange package returned after sale — restocked ${fmtLines(order.items)}`;
+      } else {
+        ledgerEntries = outboundHold;
+        confirmNote =
+          note ||
+          `Exchange not delivered — released hold on ${fmtLines(order.items)}`;
       }
-      ledgerEntries = buildPostDeliveryReturnEntries(order._id, collectLines);
-      restockVariantIds = collectLines.map((i) => i.variantId).filter(Boolean);
-      confirmNote =
-        note ||
-        `Exchange collect received — restocked ${collectLines
-          .map((i) => `${i.sku}×${i.quantity}`)
-          .join(', ')}`;
-    } else if (order.isExchangeOrder) {
-      // Failed exchange / customer refused — outbound never sold; free the hold.
-      ledgerEntries = buildPreDeliveryReleaseEntries(order._id, order.items);
-      confirmNote =
-        note ||
-        `Exchange not delivered — released hold on ${(order.items || [])
-          .map((i) => `${i.sku}×${i.quantity}`)
-          .join(', ')}`;
     } else if (order.isReturnOrder) {
-      ledgerEntries = buildPostDeliveryReturnEntries(order._id, collectLines);
-      restockVariantIds = collectLines.map((i) => i.variantId).filter(Boolean);
+      ledgerEntries = await buildOutstandingReturnRestockEntries(order._id, collectLines, session);
+      if (!ledgerEntries.length && collectLines?.length) {
+        // Refund pickup: goods were never decremented against this CRP order — always +real.
+        ledgerEntries = buildPostDeliveryReturnEntries(order._id, collectLines);
+      }
+      restockVariantIds = (collectLines || []).map((i) => i.variantId).filter(Boolean);
       confirmNote =
-        note ||
-        `Refund pickup received — restocked ${(collectLines || [])
-          .map((i) => `${i.sku}×${i.quantity}`)
-          .join(', ')}`;
-    } else if (order.deliveredAt) {
-      ledgerEntries = buildPostDeliveryReturnEntries(order._id, order.items);
-      restockVariantIds = (order.items || []).map((i) => i.variantId).filter(Boolean);
-      confirmNote = note || 'Physical receipt confirmed — returned to warehouse stock';
+        note || `Refund pickup received — restocked ${fmtLines(collectLines)}`;
     } else {
-      // Customer refused / failed delivery before sell — free the hold, do not +1 real stock.
-      ledgerEntries = buildPreDeliveryReleaseEntries(order._id, order.items);
-      confirmNote = note || 'Physical receipt confirmed — hold released (never delivered)';
+      const restock = await buildOutstandingReturnRestockEntries(order._id, order.items, session);
+      if (restock.length) {
+        ledgerEntries = restock;
+        restockVariantIds = (order.items || []).map((i) => i.variantId).filter(Boolean);
+        confirmNote =
+          note || `Physical receipt confirmed — returned to warehouse stock (${fmtLines(order.items)})`;
+      } else {
+        ledgerEntries = await buildOutstandingHoldReleaseEntries(order._id, order.items, session);
+        confirmNote =
+          note ||
+          (ledgerEntries.length
+            ? `Physical receipt confirmed — hold released, never sold (${fmtLines(order.items)})`
+            : `Physical receipt confirmed — stock already aligned (${fmtLines(order.items)})`);
+      }
     }
 
-    const ledgerDocs = await applyLedgerEntries(ledgerEntries, session);
+    const ledgerDocs = ledgerEntries.length
+      ? await applyLedgerEntries(ledgerEntries, session)
+      : [];
 
     await transitionOrder(
       order,
