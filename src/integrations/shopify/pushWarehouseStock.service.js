@@ -93,7 +93,17 @@ export async function syncVariantAvailableToShopify(variantId) {
   variant.onlineStock = target;
   variant.shopifyAvailable = target > 0;
   variant.lastSyncedAt = new Date();
-  await variant.save();
+  // Avoid full-document validate — open stock may already be negative on realStock.
+  await Variant.updateOne(
+    { _id: variant._id },
+    {
+      $set: {
+        onlineStock: target,
+        shopifyAvailable: target > 0,
+        lastSyncedAt: new Date(),
+      },
+    }
+  );
 
   return { sku: variant.sku, available: target, locationId };
 }
