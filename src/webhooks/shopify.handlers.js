@@ -4,7 +4,7 @@ import Product from '../models/Product.js';
 import WebhookReceipt from '../models/WebhookReceipt.js';
 import { withTransaction } from '../utils/transaction.js';
 import { findOrCreateCustomer } from '../services/customer.service.js';
-import { reserveStockForOrder, cancelOrder, syncShopifySellableAfterLedger } from '../services/order.service.js';
+import { reserveStockForOrder, cancelOrder, syncShopifySellableAfterLedger, ingestShopifyAvailableIncrease } from '../services/order.service.js';
 import { notifyNewOrder } from '../services/notification.service.js';
 import OrderStatusHistory from '../models/OrderStatusHistory.js';
 import { reportOnlineStockDrift } from '../services/discrepancy.service.js';
@@ -299,9 +299,26 @@ export async function handleInventoryLevelsUpdate(payload) {
   const variant = await Variant.findOne({ shopifyInventoryItemId: inventoryItemId });
   if (!variant) return null;
 
-  const shopifyAvailable = payload.available ?? payload.available_adjustment;
-  if (shopifyAvailable != null) {
-    await reportOnlineStockDrift(variant._id, shopifyAvailable);
+  // Absolute available is preferred; ignore relative-only adjustments without a level.
+  const shopifyAvailable =
+    payload.available != null
+      ? payload.available
+      : payload.available_adjustment != null && variant.onlineStock != null
+        ? Number(variant.onlineStock) + Number(payload.available_adjustment)
+        : null;
+
+  if (shopifyAvailable == null || !Number.isFinite(Number(shopifyAvailable))) {
+    return variant;
+  }
+
+  try {
+    await ingestShopifyAvailableIncrease(variant._id, shopifyAvailable);
+  } catch (err) {
+    logger.warn(
+      { err: err?.message || err, sku: variant.sku, shopifyAvailable },
+      'Shopify inventory ingest / OOS release failed'
+    );
+    await reportOnlineStockDrift(variant._id, shopifyAvailable).catch(() => null);
   }
   return variant;
 }

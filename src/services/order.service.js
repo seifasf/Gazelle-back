@@ -20,6 +20,7 @@ import {
   buildOutstandingHoldReleaseEntries,
   buildManualAdjustmentEntry,
   buildStockIntakeEntries,
+  netOrderLedgerQty,
 } from './inventory.service.js';
 import {
   TERMINAL_ORDER_STATUSES,
@@ -184,6 +185,68 @@ export async function syncShopifySellableAfterLedger(ledgerDocs, opts = {}) {
 /** Force-push current OMS sellable for explicit variant ids (returns / intakes). */
 export async function forceSyncVariantsToShopify(variantIds = []) {
   return enqueueShopifySync([], { forcePolicyFull: true, variantIds });
+}
+
+/**
+ * When Shopify available increases above OMS sellable (admin edit on Shopify),
+ * raise warehouse realStock so sellable matches, then auto-release OOS orders.
+ * Decreases on Shopify are ignored here (OMS / order webhooks own outbound sales).
+ */
+export async function ingestShopifyAvailableIncrease(variantId, shopifyAvailable) {
+  const targetAvail = Math.max(0, Math.round(Number(shopifyAvailable)));
+  if (!Number.isFinite(Number(shopifyAvailable))) return null;
+
+  const variant = await Variant.findById(variantId);
+  if (!variant) return null;
+
+  const real = Number(variant.realStock) || 0;
+  const hold = Math.max(0, Number(variant.onHoldStock) || 0);
+  const omsSellable = Math.max(0, real - hold);
+
+  // Keep cached online figure aligned for UI / drift checks.
+  if ((variant.onlineStock ?? null) !== targetAvail) {
+    await Variant.updateOne(
+      { _id: variant._id },
+      {
+        $set: {
+          onlineStock: targetAvail,
+          shopifyAvailable: targetAvail > 0,
+          lastSyncedAt: new Date(),
+        },
+      }
+    );
+  }
+
+  if (targetAvail > omsSellable) {
+    const delta = targetAvail - omsSellable;
+    logger.info(
+      { variantId: String(variant._id), sku: variant.sku, omsSellable, targetAvail, delta },
+      'Shopify available higher than OMS — ingesting into warehouse realStock'
+    );
+    return manualStockAdjustment({
+      variantId: variant._id,
+      quantityDelta: delta,
+      reasonCode: 'shopify_restock',
+      actorUserId: null,
+      skipOosAutoRelease: false,
+    });
+  }
+
+  // Stock already covers Shopify figure — still try freeing OOS orders.
+  const oosReleased = await releaseOutOfStockOrdersIfRestocked([variant._id], {
+    note: 'Auto: stock available (Shopify/OMS) — back to Ready to ship',
+  });
+
+  if (targetAvail < omsSellable) {
+    try {
+      const { reportOnlineStockDrift } = await import('./discrepancy.service.js');
+      await reportOnlineStockDrift(variant._id, targetAvail);
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  return { adjusted: false, oosReleased };
 }
 
 export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCogsSnapshot, shippingMethod }) {
@@ -754,7 +817,7 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
 
 /**
  * After warehouse stock increases, move Out of stock orders back to Ready to ship
- * when every line item now has enough realStock.
+ * when every line can be covered by free warehouse stock + that order's existing hold.
  */
 export async function releaseOutOfStockOrdersIfRestocked(
   variantIds,
@@ -784,21 +847,45 @@ export async function releaseOutOfStockOrdersIfRestocked(
       candidates.flatMap((o) => (o.items || []).map((i) => String(i.variantId))).filter(Boolean)
     ),
   ];
-  const variants = await Variant.find({ _id: { $in: neededVariantIds } }).select('realStock sku');
-  const stockById = new Map(variants.map((v) => [String(v._id), v.realStock ?? 0]));
+  const variants = await Variant.find({ _id: { $in: neededVariantIds } }).select(
+    'realStock onHoldStock sku'
+  );
+  const stockById = new Map(
+    variants.map((v) => [
+      String(v._id),
+      { real: v.realStock ?? 0, hold: Math.max(0, v.onHoldStock ?? 0) },
+    ])
+  );
 
   const released = [];
-  const releaseNote =
-    note || 'Auto: stock restocked — back to Ready to ship';
+  const releaseNote = note || 'Auto: stock restocked — back to Ready to ship';
 
   for (const order of candidates) {
     const lines = order.items || [];
     if (!lines.length) continue;
-    const fullyStocked = lines.every((item) => {
-      const have = stockById.get(String(item.variantId));
-      if (have == null) return false;
-      return have >= (item.quantity || 0);
-    });
+
+    let fullyStocked = true;
+    for (const item of lines) {
+      const need = Number(item.quantity) || 0;
+      const stock = stockById.get(String(item.variantId));
+      if (!stock || need < 1) {
+        fullyStocked = false;
+        break;
+      }
+      const orderHold = Math.max(
+        0,
+        await netOrderLedgerQty(order._id, item.variantId, [
+          'on_hold_reserve',
+          'on_hold_release',
+        ])
+      );
+      // Free sellable + units already reserved for this OOS order.
+      const availableForOrder = stock.real - stock.hold + orderHold;
+      if (availableForOrder < need) {
+        fullyStocked = false;
+        break;
+      }
+    }
     if (!fullyStocked) continue;
 
     try {
@@ -807,16 +894,34 @@ export async function releaseOutOfStockOrdersIfRestocked(
         const fresh = await Order.findById(order._id).session(session);
         if (!fresh || fresh.internalStatus !== 'out_of_stock') return false;
         ledgerDocs = await ensureOrderStockHeld(fresh._id, fresh.items, session);
-        await transitionOrder(fresh, 'verified_ready_for_shipping', {
-          source: 'system',
-          actorUserId,
-          note: releaseNote,
-        }, session);
+        await transitionOrder(
+          fresh,
+          'verified_ready_for_shipping',
+          {
+            source: 'system',
+            actorUserId,
+            note: releaseNote,
+          },
+          session
+        );
         return true;
       });
       if (didRelease) {
         await afterLedgerApplied(ledgerDocs);
         released.push(String(order._id));
+        // Refresh in-memory stock map so the next OOS order sees updated holds.
+        for (const item of lines) {
+          const key = String(item.variantId);
+          const stock = stockById.get(key);
+          if (!stock) continue;
+          const v = await Variant.findById(item.variantId).select('realStock onHoldStock');
+          if (v) {
+            stockById.set(key, {
+              real: v.realStock ?? 0,
+              hold: Math.max(0, v.onHoldStock ?? 0),
+            });
+          }
+        }
       }
     } catch (err) {
       logger.warn(
@@ -2071,4 +2176,5 @@ export default {
   applyOrderDiscount,
   syncShopifySellableAfterLedger,
   forceSyncVariantsToShopify,
+  ingestShopifyAvailableIncrease,
 };
