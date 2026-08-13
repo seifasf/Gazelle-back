@@ -16,7 +16,7 @@ const envSchema = z.object({
   SHOPIFY_CLIENT_ID: z.string().optional(),
   SHOPIFY_CLIENT_SECRET: z.string().optional(),
   SHOPIFY_WEBHOOK_SECRET: z.string().optional(),
-  SHOPIFY_API_VERSION: z.string().default('2025-01'),
+  SHOPIFY_API_VERSION: z.string().default('2026-07'),
   SHOPIFY_LOCATION_ID: z.string().optional(),
   BOSTA_API_KEY: z.string().optional(),
   BOSTA_API_BASE_URL: z.string().default('https://app.bosta.co/api/v2'),

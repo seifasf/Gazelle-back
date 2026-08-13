@@ -4,8 +4,7 @@ import Product from '../models/Product.js';
 import WebhookReceipt from '../models/WebhookReceipt.js';
 import { withTransaction } from '../utils/transaction.js';
 import { findOrCreateCustomer } from '../services/customer.service.js';
-import { reserveStockForOrder, cancelOrder, syncShopifySellableAfterLedger, markDelivered } from '../services/order.service.js';
-import { canTransition } from '../services/orderStateMachine.js';
+import { reserveStockForOrder, cancelOrder, syncShopifySellableAfterLedger } from '../services/order.service.js';
 import { notifyNewOrder } from '../services/notification.service.js';
 import OrderStatusHistory from '../models/OrderStatusHistory.js';
 import { reportOnlineStockDrift } from '../services/discrepancy.service.js';
@@ -239,21 +238,9 @@ export async function handleOrdersUpdated(payload) {
   }
   await order.save();
 
-  // Fulfilled on Shopify → mark delivered in OMS when the transition is allowed.
-  // Bosta remains primary for in-flight courier steps; this catches Admin fulfills.
-  if (
-    !payload.cancelled_at &&
-    payload.fulfillment_status === 'fulfilled' &&
-    order.internalStatus !== 'delivered' &&
-    canTransition(order.internalStatus, 'delivered')
-  ) {
-    return markDelivered(
-      order._id,
-      'shopify_webhook',
-      null,
-      'Marked delivered via Shopify fulfillment'
-    );
-  }
+  // Do NOT map Shopify "fulfilled" → OMS delivered.
+  // Shopify marks fulfilled when a fulfillment/AWB is created; Bosta (or pickup
+  // confirmation in OMS) remains the source of truth for delivery / stock decrement.
 
   return order;
 }

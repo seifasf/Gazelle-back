@@ -11,7 +11,7 @@ const settingsSchema = new mongoose.Schema(
     shopifyClientSecret: String,
     shopifyTokenExpiresAt: Date,
     shopifyWebhookSecret: String,
-    shopifyApiVersion: { type: String, default: '2025-01' },
+    shopifyApiVersion: { type: String, default: '2026-07' },
     shopifyShopName: String,
     shopifyLocationId: String,
     shopifyLastSyncAt: Date,

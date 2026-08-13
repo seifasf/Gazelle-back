@@ -2,6 +2,16 @@ import Settings from '../../models/Settings.js';
 import { config } from '../../config/index.js';
 import logger from '../../utils/logger.js';
 
+/** inventorySetQuantities schema changed in 2026-04; bump older pinned versions. */
+function normalizeShopifyApiVersion(version) {
+  const raw = String(version || '').trim() || '2026-07';
+  const m = raw.match(/^(\d{4})-(\d{2})$/);
+  if (!m) return '2026-07';
+  const n = Number(m[1]) * 100 + Number(m[2]);
+  if (n < 202604) return '2026-07';
+  return raw;
+}
+
 export async function getShopifyCredentials() {
   const settings = await Settings.findOne({ key: 'global' });
 
@@ -13,7 +23,9 @@ export async function getShopifyCredentials() {
     tokenExpiresAt: settings?.shopifyTokenExpiresAt || null,
     webhookSecret: config.SHOPIFY_WEBHOOK_SECRET || settings?.shopifyWebhookSecret || null,
     locationId: config.SHOPIFY_LOCATION_ID || settings?.shopifyLocationId || null,
-    apiVersion: config.SHOPIFY_API_VERSION || settings?.shopifyApiVersion || '2025-01',
+    apiVersion: normalizeShopifyApiVersion(
+      config.SHOPIFY_API_VERSION || settings?.shopifyApiVersion || '2026-07'
+    ),
     shopName: settings?.shopifyShopName || null,
   };
 }
