@@ -102,18 +102,18 @@ async function transitionOrder(order, toStatus, meta, session) {
   return { fromStatus, toStatus };
 }
 
-async function enqueueShopifySync(ledgerDocs, { forcePolicyFull = false } = {}) {
+async function enqueueShopifySync(ledgerDocs, { forcePolicyFull = true, variantIds: extraIds = [] } = {}) {
   const docs = Array.isArray(ledgerDocs) ? ledgerDocs : [];
   const variantIds = [
     ...new Set(
-      docs
-        .map((d) => (d?.variantId != null ? String(d.variantId) : null))
-        .filter(Boolean)
+      [
+        ...docs.map((d) => (d?.variantId != null ? String(d.variantId) : null)),
+        ...(Array.isArray(extraIds) ? extraIds.map((id) => (id != null ? String(id) : null)) : []),
+      ].filter(Boolean)
     ),
   ];
-  if (!variantIds.length) return;
+  if (!variantIds.length) return { synced: [], failed: [] };
 
-  // All order holds/releases/decrements (Shopify + manual/pickup) update Shopify sellable.
   const { syncVariantAvailableToShopify } = await import(
     '../integrations/shopify/pushWarehouseStock.service.js'
   );
@@ -121,22 +121,37 @@ async function enqueueShopifySync(ledgerDocs, { forcePolicyFull = false } = {}) 
     '../integrations/shopify/writePolicy.js'
   );
 
-  // Stock intake must always write Shopify — enable full policy if needed.
+  // Stock moves must always reach Shopify — keep write policy enabled.
   if (forcePolicyFull) {
     await enableShopifyInventorySync();
   } else {
     const policy = await getShopifyWritePolicy();
-    if (policy !== 'full') return;
+    if (policy !== 'full') return { synced: [], failed: [], skippedPolicy: true };
   }
 
+  const synced = [];
+  const failed = [];
+
   for (const variantId of variantIds) {
-    try {
-      await syncVariantAvailableToShopify(variantId);
-    } catch (err) {
-      logger.warn(
-        { err: err?.message || err, variantId },
-        'Immediate Shopify stock sync failed — queueing retry'
-      );
+    let lastErr = null;
+    let ok = false;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        const result = await syncVariantAvailableToShopify(variantId);
+        synced.push({ variantId, ...(result || {}) });
+        ok = true;
+        break;
+      } catch (err) {
+        lastErr = err;
+        logger.warn(
+          { err: err?.message || err, variantId, attempt },
+          'Shopify stock sync attempt failed'
+        );
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 300 * attempt));
+      }
+    }
+    if (!ok) {
+      failed.push({ variantId, error: lastErr?.message || String(lastErr) });
       try {
         const agenda = getAgenda();
         await agenda.now(JOB_NAMES.SHOPIFY_OUTBOUND_INVENTORY, { variantId });
@@ -145,16 +160,30 @@ async function enqueueShopifySync(ledgerDocs, { forcePolicyFull = false } = {}) 
       }
     }
   }
+
+  if (failed.length) {
+    logger.error(
+      { failedCount: failed.length, failed },
+      'Shopify stock sync still failing after retries — queued Agenda jobs'
+    );
+  }
+
+  return { synced, failed };
 }
 
 async function afterLedgerApplied(ledgerDocs, opts = {}) {
   await notifyNegativeStockCrossings(ledgerDocs?._negativeCrossings || []);
-  await enqueueShopifySync(ledgerDocs, opts);
+  return enqueueShopifySync(ledgerDocs, { forcePolicyFull: true, ...opts });
 }
 
 /** Public: push Shopify sellable (real − all holds) after hold/real ledger commits. */
 export async function syncShopifySellableAfterLedger(ledgerDocs, opts = {}) {
   return afterLedgerApplied(ledgerDocs, opts);
+}
+
+/** Force-push current OMS sellable for explicit variant ids (returns / intakes). */
+export async function forceSyncVariantsToShopify(variantIds = []) {
+  return enqueueShopifySync([], { forcePolicyFull: true, variantIds });
 }
 
 export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCogsSnapshot, shippingMethod }) {
@@ -692,10 +721,26 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
       order: await Order.findById(orderId).session(session),
       ledgerDocs,
       restockVariantIds,
+      syncVariantIds: [
+        ...new Set(
+          [
+            ...(order.items || []).map((i) => i.variantId),
+            ...(order.bostaReturnItems || []).map((i) => i.variantId),
+            ...restockVariantIds,
+          ]
+            .map((id) => (id != null ? String(id) : null))
+            .filter(Boolean)
+        ),
+      ],
     };
   });
 
-  await afterLedgerApplied(result.ledgerDocs);
+  // Always force Shopify for every SKU on the return — even if ledger was hold-only
+  // or a prior push failed. Retries + Agenda backup live inside enqueueShopifySync.
+  await afterLedgerApplied(result.ledgerDocs, {
+    forcePolicyFull: true,
+    variantIds: result.syncVariantIds,
+  });
 
   // Restock (exchange collect / refund / post-delivery return) may unblock Out of stock orders.
   if (result.restockVariantIds?.length) {
@@ -2025,4 +2070,5 @@ export default {
   processDelayCallbacksDue,
   applyOrderDiscount,
   syncShopifySellableAfterLedger,
+  forceSyncVariantsToShopify,
 };
