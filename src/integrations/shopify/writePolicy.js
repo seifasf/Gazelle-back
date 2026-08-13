@@ -2,8 +2,8 @@ import Settings from '../../models/Settings.js';
 
 /**
  * Shopify inventory sync: OMS warehouse is source of truth when policy=`full`.
- * Sellable on Shopify = realStock − holds from Shopify (non-manual) orders.
- * Manual orders never change Shopify stock. Stock intake always forces `full`.
+ * Sellable on Shopify = realStock − onHoldStock (all orders: Shopify + manual/pickup).
+ * Stock intake always forces `full` and writes Shopify.
  * Default remains oms_only until explicitly enabled (or first stock intake).
  */
 export async function getShopifyWritePolicy() {

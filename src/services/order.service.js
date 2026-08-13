@@ -100,39 +100,18 @@ async function transitionOrder(order, toStatus, meta, session) {
   return { fromStatus, toStatus };
 }
 
-/**
- * Variant IDs that should push to Shopify.
- * Manual-order ledger rows never drive Shopify inventory (offline sales stay OMS-only).
- * Stock intake / adjustments (no orderId) always qualify.
- */
-async function variantIdsForShopifySync(ledgerDocs) {
-  const docs = Array.isArray(ledgerDocs) ? ledgerDocs : [];
-  const orderIds = [
-    ...new Set(docs.map((d) => (d?.orderId != null ? String(d.orderId) : null)).filter(Boolean)),
-  ];
-  let manualOrderIds = new Set();
-  if (orderIds.length) {
-    const orders = await Order.find({ _id: { $in: orderIds } })
-      .select('orderSource')
-      .lean();
-    manualOrderIds = new Set(
-      orders.filter((o) => o.orderSource === 'manual').map((o) => String(o._id))
-    );
-  }
-
-  const variantIds = new Set();
-  for (const d of docs) {
-    if (d?.variantId == null) continue;
-    if (d.orderId != null && manualOrderIds.has(String(d.orderId))) continue;
-    variantIds.add(String(d.variantId));
-  }
-  return [...variantIds];
-}
-
 async function enqueueShopifySync(ledgerDocs, { forcePolicyFull = false } = {}) {
-  const variantIds = await variantIdsForShopifySync(ledgerDocs);
+  const docs = Array.isArray(ledgerDocs) ? ledgerDocs : [];
+  const variantIds = [
+    ...new Set(
+      docs
+        .map((d) => (d?.variantId != null ? String(d.variantId) : null))
+        .filter(Boolean)
+    ),
+  ];
   if (!variantIds.length) return;
 
+  // All order holds/releases/decrements (Shopify + manual/pickup) update Shopify sellable.
   const { syncVariantAvailableToShopify } = await import(
     '../integrations/shopify/pushWarehouseStock.service.js'
   );
@@ -171,7 +150,7 @@ async function afterLedgerApplied(ledgerDocs, opts = {}) {
   await enqueueShopifySync(ledgerDocs, opts);
 }
 
-/** Public: push Shopify sellable (real − Shopify-order holds) after hold/real ledger commits. */
+/** Public: push Shopify sellable (real − all holds) after hold/real ledger commits. */
 export async function syncShopifySellableAfterLedger(ledgerDocs, opts = {}) {
   return afterLedgerApplied(ledgerDocs, opts);
 }
@@ -883,8 +862,7 @@ export async function stockIntake({
 
 /**
  * Set absolute warehouse realStock for many variants (open-stock count / Excel import).
- * Always pushes sellable qty (realStock − Shopify-order holds) to Shopify.
- * Manual-order holds are excluded from the Shopify figure.
+ * Always pushes sellable qty (realStock − onHoldStock) to Shopify — all order holds count.
  */
 export async function setRealStockBatch({ items, reasonCode = 'stock_count', actorUserId }) {
   if (!Array.isArray(items) || !items.length) {
