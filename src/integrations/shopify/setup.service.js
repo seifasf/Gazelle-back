@@ -9,7 +9,7 @@ import { fetchLocations } from './queries/locations.js';
 import { syncCatalogFromShopify, syncCatalog } from './sync.service.js';
 import { isShopifyConfigured } from './credentials.js';
 import { shopifyRest, shopifyRestPaginated } from './client.js';
-import { handleOrdersCreate, mapImportedOrderStatus } from '../../webhooks/shopify.handlers.js';
+import { handleOrdersCreate, handleOrdersUpdated, mapImportedOrderStatus } from '../../webhooks/shopify.handlers.js';
 import logger from '../../utils/logger.js';
 import { isManualOrderRef } from '../../utils/orderRefs.js';
 
@@ -142,7 +142,11 @@ export async function importRecentShopifyOrders({ limit = 50 } = {}) {
  * Shopify returns the oldest page of the window and recent sales never land in OMS.
  * Paginate the full window by default (maxItems = Infinity).
  */
-export async function importShopifyOrdersSince({ since, maxItems = Infinity } = {}) {
+export async function importShopifyOrdersSince({
+  since,
+  maxItems = Infinity,
+  dateField = 'created_at',
+} = {}) {
   if (!(await isShopifyConfigured())) {
     const err = new Error('Shopify credentials not configured');
     err.statusCode = 400;
@@ -157,12 +161,21 @@ export async function importShopifyOrdersSince({ since, maxItems = Infinity } = 
   }
 
   const createdAtMin = encodeURIComponent(sinceDate.toISOString());
-  const results = { fetched: 0, imported: 0, skipped: 0, errors: [], since: sinceDate.toISOString() };
+  const dateParam = dateField === 'updated_at' ? 'updated_at_min' : 'created_at_min';
+  const sortOrder = dateField === 'updated_at' ? 'updated_at%20desc' : 'created_at%20desc';
+  const results = {
+    fetched: 0,
+    imported: 0,
+    updated: 0,
+    skipped: 0,
+    errors: [],
+    since: sinceDate.toISOString(),
+    dateField,
+  };
 
-  // created_at_min + order=created_at desc: matches Shopify range-search guidance
-  // and guarantees the first pages are the most recent orders.
+  // Prefer updated_at for recurring sync so cancel/fulfill on existing orders land in OMS.
   await shopifyRestPaginated(
-    `/orders.json?status=any&created_at_min=${createdAtMin}&limit=250&order=created_at%20desc`,
+    `/orders.json?status=any&${dateParam}=${createdAtMin}&limit=250&order=${sortOrder}`,
     'orders',
     {
       maxItems,
@@ -172,12 +185,8 @@ export async function importShopifyOrdersSince({ since, maxItems = Infinity } = 
           try {
             const existing = await Order.findOne({ shopifyOrderId: String(order.id) });
             if (existing) {
-              const name = order.name || (order.order_number != null ? `#${order.order_number}` : null);
-              if (name && existing.shopifyOrderName !== name) {
-                existing.shopifyOrderName = name;
-                await existing.save();
-              }
-              results.skipped += 1;
+              await handleOrdersUpdated(order);
+              results.updated += 1;
               continue;
             }
             const statusOverride = mapImportedOrderStatus(order);
@@ -219,11 +228,7 @@ export async function importAllShopifyOrders({ maxItems = Infinity } = {}) {
         try {
           const existing = await Order.findOne({ shopifyOrderId: String(order.id) });
           if (existing) {
-            const name = order.name || (order.order_number != null ? `#${order.order_number}` : null);
-            if (name && existing.shopifyOrderName !== name) {
-              existing.shopifyOrderName = name;
-              await existing.save();
-            }
+            await handleOrdersUpdated(order);
             results.skipped += 1;
             continue;
           }
@@ -268,11 +273,7 @@ export async function importOpenShopifyOrders({ maxItems = Infinity } = {}) {
           try {
             const existing = await Order.findOne({ shopifyOrderId: String(order.id) });
             if (existing) {
-              const name = order.name || (order.order_number != null ? `#${order.order_number}` : null);
-              if (name && existing.shopifyOrderName !== name) {
-                existing.shopifyOrderName = name;
-                await existing.save();
-              }
+              await handleOrdersUpdated(order);
               results.skipped += 1;
               continue;
             }

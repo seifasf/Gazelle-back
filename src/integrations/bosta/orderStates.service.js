@@ -137,13 +137,28 @@ async function linkAndSyncOrder(order, delivery, note) {
   };
 }
 
+/** Courier-active OMS statuses — keep these freshest from Bosta. */
+const COURIER_ACTIVE_STATUSES = [
+  'awaiting_bosta_pickup',
+  'picked_up_by_bosta',
+  'in_transit',
+  'failed_delivery',
+  'returning_to_origin',
+  'returned_awaiting_receipt',
+];
+
 /**
  * Pull live Bosta states into OMS orders (already-linked shipments only).
  *
- * @param {{ limit?: number, since?: Date|string|null }} opts
+ * @param {{ limit?: number, since?: Date|string|null, prioritizeCourier?: boolean }} opts
  *   since — when set, only OMS orders placed on/after this date.
+ *   prioritizeCourier — refresh awaiting/in-transit/etc. first (default true).
  */
-export async function syncOrderStatesFromBosta({ limit = 80, since = null } = {}) {
+export async function syncOrderStatesFromBosta({
+  limit = 200,
+  since = null,
+  prioritizeCourier = true,
+} = {}) {
   if (!isBostaConfigured()) {
     return { skipped: 'bosta_not_configured' };
   }
@@ -155,33 +170,61 @@ export async function syncOrderStatesFromBosta({ limit = 80, since = null } = {}
     refreshed: 0,
     linked: 0,
     synced: 0,
+    statusChanged: 0,
     unmatched: 0,
     errors: [],
     samples: [],
     since: sinceOk ? sinceOk.toISOString() : null,
   };
 
-  const linkedFilter = {
+  const linkedBase = {
     $or: [
       { bostaDeliveryId: { $exists: true, $ne: null } },
       { bostaTrackingNumber: { $exists: true, $ne: null } },
     ],
-    internalStatus: { $nin: ['cancelled', 'returned_to_stock'] },
+    internalStatus: { $nin: ['cancelled', 'returned_to_stock', 'delivered'] },
   };
-  if (sinceOk) linkedFilter.placedAt = { $gte: sinceOk };
+  if (sinceOk) linkedBase.placedAt = { $gte: sinceOk };
 
-  // 1) Refresh already-linked shipments via tracking number.
-  const linkedOrders = await Order.find(linkedFilter)
-    .sort({ lastStatusUpdateAt: 1, updatedAt: 1 })
-    .limit(limit)
-    .select('_id bostaDeliveryId bostaTrackingNumber bostaShipmentStatus internalStatus');
+  const select =
+    '_id shopifyOrderName bostaDeliveryId bostaTrackingNumber bostaShipmentStatus internalStatus';
+  const sort = { lastStatusUpdateAt: 1, updatedAt: 1 };
+
+  let linkedOrders = [];
+  if (prioritizeCourier) {
+    const courierLimit = Math.min(limit, 150);
+    const courier = await Order.find({
+      ...linkedBase,
+      internalStatus: { $in: COURIER_ACTIVE_STATUSES },
+    })
+      .sort(sort)
+      .limit(courierLimit)
+      .select(select);
+
+    const remaining = Math.max(0, limit - courier.length);
+    let rest = [];
+    if (remaining > 0) {
+      const courierIds = courier.map((o) => o._id);
+      rest = await Order.find({
+        ...linkedBase,
+        _id: { $nin: courierIds },
+      })
+        .sort(sort)
+        .limit(remaining)
+        .select(select);
+    }
+    linkedOrders = [...courier, ...rest];
+  } else {
+    linkedOrders = await Order.find(linkedBase).sort(sort).limit(limit).select(select);
+  }
 
   for (const order of linkedOrders) {
     try {
+      const before = order.internalStatus;
       const payload = await resolveLiveDelivery(order, null);
       const state = payload?.state || payload?.status;
       if (!state) continue;
-      await processBostaStatusUpdate({
+      const updated = await processBostaStatusUpdate({
         deliveryId: order.bostaDeliveryId || order.bostaTrackingNumber,
         state,
         payload,
@@ -189,6 +232,18 @@ export async function syncOrderStatesFromBosta({ limit = 80, since = null } = {}
       });
       results.refreshed += 1;
       results.synced += 1;
+      const after = updated?.internalStatus || before;
+      if (after && after !== before) {
+        results.statusChanged += 1;
+        if (results.samples.length < 15) {
+          results.samples.push({
+            order: order.shopifyOrderName || String(order._id),
+            from: before,
+            to: after,
+            tracking: order.bostaTrackingNumber,
+          });
+        }
+      }
     } catch (err) {
       results.errors.push({ orderId: order._id, error: err.message });
       logger.warn({ err, orderId: order._id }, 'Bosta linked refresh failed');

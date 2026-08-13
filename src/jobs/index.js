@@ -111,7 +111,7 @@ export function registerJobs(agenda) {
   });
 
   agenda.define(JOB_NAMES.BOSTA_ORDER_STATES_SYNC, async () => {
-    const result = await syncOrderStatesFromBosta({ limit: 100 });
+    const result = await syncOrderStatesFromBosta({ limit: 200, prioritizeCourier: true });
     logger.info(result, 'Scheduled Bosta order-states sync finished');
     return result;
   });
@@ -126,10 +126,9 @@ export function registerJobs(agenda) {
   agenda.define(JOB_NAMES.CHECK_SLOW_MOVERS, async () => checkSlowMovers());
 
   agenda.define(JOB_NAMES.SHOPIFY_ORDERS_SYNC, async () => {
-    // Pull every order in the window (newest first). A low maxItems + asc sort
-    // previously left recent Shopify sales out of the OMS / dashboard.
+    // Pull recently updated Shopify orders so cancel/fulfill status lands in OMS.
     const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
-    const result = await importShopifyOrdersSince({ since });
+    const result = await importShopifyOrdersSince({ since, dateField: 'updated_at' });
     logger.info(result, 'Scheduled Shopify orders sync finished');
     return result;
   });
@@ -147,8 +146,9 @@ export function registerJobs(agenda) {
 export async function scheduleRecurringJobs(agenda) {
   await agenda.every('1 hour', JOB_NAMES.SHOPIFY_CATALOG_SYNC);
   await agenda.every('5 minutes', JOB_NAMES.SHOPIFY_ORDERS_SYNC);
-  await agenda.every('10 minutes', JOB_NAMES.BOSTA_ORDER_STATES_SYNC);
-  await agenda.every('30 minutes', JOB_NAMES.BOSTA_POLLING_FALLBACK);
+  // Keep courier statuses (awaiting / in transit / delivered) fresh from Bosta.
+  await agenda.every('3 minutes', JOB_NAMES.BOSTA_ORDER_STATES_SYNC);
+  await agenda.every('15 minutes', JOB_NAMES.BOSTA_POLLING_FALLBACK);
   await agenda.every('30 minutes', JOB_NAMES.BOSTA_RETURNS_SYNC);
   await agenda.every('24 hours', JOB_NAMES.CHECK_RESTOCK_NEEDED);
   await agenda.every('24 hours', JOB_NAMES.CHECK_SLOW_MOVERS);

@@ -100,24 +100,53 @@ async function transitionOrder(order, toStatus, meta, session) {
   return { fromStatus, toStatus };
 }
 
-async function enqueueShopifySync(ledgerDocs) {
+/**
+ * Variant IDs that should push to Shopify.
+ * Manual-order ledger rows never drive Shopify inventory (offline sales stay OMS-only).
+ * Stock intake / adjustments (no orderId) always qualify.
+ */
+async function variantIdsForShopifySync(ledgerDocs) {
   const docs = Array.isArray(ledgerDocs) ? ledgerDocs : [];
-  const variantIds = [
-    ...new Set(
-      docs
-        .map((d) => (d?.variantId != null ? String(d.variantId) : null))
-        .filter(Boolean)
-    ),
+  const orderIds = [
+    ...new Set(docs.map((d) => (d?.orderId != null ? String(d.orderId) : null)).filter(Boolean)),
   ];
+  let manualOrderIds = new Set();
+  if (orderIds.length) {
+    const orders = await Order.find({ _id: { $in: orderIds } })
+      .select('orderSource')
+      .lean();
+    manualOrderIds = new Set(
+      orders.filter((o) => o.orderSource === 'manual').map((o) => String(o._id))
+    );
+  }
+
+  const variantIds = new Set();
+  for (const d of docs) {
+    if (d?.variantId == null) continue;
+    if (d.orderId != null && manualOrderIds.has(String(d.orderId))) continue;
+    variantIds.add(String(d.variantId));
+  }
+  return [...variantIds];
+}
+
+async function enqueueShopifySync(ledgerDocs, { forcePolicyFull = false } = {}) {
+  const variantIds = await variantIdsForShopifySync(ledgerDocs);
   if (!variantIds.length) return;
 
-  // Prefer immediate sync so returns / deliveries update Shopify without waiting on Agenda.
   const { syncVariantAvailableToShopify } = await import(
     '../integrations/shopify/pushWarehouseStock.service.js'
   );
-  const { getShopifyWritePolicy } = await import('../integrations/shopify/writePolicy.js');
-  const policy = await getShopifyWritePolicy();
-  if (policy !== 'full') return;
+  const { getShopifyWritePolicy, enableShopifyInventorySync } = await import(
+    '../integrations/shopify/writePolicy.js'
+  );
+
+  // Stock intake must always write Shopify — enable full policy if needed.
+  if (forcePolicyFull) {
+    await enableShopifyInventorySync();
+  } else {
+    const policy = await getShopifyWritePolicy();
+    if (policy !== 'full') return;
+  }
 
   for (const variantId of variantIds) {
     try {
@@ -137,14 +166,14 @@ async function enqueueShopifySync(ledgerDocs) {
   }
 }
 
-async function afterLedgerApplied(ledgerDocs) {
+async function afterLedgerApplied(ledgerDocs, opts = {}) {
   await notifyNegativeStockCrossings(ledgerDocs?._negativeCrossings || []);
-  await enqueueShopifySync(ledgerDocs);
+  await enqueueShopifySync(ledgerDocs, opts);
 }
 
-/** Public: push Shopify sellable (real − hold) after hold/real ledger commits. */
-export async function syncShopifySellableAfterLedger(ledgerDocs) {
-  return afterLedgerApplied(ledgerDocs);
+/** Public: push Shopify sellable (real − Shopify-order holds) after hold/real ledger commits. */
+export async function syncShopifySellableAfterLedger(ledgerDocs, opts = {}) {
+  return afterLedgerApplied(ledgerDocs, opts);
 }
 
 export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCogsSnapshot, shippingMethod }) {
@@ -275,13 +304,26 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
       throw err;
     }
 
-    const cancellable = [
-      'pending_verification',
-      'no_response',
-      'verified_ready_for_shipping',
-      'out_of_stock',
-      'local_shipping',
-    ];
+    const shopifyDriven = source === 'shopify_webhook' || source === 'shopify_import';
+    const cancellable = shopifyDriven
+      ? [
+          'pending_verification',
+          'no_response',
+          'verified_ready_for_shipping',
+          'out_of_stock',
+          'local_shipping',
+          'awaiting_bosta_pickup',
+          'picked_up_by_bosta',
+          'in_transit',
+          'failed_delivery',
+        ]
+      : [
+          'pending_verification',
+          'no_response',
+          'verified_ready_for_shipping',
+          'out_of_stock',
+          'local_shipping',
+        ];
     if (!cancellable.includes(order.internalStatus)) {
       const err = new Error('Order cannot be cancelled at this stage');
       err.statusCode = 400;
@@ -350,8 +392,8 @@ async function executeDelivered(order, { source, actorUserId, note }, session) {
       ledgerDocs = await applyLedgerEntries(ledgerEntries, session);
     }
   } catch (err) {
-    // Historical imports / courier backfill: still mark delivered; log inventory gap.
-    if (source === 'bosta_webhook' || source === 'shopify_import') {
+    // Historical imports / courier / Shopify fulfill: still mark delivered; log inventory gap.
+    if (source === 'bosta_webhook' || source === 'shopify_import' || source === 'shopify_webhook') {
       logger.warn(
         { err: err.message, orderId: order._id, source },
         'Delivery stock ledger skipped (insufficient stock) — status still applied'
@@ -805,7 +847,8 @@ export async function manualStockAdjustment({
     const variant = await Variant.findById(variantId).session(session);
     return { variant, ledger: ledgerDocs[0], ledgerDocs, shopifySyncQueued: false };
   });
-  await afterLedgerApplied(result.ledgerDocs);
+  // Stock intake / adjustments always write sellable qty to Shopify.
+  await afterLedgerApplied(result.ledgerDocs, { forcePolicyFull: true });
   await checkVariantsLowStock([variantId]);
   if (!skipOosAutoRelease && quantityDelta > 0) {
     result.oosReleased = await releaseOutOfStockOrdersIfRestocked([variantId], {
@@ -840,7 +883,8 @@ export async function stockIntake({
 
 /**
  * Set absolute warehouse realStock for many variants (open-stock count / Excel import).
- * When shopifyWritePolicy=full, pushes sellable qty (realStock − onHoldStock) to Shopify.
+ * Always pushes sellable qty (realStock − Shopify-order holds) to Shopify.
+ * Manual-order holds are excluded from the Shopify figure.
  */
 export async function setRealStockBatch({ items, reasonCode = 'stock_count', actorUserId }) {
   if (!Array.isArray(items) || !items.length) {
@@ -908,7 +952,7 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
   }
 
   await notifyNegativeStockCrossings(allCrossings);
-  await enqueueShopifySync(ledgerForShopify);
+  await enqueueShopifySync(ledgerForShopify, { forcePolicyFull: true });
   await checkVariantsLowStock(results.map((r) => r.variantId));
 
   const increasedIds = results

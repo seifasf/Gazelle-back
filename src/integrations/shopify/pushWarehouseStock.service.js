@@ -1,5 +1,7 @@
+import mongoose from 'mongoose';
 import Variant from '../../models/Variant.js';
 import Settings from '../../models/Settings.js';
+import InventoryLedger from '../../models/InventoryLedger.js';
 import { config } from '../../config/index.js';
 import logger from '../../utils/logger.js';
 import { inventorySetQuantities } from './mutations/inventorySet.js';
@@ -13,12 +15,62 @@ function isRealShopifyInventoryItem(id) {
 }
 
 /**
- * Sellable units on Shopify = warehouse real − OMS holds.
+ * Net on-hold units from manual orders only (excluded from Shopify sellable).
+ * Shopify stock must not shrink when offline/manual sales reserve warehouse.
  */
-export function shopifyAvailableFromVariant(variant) {
+export async function loadManualOnHoldByVariant(variantIds = null) {
+  const match = {
+    orderId: { $ne: null },
+    ledgerType: { $in: ['on_hold_reserve', 'on_hold_release'] },
+  };
+  if (Array.isArray(variantIds) && variantIds.length) {
+    match.variantId = {
+      $in: variantIds.map((id) => new mongoose.Types.ObjectId(String(id))),
+    };
+  }
+
+  const rows = await InventoryLedger.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: { orderId: '$orderId', variantId: '$variantId' },
+        net: { $sum: '$quantityDelta' },
+      },
+    },
+    { $match: { net: { $gt: 0 } } },
+    {
+      $lookup: {
+        from: 'orders',
+        localField: '_id.orderId',
+        foreignField: '_id',
+        as: 'order',
+      },
+    },
+    { $unwind: '$order' },
+    { $match: { 'order.orderSource': 'manual' } },
+    {
+      $group: {
+        _id: '$_id.variantId',
+        hold: { $sum: '$net' },
+      },
+    },
+  ]);
+
+  return new Map(rows.map((r) => [String(r._id), Number(r.hold) || 0]));
+}
+
+/**
+ * Sellable on Shopify = warehouse real − holds from Shopify (non-manual) orders.
+ * Manual-order holds stay in OMS only and never reduce website stock.
+ */
+export function shopifyAvailableFromVariant(variant, manualHoldByVariant = null) {
   const real = Number(variant?.realStock) || 0;
-  const hold = Math.max(0, Number(variant?.onHoldStock) || 0);
-  return Math.max(0, Math.round(real - hold));
+  const totalHold = Math.max(0, Number(variant?.onHoldStock) || 0);
+  const vid = variant?._id != null ? String(variant._id) : null;
+  const manualHold =
+    manualHoldByVariant && vid ? Math.max(0, Number(manualHoldByVariant.get(vid)) || 0) : 0;
+  const shopifyHold = Math.max(0, totalHold - manualHold);
+  return Math.max(0, Math.round(real - shopifyHold));
 }
 
 export async function resolveShopifyLocationId() {
@@ -52,7 +104,7 @@ export async function resolveShopifyLocationId() {
 }
 
 /**
- * Push one variant's sellable qty (real − hold) to Shopify available.
+ * Push one variant's sellable qty (real − Shopify-order holds) to Shopify available.
  */
 export async function syncVariantAvailableToShopify(variantId) {
   await assertShopifyInventoryWriteAllowed();
@@ -68,7 +120,8 @@ export async function syncVariantAvailableToShopify(variantId) {
   }
 
   const locationId = await resolveShopifyLocationId();
-  const target = shopifyAvailableFromVariant(variant);
+  const manualHoldByVariant = await loadManualOnHoldByVariant([variant._id]);
+  const target = shopifyAvailableFromVariant(variant, manualHoldByVariant);
 
   const result = await inventorySetQuantities({
     locationId,
@@ -98,7 +151,7 @@ export async function syncVariantAvailableToShopify(variantId) {
 }
 
 /**
- * Push OMS sellable stock (real − hold) → Shopify available for the catalog.
+ * Push OMS sellable stock (real − Shopify-order holds) → Shopify available for the catalog.
  */
 export async function pushWarehouseStockToShopify({ dryRun = false } = {}) {
   await assertShopifyInventoryWriteAllowed();
@@ -110,9 +163,11 @@ export async function pushWarehouseStockToShopify({ dryRun = false } = {}) {
 
   const eligible = variants.filter((v) => isRealShopifyInventoryItem(v.shopifyInventoryItemId));
   const skipped = variants.length - eligible.length;
+  const manualHoldByVariant = await loadManualOnHoldByVariant(eligible.map((v) => v._id));
 
   const plan = eligible.map((v) => {
-    const target = shopifyAvailableFromVariant(v);
+    const manualHold = manualHoldByVariant.get(String(v._id)) || 0;
+    const target = shopifyAvailableFromVariant(v, manualHoldByVariant);
     return {
       variantId: String(v._id),
       sku: v.sku,
@@ -120,6 +175,7 @@ export async function pushWarehouseStockToShopify({ dryRun = false } = {}) {
       previousOnline: v.onlineStock ?? 0,
       warehouse: v.realStock ?? 0,
       onHold: v.onHoldStock ?? 0,
+      manualHold,
       target,
       changed: target !== (v.onlineStock ?? 0),
     };
@@ -202,6 +258,7 @@ export async function pushWarehouseStockToShopify({ dryRun = false } = {}) {
 
 export default {
   shopifyAvailableFromVariant,
+  loadManualOnHoldByVariant,
   resolveShopifyLocationId,
   syncVariantAvailableToShopify,
   pushWarehouseStockToShopify,

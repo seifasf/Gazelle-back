@@ -4,7 +4,8 @@ import Product from '../models/Product.js';
 import WebhookReceipt from '../models/WebhookReceipt.js';
 import { withTransaction } from '../utils/transaction.js';
 import { findOrCreateCustomer } from '../services/customer.service.js';
-import { reserveStockForOrder, cancelOrder, syncShopifySellableAfterLedger } from '../services/order.service.js';
+import { reserveStockForOrder, cancelOrder, syncShopifySellableAfterLedger, markDelivered } from '../services/order.service.js';
+import { canTransition } from '../services/orderStateMachine.js';
 import { notifyNewOrder } from '../services/notification.service.js';
 import OrderStatusHistory from '../models/OrderStatusHistory.js';
 import { reportOnlineStockDrift } from '../services/discrepancy.service.js';
@@ -201,6 +202,22 @@ export async function handleOrdersUpdated(payload) {
   const order = await Order.findOne({ shopifyOrderId });
   if (!order) return null;
 
+  // Shopify cancel is authoritative when staff cancel in Admin.
+  if (payload.cancelled_at && order.internalStatus !== 'cancelled') {
+    try {
+      return await cancelOrder(order._id, null, {
+        reason: 'customer_changed_mind',
+        note: 'Cancelled via Shopify order update',
+        source: 'shopify_webhook',
+      });
+    } catch (err) {
+      logger.warn(
+        { err: err?.message || err, shopifyOrderId, status: order.internalStatus },
+        'Shopify cancel could not apply to OMS order'
+      );
+    }
+  }
+
   const name = shopifyOrderNameFromPayload(payload);
   if (name && order.shopifyOrderName !== name) {
     order.shopifyOrderName = name;
@@ -221,6 +238,23 @@ export async function handleOrdersUpdated(payload) {
     };
   }
   await order.save();
+
+  // Fulfilled on Shopify → mark delivered in OMS when the transition is allowed.
+  // Bosta remains primary for in-flight courier steps; this catches Admin fulfills.
+  if (
+    !payload.cancelled_at &&
+    payload.fulfillment_status === 'fulfilled' &&
+    order.internalStatus !== 'delivered' &&
+    canTransition(order.internalStatus, 'delivered')
+  ) {
+    return markDelivered(
+      order._id,
+      'shopify_webhook',
+      null,
+      'Marked delivered via Shopify fulfillment'
+    );
+  }
+
   return order;
 }
 
