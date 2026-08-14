@@ -21,17 +21,33 @@ const TOPIC_TO_PATH = {
   REFUNDS_CREATE: 'refunds-create',
 };
 
+const LIST_WEBHOOKS = `
+  query ListWebhooks {
+    webhookSubscriptions(first: 50) {
+      edges {
+        node { id topic uri }
+      }
+    }
+  }
+`;
+
 const REGISTER_MUTATION = `
-  mutation RegisterWebhook($topic: WebhookSubscriptionTopic!, $callbackUrl: URL!) {
-    webhookSubscriptionCreate(
-      topic: $topic
-      webhookSubscription: { callbackUrl: $callbackUrl, format: JSON }
-    ) {
-      webhookSubscription { id topic }
+  mutation RegisterWebhook($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
+    webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
+      webhookSubscription { id topic uri }
       userErrors { field message }
     }
   }
 `;
+
+export async function listShopifyWebhooks() {
+  const data = await shopifyGraphQL(LIST_WEBHOOKS);
+  return (data?.webhookSubscriptions?.edges || []).map((e) => ({
+    id: e.node?.id,
+    topic: e.node?.topic,
+    uri: e.node?.uri,
+  }));
+}
 
 export async function registerShopifyWebhooks() {
   const baseUrl = (config.APP_URL || 'http://localhost:4000').replace(/\/$/, '');
@@ -42,16 +58,23 @@ export async function registerShopifyWebhooks() {
     const callbackUrl = `${baseUrl}/webhooks/shopify/${path}`;
 
     try {
-      const data = await shopifyGraphQL(REGISTER_MUTATION, { topic, callbackUrl });
+      const data = await shopifyGraphQL(REGISTER_MUTATION, {
+        topic,
+        webhookSubscription: { uri: callbackUrl, format: 'JSON' },
+      });
       const errors = data?.webhookSubscriptionCreate?.userErrors || [];
       if (errors.length) {
-        results.push({ topic, ok: false, errors });
+        results.push({ topic, ok: false, callbackUrl, errors });
       } else {
-        results.push({ topic, ok: true, callbackUrl });
+        results.push({
+          topic,
+          ok: true,
+          callbackUrl: data?.webhookSubscriptionCreate?.webhookSubscription?.uri || callbackUrl,
+        });
       }
     } catch (error) {
       logger.warn({ topic, err: error }, 'Webhook registration failed');
-      results.push({ topic, ok: false, error: error.message });
+      results.push({ topic, ok: false, callbackUrl, error: error.message });
     }
   }
 
@@ -67,4 +90,4 @@ export async function registerShopifyWebhooks() {
   return { results, successCount, total: WEBHOOK_TOPICS.length };
 }
 
-export default { registerShopifyWebhooks };
+export default { registerShopifyWebhooks, listShopifyWebhooks };
