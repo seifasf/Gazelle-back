@@ -103,15 +103,26 @@ async function transitionOrder(order, toStatus, meta, session) {
   return { fromStatus, toStatus };
 }
 
+function collectVariantIds(ledgerDocs, items = []) {
+  const ids = new Set();
+  for (const d of ledgerDocs || []) {
+    const vid = d?.variantId?._id ?? d?.variantId;
+    if (vid != null) ids.add(String(vid));
+  }
+  for (const item of items || []) {
+    const vid = item?.variantId?._id ?? item?.variantId;
+    if (vid != null) ids.add(String(vid));
+  }
+  return [...ids];
+}
+
 async function enqueueShopifySync(ledgerDocs, { forcePolicyFull = true, variantIds: extraIds = [] } = {}) {
   const docs = Array.isArray(ledgerDocs) ? ledgerDocs : [];
   const variantIds = [
-    ...new Set(
-      [
-        ...docs.map((d) => (d?.variantId != null ? String(d.variantId) : null)),
-        ...(Array.isArray(extraIds) ? extraIds.map((id) => (id != null ? String(id) : null)) : []),
-      ].filter(Boolean)
-    ),
+    ...new Set([
+      ...collectVariantIds(docs),
+      ...(Array.isArray(extraIds) ? extraIds.map((id) => (id != null ? String(id) : null)) : []),
+    ].filter(Boolean)),
   ];
   if (!variantIds.length) return { synced: [], failed: [] };
 
@@ -192,6 +203,8 @@ export async function forceSyncVariantsToShopify(variantIds = []) {
  * raise warehouse realStock so sellable matches, then auto-release OOS orders.
  * Decreases on Shopify are ignored here (OMS / order webhooks own outbound sales).
  */
+const SHOPIFY_INVENTORY_ECHO_MS = 120_000;
+
 export async function ingestShopifyAvailableIncrease(variantId, shopifyAvailable) {
   const targetAvail = Math.max(0, Math.round(Number(shopifyAvailable)));
   if (!Number.isFinite(Number(shopifyAvailable))) return null;
@@ -202,19 +215,28 @@ export async function ingestShopifyAvailableIncrease(variantId, shopifyAvailable
   const real = Number(variant.realStock) || 0;
   const hold = Math.max(0, Number(variant.onHoldStock) || 0);
   const omsSellable = Math.max(0, real - hold);
+  const previousOnline = variant.onlineStock ?? null;
+  const lastPushAt = variant.lastSyncedAt ? new Date(variant.lastSyncedAt).getTime() : 0;
 
-  // Keep cached online figure aligned for UI / drift checks.
-  if ((variant.onlineStock ?? null) !== targetAvail) {
-    await Variant.updateOne(
-      { _id: variant._id },
+  // Ignore stale high-available webhooks echoing an intermediate OMS push (common after OOS release).
+  if (
+    targetAvail > omsSellable &&
+    lastPushAt &&
+    Date.now() - lastPushAt < SHOPIFY_INVENTORY_ECHO_MS &&
+    previousOnline != null &&
+    targetAvail > previousOnline
+  ) {
+    logger.info(
       {
-        $set: {
-          onlineStock: targetAvail,
-          shopifyAvailable: targetAvail > 0,
-          lastSyncedAt: new Date(),
-        },
-      }
+        variantId: String(variant._id),
+        sku: variant.sku,
+        targetAvail,
+        previousOnline,
+        omsSellable,
+      },
+      'Ignoring likely Shopify inventory webhook echo'
     );
+    return { adjusted: false, ignoredEcho: true };
   }
 
   if (targetAvail > omsSellable) {
@@ -244,6 +266,18 @@ export async function ingestShopifyAvailableIncrease(variantId, shopifyAvailable
     } catch {
       /* non-fatal */
     }
+  }
+
+  if ((variant.onlineStock ?? null) !== targetAvail) {
+    await Variant.updateOne(
+      { _id: variant._id },
+      {
+        $set: {
+          onlineStock: targetAvail,
+          shopifyAvailable: targetAvail > 0,
+        },
+      }
+    );
   }
 
   return { adjusted: false, oosReleased };
@@ -346,7 +380,24 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
     return updated;
   });
 
-  await afterLedgerApplied(verified?._ledgerDocs);
+  await afterLedgerApplied(verified?._ledgerDocs, {
+    variantIds: collectVariantIds(verified?._ledgerDocs, verified?.items),
+  });
+
+  if (verified?.orderSource !== 'manual' && !isManualOrderRef(verified?.shopifyOrderId)) {
+    try {
+      const { markShopifyOrderFulfilled } = await import(
+        '../integrations/shopify/fulfillShopifyOrder.service.js'
+      );
+      await markShopifyOrderFulfilled(verified);
+    } catch (err) {
+      logger.warn(
+        { err: err?.message || err, orderId: String(verified?._id) },
+        'Shopify fulfill on verify failed — OMS verified; retry from admin if needed'
+      );
+    }
+  }
+
   await notifyOrderVerified(verified);
   return verified;
 }
@@ -966,7 +1017,15 @@ export async function transitionOrderStatus(orderId, toStatus, meta) {
   });
 
   if (toStatus === 'delivered' || toStatus === 'verified_ready_for_shipping') {
-    await afterLedgerApplied(updated?._ledgerDocs);
+    await afterLedgerApplied(updated?._ledgerDocs, {
+      variantIds: collectVariantIds(updated?._ledgerDocs, updated?.items),
+    });
+  } else if (toStatus === 'out_of_stock') {
+    // Hold unchanged — re-push sellable (real − hold) in case create-time sync failed.
+    await afterLedgerApplied([], {
+      forcePolicyFull: true,
+      variantIds: collectVariantIds([], updated?.items),
+    });
   }
   if (toStatus === 'verified_ready_for_shipping') await notifyOrderVerified(updated);
   else if (toStatus === 'failed_delivery') await notifyFailedDelivery(updated);
@@ -1586,7 +1645,10 @@ export async function createManualOrder({
     return populated;
   });
 
-  await afterLedgerApplied(manualOrder?._ledgerDocs);
+  // Always pass line variant ids — _ledgerDocs alone can be empty/missing variantId after populate.
+  await afterLedgerApplied(manualOrder?._ledgerDocs, {
+    variantIds: collectVariantIds(manualOrder?._ledgerDocs, manualOrder?.items),
+  });
   await notifyNewOrder(manualOrder, { source: 'manual' });
   if (!manualOrder.isReturnOrder && manualOrder.internalStatus === 'verified_ready_for_shipping') {
     try {

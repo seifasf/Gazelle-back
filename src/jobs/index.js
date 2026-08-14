@@ -8,7 +8,6 @@ import InventoryLedger from '../models/InventoryLedger.js';
 import Order from '../models/Order.js';
 import Settings from '../models/Settings.js';
 import WebhookReceipt from '../models/WebhookReceipt.js';
-import { assertShopifyInventoryWriteAllowed } from '../integrations/shopify/writePolicy.js';
 import { JOB_NAMES } from '../constants/index.js';
 import { checkRestockNeeded, checkSlowMovers } from '../services/adminJobs.service.js';
 import logger from '../utils/logger.js';
@@ -50,13 +49,16 @@ export function registerJobs(agenda) {
 
   agenda.define(JOB_NAMES.SHOPIFY_OUTBOUND_INVENTORY, async (job) => {
     const { variantId, ledgerId } = job.attrs.data || {};
+    const { enableShopifyInventorySync } = await import(
+      '../integrations/shopify/writePolicy.js'
+    );
     try {
-      await assertShopifyInventoryWriteAllowed();
-    } catch {
+      await enableShopifyInventorySync();
+    } catch (err) {
       if (ledgerId) {
         await InventoryLedger.updateOne(
           { _id: ledgerId, shopifySyncStatus: 'pending' },
-          { $set: { shopifySyncStatus: 'skipped_policy' } }
+          { $set: { shopifySyncStatus: 'skipped_policy', shopifySyncError: err.message } }
         );
       }
       return;
