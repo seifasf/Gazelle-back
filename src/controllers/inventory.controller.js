@@ -89,6 +89,7 @@ export async function stockIntakeBatch(req, res, next) {
     for (const item of items) {
       const quantity = Number(item.quantity);
       if (!item.variantId || !(quantity > 0)) continue;
+      // OMS only per row — one Shopify push after the full batch (avoids Render timeout/502).
       const result = await orderService.stockIntake({
         variantId: item.variantId,
         quantity,
@@ -96,6 +97,7 @@ export async function stockIntakeBatch(req, res, next) {
         note,
         actorUserId: req.user._id,
         skipOosAutoRelease: true,
+        skipShopifySync: true,
       });
       results.push({
         variantId: item.variantId,
@@ -114,7 +116,20 @@ export async function stockIntakeBatch(req, res, next) {
       note: 'Auto: stock intake restocked SKUs — back to Ready to ship',
     });
 
-    res.json({ data: { results, count: results.length, oosReleased } });
+    const shopifySync = await orderService.forceSyncVariantsToShopify(restockedVariantIds);
+
+    res.json({
+      data: {
+        results,
+        count: results.length,
+        oosReleased,
+        shopifySync,
+        shopifyWarning:
+          shopifySync?.failed?.length
+            ? `Warehouse saved; Shopify failed for ${shopifySync.failed.length} SKU(s) — retrying in background`
+            : undefined,
+      },
+    });
   } catch (err) {
     next(err);
   }

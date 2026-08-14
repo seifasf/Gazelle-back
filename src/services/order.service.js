@@ -118,7 +118,7 @@ function collectVariantIds(ledgerDocs, items = []) {
 
 async function enqueueShopifySync(
   ledgerDocs,
-  { forcePolicyFull = true, variantIds: extraIds = [], strict = false } = {}
+  { forcePolicyFull = true, variantIds: extraIds = [], strict = false, maxAttempts = 3 } = {}
 ) {
   const docs = Array.isArray(ledgerDocs) ? ledgerDocs : [];
   const variantIds = [
@@ -146,11 +146,12 @@ async function enqueueShopifySync(
 
   const synced = [];
   const failed = [];
+  const attempts = Math.max(1, Math.min(5, Number(maxAttempts) || 3));
 
   for (const variantId of variantIds) {
     let lastErr = null;
     let ok = false;
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
         const result = await syncVariantAvailableToShopify(variantId);
         synced.push({ variantId, ...(result || {}) });
@@ -162,7 +163,7 @@ async function enqueueShopifySync(
           { err: err?.message || err, variantId, attempt },
           'Shopify stock sync attempt failed'
         );
-        if (attempt < 3) await new Promise((r) => setTimeout(r, 300 * attempt));
+        if (attempt < attempts) await new Promise((r) => setTimeout(r, 300 * attempt));
       }
     }
     if (!ok) {
@@ -205,8 +206,8 @@ export async function syncShopifySellableAfterLedger(ledgerDocs, opts = {}) {
 }
 
 /** Force-push current OMS sellable for explicit variant ids (returns / intakes). */
-export async function forceSyncVariantsToShopify(variantIds = []) {
-  return enqueueShopifySync([], { forcePolicyFull: true, variantIds });
+export async function forceSyncVariantsToShopify(variantIds = [], opts = {}) {
+  return enqueueShopifySync([], { forcePolicyFull: true, variantIds, maxAttempts: 2, ...opts });
 }
 
 /**
@@ -1067,6 +1068,7 @@ export async function manualStockAdjustment({
   reasonCode,
   actorUserId,
   skipOosAutoRelease = false,
+  skipShopifySync = false,
 }) {
   const result = await withTransaction(async (session) => {
     const entries = buildStockIntakeEntries({
@@ -1086,12 +1088,15 @@ export async function manualStockAdjustment({
       note: 'Auto: stock intake restocked SKUs — back to Ready to ship',
     });
   }
-  // Sync after OOS release so holds from freed orders are reflected on Shopify.
-  result.shopifySync = await afterLedgerApplied(result.ledgerDocs, {
-    forcePolicyFull: true,
-    variantIds: [variantId],
-    strict: true,
-  });
+  // Never throw after OMS commit — Shopify failure must not look like a failed intake
+  // (retry would double warehouse stock). Queue Agenda on fail.
+  if (!skipShopifySync) {
+    result.shopifySync = await afterLedgerApplied(result.ledgerDocs, {
+      forcePolicyFull: true,
+      variantIds: [variantId],
+      strict: false,
+    });
+  }
   return result;
 }
 
@@ -1102,6 +1107,7 @@ export async function stockIntake({
   note,
   actorUserId,
   skipOosAutoRelease = false,
+  skipShopifySync = false,
 }) {
   if (quantity <= 0) {
     const err = new Error('Stock intake quantity must be positive');
@@ -1114,6 +1120,7 @@ export async function stockIntake({
     reasonCode: reasonCode || 'restock',
     actorUserId,
     skipOosAutoRelease,
+    skipShopifySync,
   });
 }
 
@@ -1201,10 +1208,11 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
   }
 
   // Push sellable (real − hold) for every row — after OOS release may have changed holds.
+  // Soft fail: OMS already committed; Agenda retries any Shopify misses.
   const shopifySync = await enqueueShopifySync(ledgerForShopify, {
     forcePolicyFull: true,
     variantIds: items.map((i) => i.variantId).filter(Boolean),
-    strict: true,
+    strict: false,
   });
 
   if (!results.length) {
