@@ -2,13 +2,37 @@ import Settings from '../../models/Settings.js';
 import { config } from '../../config/index.js';
 import logger from '../../utils/logger.js';
 
+const CURRENT_SHOPIFY_API_VERSION = '2026-07';
+
+/** Strip protocol/path so Admin API never hits a custom storefront domain. */
+export function normalizeShopDomain(domain) {
+  if (!domain) return null;
+  const raw = String(domain)
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .split('/')[0]
+    .replace(/:\d+$/, '')
+    .toLowerCase();
+  return raw || null;
+}
+
+/**
+ * Admin GraphQL/REST must use *.myshopify.com.
+ * Node fetch follows 301 from the public domain by converting POST → GET, which
+ * 404s as {"errors":"Not Found"} on /graphql.json.
+ */
+export function pickAdminShopDomain(...candidates) {
+  const normalized = candidates.map(normalizeShopDomain).filter(Boolean);
+  return normalized.find((d) => d.endsWith('.myshopify.com')) || normalized[0] || null;
+}
+
 /** inventorySetQuantities schema changed in 2026-04; bump older pinned versions. */
-function normalizeShopifyApiVersion(version) {
-  const raw = String(version || '').trim() || '2026-07';
+export function normalizeShopifyApiVersion(version) {
+  const raw = String(version || '').trim() || CURRENT_SHOPIFY_API_VERSION;
   const m = raw.match(/^(\d{4})-(\d{2})$/);
-  if (!m) return '2026-07';
+  if (!m) return CURRENT_SHOPIFY_API_VERSION;
   const n = Number(m[1]) * 100 + Number(m[2]);
-  if (n < 202604) return '2026-07';
+  if (n < 202604 || n > 202607) return CURRENT_SHOPIFY_API_VERSION;
   return raw;
 }
 
@@ -16,7 +40,7 @@ export async function getShopifyCredentials() {
   const settings = await Settings.findOne({ key: 'global' });
 
   return {
-    shopDomain: config.SHOPIFY_SHOP_DOMAIN || settings?.shopifyShopDomain || null,
+    shopDomain: pickAdminShopDomain(config.SHOPIFY_SHOP_DOMAIN, settings?.shopifyShopDomain),
     accessToken: config.SHOPIFY_ACCESS_TOKEN || settings?.shopifyAccessToken || null,
     clientId: config.SHOPIFY_CLIENT_ID || settings?.shopifyClientId || null,
     clientSecret: config.SHOPIFY_CLIENT_SECRET || settings?.shopifyClientSecret || null,

@@ -11,11 +11,7 @@ import {
 } from '../integrations/shopify/sync.service.js';
 import { registerShopifyWebhooks } from '../integrations/shopify/webhooks.service.js';
 import Settings from '../models/Settings.js';
-
-function normalizeShopDomain(domain) {
-  if (!domain) return null;
-  return domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
-}
+import { normalizeShopDomain } from '../integrations/shopify/credentials.js';
 
 export async function getStatus(req, res, next) {
   try {

@@ -7,7 +7,7 @@ import { config } from '../../config/index.js';
 import { fetchShopInfo } from './queries/shop.js';
 import { fetchLocations } from './queries/locations.js';
 import { syncCatalogFromShopify, syncCatalog } from './sync.service.js';
-import { isShopifyConfigured } from './credentials.js';
+import { isShopifyConfigured, getShopifyCredentials } from './credentials.js';
 import { shopifyRest, shopifyRestPaginated } from './client.js';
 import { handleOrdersCreate, handleOrdersUpdated, mapImportedOrderStatus } from '../../webhooks/shopify.handlers.js';
 import logger from '../../utils/logger.js';
@@ -74,13 +74,24 @@ export async function getShopifyStatus() {
     settings?.shopifyCatalogMode ||
     (configured ? 'admin' : productCount > 0 ? 'storefront' : 'none');
 
+  let adminShopDomain = settings?.shopifyShopDomain || settings?.shopifyPublicDomain;
+  let apiVersion = settings?.shopifyApiVersion || null;
+  try {
+    const creds = await getShopifyCredentials();
+    adminShopDomain = creds.shopDomain || adminShopDomain;
+    apiVersion = creds.apiVersion || apiVersion;
+  } catch {
+    // status should still return if credential resolve fails
+  }
+
   return {
     configured,
     authMode,
     catalogMode: inferredMode,
     healthy: settings?.shopifyConnectionHealthy ?? false,
     shopName: settings?.shopifyShopName,
-    shopDomain: settings?.shopifyShopDomain || settings?.shopifyPublicDomain,
+    shopDomain: adminShopDomain,
+    apiVersion,
     locationId: settings?.shopifyLocationId,
     lastSyncAt: settings?.shopifyLastSyncAt,
     webhooksRegisteredAt: settings?.shopifyWebhooksRegisteredAt,

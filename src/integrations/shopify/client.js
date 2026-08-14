@@ -1,4 +1,3 @@
-import { GraphQLClient } from 'graphql-request';
 import logger from '../../utils/logger.js';
 import { getShopifyCredentials, getValidAccessToken } from './credentials.js';
 
@@ -7,20 +6,29 @@ export function resetShopifyClient() {
   // cached client/token to clear. Kept for backwards compatibility.
 }
 
-export async function getShopifyClient() {
-  const creds = await getShopifyCredentials();
-  const token = await getValidAccessToken();
-  if (!creds.shopDomain || !token) {
-    throw new Error('Shopify credentials not configured');
+/**
+ * Never let fetch convert POST → GET on a 301 from the public shop domain.
+ * That GET hits /graphql.json and Shopify returns HTTP 404 {"errors":"Not Found"}.
+ */
+async function shopifyFetch(url, init) {
+  let current = url;
+  for (let hop = 0; hop < 4; hop += 1) {
+    const response = await fetch(current, { ...init, redirect: 'manual' });
+    const loc = response.headers.get('location');
+    if ([301, 302, 303, 307, 308].includes(response.status) && loc) {
+      current = loc;
+      continue;
+    }
+    return response;
   }
+  const err = new Error('Too many Shopify redirects');
+  err.statusCode = 502;
+  throw err;
+}
 
-  const url = `https://${creds.shopDomain}/admin/api/${creds.apiVersion}/graphql.json`;
-  return new GraphQLClient(url, {
-    headers: {
-      'X-Shopify-Access-Token': token,
-      'Content-Type': 'application/json',
-    },
-  });
+function graphqlErrorsThrottled(payload) {
+  const errors = payload?.errors;
+  return Array.isArray(errors) && errors.some((e) => e?.extensions?.code === 'THROTTLED');
 }
 
 function isThrottled(error) {
@@ -30,13 +38,66 @@ function isThrottled(error) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+export async function getShopifyClient() {
+  const creds = await getShopifyCredentials();
+  const token = await getValidAccessToken();
+  if (!creds.shopDomain || !token) {
+    throw new Error('Shopify credentials not configured');
+  }
+  return {
+    url: `https://${creds.shopDomain}/admin/api/${creds.apiVersion}/graphql.json`,
+    token,
+    apiVersion: creds.apiVersion,
+    shopDomain: creds.shopDomain,
+  };
+}
+
 export async function shopifyGraphQL(query, variables = {}, { maxRetries = 6 } = {}) {
-  const gql = await getShopifyClient();
+  const client = await getShopifyClient();
   let attempt = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
-      return await gql.request(query, variables);
+      const response = await shopifyFetch(client.url, {
+        method: 'POST',
+        headers: {
+          'X-Shopify-Access-Token': client.token,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ query, variables }),
+      });
+      const text = await response.text();
+      let payload;
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch {
+        payload = { raw: text };
+      }
+
+      if (!response.ok) {
+        const err = new Error(
+          `Shopify GraphQL HTTP ${response.status}: ${typeof payload.errors === 'string' ? payload.errors : JSON.stringify(payload.errors || payload)}`
+        );
+        err.statusCode = response.status;
+        err.response = { status: response.status, errors: payload.errors, data: payload.data };
+        throw err;
+      }
+
+      if (graphqlErrorsThrottled(payload)) {
+        const err = new Error('THROTTLED');
+        err.response = { errors: payload.errors };
+        throw err;
+      }
+
+      if (Array.isArray(payload.errors) && payload.errors.length) {
+        const err = new Error(payload.errors.map((e) => e?.message || String(e)).join('; '));
+        err.statusCode = 502;
+        err.response = { status: 200, errors: payload.errors, data: payload.data };
+        throw err;
+      }
+
+      return payload.data;
     } catch (error) {
       if (isThrottled(error) && attempt < maxRetries) {
         attempt += 1;
@@ -45,7 +106,16 @@ export async function shopifyGraphQL(query, variables = {}, { maxRetries = 6 } =
         await sleep(wait);
         continue;
       }
-      logger.error({ err: error, query: query.slice(0, 80) }, 'Shopify GraphQL error');
+      logger.error(
+        {
+          err: error?.message || error,
+          status: error?.statusCode,
+          shopDomain: client.shopDomain,
+          apiVersion: client.apiVersion,
+          query: query.slice(0, 80),
+        },
+        'Shopify GraphQL error'
+      );
       throw error;
     }
   }
@@ -62,7 +132,7 @@ export async function shopifyRest(path, { method = 'GET', body, returnHeaders = 
   const url = path.startsWith('http')
     ? path
     : `https://${creds.shopDomain}/admin/api/${creds.apiVersion}${path}`;
-  const response = await fetch(url, {
+  const response = await shopifyFetch(url, {
     method,
     headers: {
       'X-Shopify-Access-Token': token,
