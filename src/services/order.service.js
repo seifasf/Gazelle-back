@@ -1125,6 +1125,81 @@ export async function stockIntake({
 }
 
 /**
+ * One Mongo transaction for the whole batch, then return. Shopify + OOS release
+ * run after the response so the browser is not left on a dead 502 connection.
+ */
+export async function stockIntakeBatch({ items, reasonCode, actorUserId }) {
+  if (!Array.isArray(items) || !items.length) {
+    const err = new Error('items array is required');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const accepted = [];
+  const entries = [];
+  for (const item of items) {
+    const quantity = Number(item.quantity);
+    if (!item.variantId || !(quantity > 0)) continue;
+    accepted.push({ variantId: item.variantId, quantity });
+    entries.push(
+      ...buildStockIntakeEntries({
+        variantId: item.variantId,
+        quantityDelta: quantity,
+        reasonCode: reasonCode || 'restock',
+        actorUserId,
+      })
+    );
+  }
+
+  if (!entries.length) {
+    const err = new Error('Enter at least one size quantity greater than 0');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const { variantsById, ledgerDocs } = await withTransaction(async (session) => {
+    const docs = await applyLedgerEntries(entries, session);
+    const ids = [...new Set(accepted.map((row) => row.variantId))];
+    const variants = await Variant.find({ _id: { $in: ids } })
+      .session(session)
+      .select('sku realStock onHoldStock');
+    return {
+      ledgerDocs: docs,
+      variantsById: new Map(variants.map((v) => [String(v._id), v])),
+    };
+  });
+
+  await notifyNegativeStockCrossings(ledgerDocs?._negativeCrossings || []);
+  await checkVariantsLowStock(accepted.map((row) => row.variantId));
+
+  const restockedVariantIds = accepted.map((row) => row.variantId);
+  setImmediate(() => {
+    releaseOutOfStockOrdersIfRestocked(restockedVariantIds, {
+      actorUserId,
+      note: 'Auto: stock intake restocked SKUs — back to Ready to ship',
+    })
+      .then(() => forceSyncVariantsToShopify(restockedVariantIds, { maxAttempts: 1, strict: false }))
+      .catch((err) => {
+        logger.error({ err }, 'stock-intake batch post-commit Shopify/OOS failed');
+      });
+  });
+
+  return {
+    results: accepted.map((row) => {
+      const variant = variantsById.get(String(row.variantId));
+      return {
+        variantId: row.variantId,
+        quantity: row.quantity,
+        sku: variant?.sku,
+        realStock: variant?.realStock,
+      };
+    }),
+    count: accepted.length,
+    shopifySyncQueued: true,
+  };
+}
+
+/**
  * Set absolute warehouse realStock for many variants (open-stock count / Excel import).
  * Always pushes sellable qty (realStock − onHoldStock) to Shopify — all order holds count.
  */
@@ -2251,6 +2326,7 @@ export default {
   ensureOrderStockHeld,
   manualStockAdjustment,
   stockIntake,
+  stockIntakeBatch,
   setRealStockBatch,
   releaseOutOfStockOrdersIfRestocked,
   createManualOrder,

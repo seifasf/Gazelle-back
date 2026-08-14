@@ -79,57 +79,13 @@ export async function lookupVariantFamilyBySku(req, res, next) {
 
 export async function stockIntakeBatch(req, res, next) {
   try {
-    const { items, reasonCode, note } = req.body || {};
-    if (!Array.isArray(items) || !items.length) {
-      return res.status(400).json({ error: 'items array is required' });
-    }
-
-    const results = [];
-    const restockedVariantIds = [];
-    for (const item of items) {
-      const quantity = Number(item.quantity);
-      if (!item.variantId || !(quantity > 0)) continue;
-      // OMS only per row — one Shopify push after the full batch (avoids Render timeout/502).
-      const result = await orderService.stockIntake({
-        variantId: item.variantId,
-        quantity,
-        reasonCode,
-        note,
-        actorUserId: req.user._id,
-        skipOosAutoRelease: true,
-        skipShopifySync: true,
-      });
-      results.push({
-        variantId: item.variantId,
-        quantity,
-        ...result,
-      });
-      restockedVariantIds.push(item.variantId);
-    }
-
-    if (!results.length) {
-      return res.status(400).json({ error: 'Enter at least one size quantity greater than 0' });
-    }
-
-    const oosReleased = await orderService.releaseOutOfStockOrdersIfRestocked(restockedVariantIds, {
+    const { items, reasonCode } = req.body || {};
+    const data = await orderService.stockIntakeBatch({
+      items,
+      reasonCode,
       actorUserId: req.user._id,
-      note: 'Auto: stock intake restocked SKUs — back to Ready to ship',
     });
-
-    const shopifySync = await orderService.forceSyncVariantsToShopify(restockedVariantIds);
-
-    res.json({
-      data: {
-        results,
-        count: results.length,
-        oosReleased,
-        shopifySync,
-        shopifyWarning:
-          shopifySync?.failed?.length
-            ? `Warehouse saved; Shopify failed for ${shopifySync.failed.length} SKU(s) — retrying in background`
-            : undefined,
-      },
-    });
+    res.json({ data });
   } catch (err) {
     next(err);
   }
