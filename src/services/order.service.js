@@ -210,6 +210,35 @@ export async function forceSyncVariantsToShopify(variantIds = [], opts = {}) {
   return enqueueShopifySync([], { forcePolicyFull: true, variantIds, maxAttempts: 2, ...opts });
 }
 
+/** Warehouse just changed — call Shopify inventorySet now. Never throw. */
+async function pushSellableNow(variantIds) {
+  const ids = [...new Set((variantIds || []).filter(Boolean).map((id) => String(id)))];
+  if (!ids.length) return { synced: [], failed: [] };
+  try {
+    return await enqueueShopifySync([], {
+      forcePolicyFull: true,
+      variantIds: ids,
+      maxAttempts: 2,
+      strict: false,
+    });
+  } catch (err) {
+    logger.error({ err, count: ids.length }, 'Shopify inventory API call failed');
+    try {
+      const agenda = getAgenda();
+      for (const variantId of ids) {
+        await agenda.now(JOB_NAMES.SHOPIFY_OUTBOUND_INVENTORY, { variantId });
+      }
+    } catch {
+      /* Agenda may be down in scripts */
+    }
+    return {
+      synced: [],
+      failed: ids.map((variantId) => ({ variantId, error: err?.message || String(err) })),
+      queued: true,
+    };
+  }
+}
+
 /**
  * Two-way inventory:
  * OMS sellable (real − hold) ↔ Shopify available at the warehouse location.
@@ -1240,33 +1269,7 @@ export async function stockIntakeBatch({ items, reasonCode, actorUserId }) {
   await checkVariantsLowStock(accepted.map((row) => row.variantId));
 
   const restockedVariantIds = accepted.map((row) => row.variantId);
-
-  let shopifySync = { synced: [], failed: [], queued: false };
-  try {
-    shopifySync = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('shopify_sync_timeout')), 12_000);
-      forceSyncVariantsToShopify(restockedVariantIds, { maxAttempts: 2, strict: false })
-        .then((result) => {
-          clearTimeout(timer);
-          resolve(result);
-        })
-        .catch((err) => {
-          clearTimeout(timer);
-          reject(err);
-        });
-    });
-  } catch (err) {
-    logger.warn({ err: err?.message || err, count: restockedVariantIds.length }, 'Intake Shopify push timed out — Agenda retry');
-    shopifySync = { synced: [], failed: restockedVariantIds.map((id) => ({ variantId: id, error: err?.message })), queued: true };
-    try {
-      const agenda = getAgenda();
-      for (const variantId of restockedVariantIds) {
-        await agenda.now(JOB_NAMES.SHOPIFY_OUTBOUND_INVENTORY, { variantId: String(variantId) });
-      }
-    } catch {
-      /* Agenda may be down in scripts */
-    }
-  }
+  const shopifySync = await pushSellableNow(restockedVariantIds);
 
   setImmediate(() => {
     releaseOutOfStockOrdersIfRestocked(restockedVariantIds, {
@@ -1309,7 +1312,6 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
 
   const results = [];
   const allCrossings = [];
-  const ledgerForShopify = [];
 
   for (const item of items) {
     const variantId = item.variantId;
@@ -1353,9 +1355,6 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
     if (outcome.ledgerDocs?._negativeCrossings?.length) {
       allCrossings.push(...outcome.ledgerDocs._negativeCrossings);
     }
-    if (outcome.changed && Array.isArray(outcome.ledgerDocs)) {
-      ledgerForShopify.push(...outcome.ledgerDocs);
-    }
     results.push({
       variantId: outcome.variantId,
       sku: outcome.sku,
@@ -1368,29 +1367,27 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
   await notifyNegativeStockCrossings(allCrossings);
   await checkVariantsLowStock(results.map((r) => r.variantId));
 
+  if (!results.length) {
+    const err = new Error('No valid stock set rows');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const shopifySync = await pushSellableNow(items.map((i) => i.variantId).filter(Boolean));
+
   const increasedIds = results
     .filter((r) => r.changed && r.realStock > r.previous)
     .map((r) => r.variantId);
   let oosReleased = { released: [], checked: 0 };
   if (increasedIds.length) {
-    oosReleased = await releaseOutOfStockOrdersIfRestocked(increasedIds, {
-      actorUserId,
-      note: 'Auto: stock count restocked SKUs — back to Ready to ship',
+    setImmediate(() => {
+      releaseOutOfStockOrdersIfRestocked(increasedIds, {
+        actorUserId,
+        note: 'Auto: stock count restocked SKUs — back to Ready to ship',
+      }).catch((err) => {
+        logger.error({ err }, 'stock-set batch OOS release failed');
+      });
     });
-  }
-
-  // Push sellable (real − hold) for every row — after OOS release may have changed holds.
-  // Soft fail: OMS already committed; Agenda retries any Shopify misses.
-  const shopifySync = await enqueueShopifySync(ledgerForShopify, {
-    forcePolicyFull: true,
-    variantIds: items.map((i) => i.variantId).filter(Boolean),
-    strict: false,
-  });
-
-  if (!results.length) {
-    const err = new Error('No valid stock set rows');
-    err.statusCode = 400;
-    throw err;
   }
 
   return { results, count: results.length, oosReleased, shopifySync };
