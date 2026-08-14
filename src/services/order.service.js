@@ -116,7 +116,10 @@ function collectVariantIds(ledgerDocs, items = []) {
   return [...ids];
 }
 
-async function enqueueShopifySync(ledgerDocs, { forcePolicyFull = true, variantIds: extraIds = [] } = {}) {
+async function enqueueShopifySync(
+  ledgerDocs,
+  { forcePolicyFull = true, variantIds: extraIds = [], strict = false } = {}
+) {
   const docs = Array.isArray(ledgerDocs) ? ledgerDocs : [];
   const variantIds = [
     ...new Set([
@@ -178,6 +181,14 @@ async function enqueueShopifySync(ledgerDocs, { forcePolicyFull = true, variantI
       { failedCount: failed.length, failed },
       'Shopify stock sync still failing after retries — queued Agenda jobs'
     );
+    if (strict) {
+      const err = new Error(
+        `Shopify stock sync failed for ${failed.length} SKU(s): ${failed.map((f) => f.error).join('; ')}`
+      );
+      err.statusCode = 502;
+      err.shopifySyncFailed = failed;
+      throw err;
+    }
   }
 
   return { synced, failed };
@@ -1068,8 +1079,6 @@ export async function manualStockAdjustment({
     const variant = await Variant.findById(variantId).session(session);
     return { variant, ledger: ledgerDocs[0], ledgerDocs, shopifySyncQueued: false };
   });
-  // Stock intake / adjustments always write sellable qty to Shopify.
-  await afterLedgerApplied(result.ledgerDocs, { forcePolicyFull: true });
   await checkVariantsLowStock([variantId]);
   if (!skipOosAutoRelease && quantityDelta > 0) {
     result.oosReleased = await releaseOutOfStockOrdersIfRestocked([variantId], {
@@ -1077,6 +1086,12 @@ export async function manualStockAdjustment({
       note: 'Auto: stock intake restocked SKUs — back to Ready to ship',
     });
   }
+  // Sync after OOS release so holds from freed orders are reflected on Shopify.
+  result.shopifySync = await afterLedgerApplied(result.ledgerDocs, {
+    forcePolicyFull: true,
+    variantIds: [variantId],
+    strict: true,
+  });
   return result;
 }
 
@@ -1172,12 +1187,6 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
   }
 
   await notifyNegativeStockCrossings(allCrossings);
-  // Push sellable (real − hold) for every row in the upload — including unchanged
-  // realStock where holds moved since the last Shopify write.
-  await enqueueShopifySync(ledgerForShopify, {
-    forcePolicyFull: true,
-    variantIds: items.map((i) => i.variantId).filter(Boolean),
-  });
   await checkVariantsLowStock(results.map((r) => r.variantId));
 
   const increasedIds = results
@@ -1191,13 +1200,20 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
     });
   }
 
+  // Push sellable (real − hold) for every row — after OOS release may have changed holds.
+  const shopifySync = await enqueueShopifySync(ledgerForShopify, {
+    forcePolicyFull: true,
+    variantIds: items.map((i) => i.variantId).filter(Boolean),
+    strict: true,
+  });
+
   if (!results.length) {
     const err = new Error('No valid stock set rows');
     err.statusCode = 400;
     throw err;
   }
 
-  return { results, count: results.length, oosReleased };
+  return { results, count: results.length, oosReleased, shopifySync };
 }
 
 /** Sequential manual codes: M-1000, M-1001, … (atomic via Settings). */
