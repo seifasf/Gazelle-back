@@ -115,6 +115,11 @@ const orderSchema = new mongoose.Schema(
     isReturnOrder: { type: Boolean, default: false, index: true },
     returnFromOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', index: true },
     /**
+     * Exception: warehouse must not +real stock on collect (factory-broken / unsellable).
+     * Copied onto a later exchange created from this order.
+     */
+    skipCollectRestock: { type: Boolean, default: false },
+    /**
      * Items Bosta must collect from the customer (exchange pickup side or full return).
      * Outbound `items` stay what we ship (exchange) or mirror pickup lines (return).
      */

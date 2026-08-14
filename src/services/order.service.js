@@ -855,7 +855,15 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
     let restockVariantIds = [];
     let confirmNote;
 
-    if (order.isExchangeOrder) {
+    const skipCollectRestock = Boolean(order.skipCollectRestock);
+
+    if (order.isExchangeOrder && skipCollectRestock) {
+      ledgerEntries = [];
+      restockVariantIds = [];
+      confirmNote =
+        note ||
+        `Exception: factory-broken collect not restocked (${fmtLines(collectLines)})`;
+    } else if (order.isExchangeOrder) {
       const collectRestock = await buildOutstandingReturnRestockEntries(
         order._id,
         collectLines,
@@ -1771,6 +1779,7 @@ export async function createManualOrder({
         isExchangeOrder: exchange,
         exchangeFromOrderId: exchange ? priorOrder._id : undefined,
         exchangeCreditAmount: exchange ? exchangeCreditAmount : 0,
+        skipCollectRestock: exchange ? Boolean(priorOrder.skipCollectRestock) : false,
         isReturnOrder: customerReturn,
         returnFromOrderId: customerReturn ? priorOrder._id : undefined,
         bostaReturnItems: normalizedReturnItems,
