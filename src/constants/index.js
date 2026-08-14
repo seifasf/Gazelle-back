@@ -82,6 +82,7 @@ export const JOB_NAMES = {
   PROCESS_SHOPIFY_WEBHOOK: 'process-shopify-webhook',
   PROCESS_BOSTA_WEBHOOK: 'process-bosta-webhook',
   SHOPIFY_OUTBOUND_INVENTORY: 'shopify-outbound-inventory',
+  SHOPIFY_INBOUND_INVENTORY: 'shopify-inbound-inventory',
   SHOPIFY_CATALOG_SYNC: 'shopify-catalog-sync',
   BOSTA_CREATE_SHIPMENT: 'bosta-create-shipment',
   BOSTA_POLLING_FALLBACK: 'bosta-polling-fallback',

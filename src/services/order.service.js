@@ -211,13 +211,53 @@ export async function forceSyncVariantsToShopify(variantIds = [], opts = {}) {
 }
 
 /**
- * When Shopify available increases above OMS sellable (admin edit on Shopify),
- * raise warehouse realStock so sellable matches, then auto-release OOS orders.
- * Decreases on Shopify are ignored here (OMS / order webhooks own outbound sales).
+ * Two-way inventory:
+ * OMS sellable (real − hold) ↔ Shopify available at the warehouse location.
+ * Echoes of our own pushes are ignored. Shopify sales are ignored once the
+ * order webhook has reserved hold (sellable already matches). Decreases are
+ * delayed a few seconds so orders/create can land first.
  */
-const SHOPIFY_INVENTORY_ECHO_MS = 120_000;
+const SHOPIFY_INVENTORY_ECHO_MS = 90_000;
+const SHOPIFY_INBOUND_DECREASE_DELAY_MS = 12_000;
 
-export async function ingestShopifyAvailableIncrease(variantId, shopifyAvailable) {
+async function recentShopifyOrderQty(variantId, windowMs = 180_000) {
+  const since = new Date(Date.now() - windowMs);
+  const orders = await Order.find({
+    shopifyOrderId: { $nin: [null, ''] },
+    placedAt: { $gte: since },
+    'items.variantId': variantId,
+    internalStatus: { $ne: 'cancelled' },
+  })
+    .select('items')
+    .lean();
+  const id = String(variantId);
+  let qty = 0;
+  for (const order of orders) {
+    for (const item of order.items || []) {
+      if (String(item.variantId) === id) qty += Number(item.quantity) || 0;
+    }
+  }
+  return qty;
+}
+
+async function markOnlineStock(variantId, available) {
+  const qty = Math.max(0, Math.round(Number(available) || 0));
+  await Variant.updateOne(
+    { _id: variantId },
+    {
+      $set: {
+        onlineStock: qty,
+        shopifyAvailable: qty > 0,
+      },
+    }
+  );
+}
+
+/**
+ * Set warehouse so OMS sellable matches Shopify available.
+ * Does not push back to Shopify (Shopify is already at that number).
+ */
+export async function applyShopifyAvailableToWarehouse(variantId, shopifyAvailable) {
   const targetAvail = Math.max(0, Math.round(Number(shopifyAvailable)));
   if (!Number.isFinite(Number(shopifyAvailable))) return null;
 
@@ -230,69 +270,96 @@ export async function ingestShopifyAvailableIncrease(variantId, shopifyAvailable
   const previousOnline = variant.onlineStock ?? null;
   const lastPushAt = variant.lastSyncedAt ? new Date(variant.lastSyncedAt).getTime() : 0;
 
-  // Ignore stale high-available webhooks echoing an intermediate OMS push (common after OOS release).
+  if (targetAvail === omsSellable) {
+    if (previousOnline !== targetAvail) await markOnlineStock(variant._id, targetAvail);
+    return { adjusted: false, matched: true };
+  }
+
+  // Exact echo of the last OMS → Shopify push.
   if (
-    targetAvail > omsSellable &&
     lastPushAt &&
     Date.now() - lastPushAt < SHOPIFY_INVENTORY_ECHO_MS &&
     previousOnline != null &&
-    targetAvail > previousOnline
+    targetAvail === previousOnline
   ) {
     logger.info(
-      {
-        variantId: String(variant._id),
-        sku: variant.sku,
-        targetAvail,
-        previousOnline,
-        omsSellable,
-      },
-      'Ignoring likely Shopify inventory webhook echo'
+      { variantId: String(variant._id), sku: variant.sku, targetAvail, previousOnline },
+      'Ignoring Shopify inventory webhook echo of OMS push'
     );
     return { adjusted: false, ignoredEcho: true };
   }
 
-  if (targetAvail > omsSellable) {
-    const delta = targetAvail - omsSellable;
-    logger.info(
-      { variantId: String(variant._id), sku: variant.sku, omsSellable, targetAvail, delta },
-      'Shopify available higher than OMS — ingesting into warehouse realStock'
-    );
-    return manualStockAdjustment({
-      variantId: variant._id,
-      quantityDelta: delta,
-      reasonCode: 'shopify_restock',
-      actorUserId: null,
-      skipOosAutoRelease: false,
-    });
-  }
-
-  // Stock already covers Shopify figure — still try freeing OOS orders.
-  const oosReleased = await releaseOutOfStockOrdersIfRestocked([variant._id], {
-    note: 'Auto: stock available (Shopify/OMS) — back to Ready to ship',
-  });
-
-  if (targetAvail < omsSellable) {
-    try {
-      const { reportOnlineStockDrift } = await import('./discrepancy.service.js');
-      await reportOnlineStockDrift(variant._id, targetAvail);
-    } catch {
-      /* non-fatal */
+  const drop = omsSellable - targetAvail;
+  if (drop > 0) {
+    const recentSold = await recentShopifyOrderQty(variant._id);
+    if (recentSold >= drop) {
+      await markOnlineStock(variant._id, targetAvail);
+      logger.info(
+        { sku: variant.sku, drop, recentSold, targetAvail, omsSellable },
+        'Shopify available drop matches recent Shopify orders — warehouse unchanged'
+      );
+      return { adjusted: false, ignoredSale: true };
     }
   }
 
-  if ((variant.onlineStock ?? null) !== targetAvail) {
-    await Variant.updateOne(
-      { _id: variant._id },
-      {
-        $set: {
-          onlineStock: targetAvail,
-          shopifyAvailable: targetAvail > 0,
-        },
-      }
-    );
+  const targetReal = targetAvail + hold;
+  const delta = targetReal - real;
+  if (delta === 0) {
+    await markOnlineStock(variant._id, targetAvail);
+    return { adjusted: false, matched: true };
   }
 
-  return { adjusted: false, oosReleased };
+  logger.info(
+    { sku: variant.sku, real, hold, omsSellable, targetAvail, delta },
+    'Applying Shopify admin inventory edit to OMS warehouse'
+  );
+
+  const result = await manualStockAdjustment({
+    variantId: variant._id,
+    quantityDelta: delta,
+    reasonCode: delta > 0 ? 'shopify_restock' : 'shopify_count',
+    actorUserId: null,
+    skipOosAutoRelease: delta < 0,
+    skipShopifySync: true,
+  });
+
+  await markOnlineStock(variant._id, targetAvail);
+  return { ...result, adjusted: true, delta, targetAvail };
+}
+
+export async function ingestShopifyAvailableIncrease(variantId, shopifyAvailable) {
+  return applyShopifyAvailableToWarehouse(variantId, shopifyAvailable);
+}
+
+export async function queueShopifyInventoryIngest(variantId, shopifyAvailable) {
+  const targetAvail = Math.max(0, Math.round(Number(shopifyAvailable)));
+  if (!Number.isFinite(Number(shopifyAvailable))) return null;
+
+  const variant = await Variant.findById(variantId).select('realStock onHoldStock');
+  if (!variant) return null;
+  const omsSellable = Math.max(
+    0,
+    (Number(variant.realStock) || 0) - Math.max(0, Number(variant.onHoldStock) || 0)
+  );
+
+  if (targetAvail >= omsSellable) {
+    return applyShopifyAvailableToWarehouse(variantId, targetAvail);
+  }
+
+  try {
+    const agenda = getAgenda();
+    const job = agenda.create(JOB_NAMES.SHOPIFY_INBOUND_INVENTORY, {
+      variantId: String(variantId),
+      shopifyAvailable: targetAvail,
+    });
+    job.unique({ 'data.variantId': String(variantId) });
+    job.schedule(new Date(Date.now() + SHOPIFY_INBOUND_DECREASE_DELAY_MS));
+    await job.save();
+    return { queued: true, shopifyAvailable: targetAvail };
+  } catch (err) {
+    logger.warn({ err: err?.message || err }, 'Could not debounce Shopify inbound inventory');
+    return applyShopifyAvailableToWarehouse(variantId, targetAvail);
+  }
 }
 
 export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCogsSnapshot, shippingMethod }) {
@@ -1173,15 +1240,41 @@ export async function stockIntakeBatch({ items, reasonCode, actorUserId }) {
   await checkVariantsLowStock(accepted.map((row) => row.variantId));
 
   const restockedVariantIds = accepted.map((row) => row.variantId);
+
+  let shopifySync = { synced: [], failed: [], queued: false };
+  try {
+    shopifySync = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('shopify_sync_timeout')), 12_000);
+      forceSyncVariantsToShopify(restockedVariantIds, { maxAttempts: 2, strict: false })
+        .then((result) => {
+          clearTimeout(timer);
+          resolve(result);
+        })
+        .catch((err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+    });
+  } catch (err) {
+    logger.warn({ err: err?.message || err, count: restockedVariantIds.length }, 'Intake Shopify push timed out — Agenda retry');
+    shopifySync = { synced: [], failed: restockedVariantIds.map((id) => ({ variantId: id, error: err?.message })), queued: true };
+    try {
+      const agenda = getAgenda();
+      for (const variantId of restockedVariantIds) {
+        await agenda.now(JOB_NAMES.SHOPIFY_OUTBOUND_INVENTORY, { variantId: String(variantId) });
+      }
+    } catch {
+      /* Agenda may be down in scripts */
+    }
+  }
+
   setImmediate(() => {
     releaseOutOfStockOrdersIfRestocked(restockedVariantIds, {
       actorUserId,
       note: 'Auto: stock intake restocked SKUs — back to Ready to ship',
-    })
-      .then(() => forceSyncVariantsToShopify(restockedVariantIds, { maxAttempts: 1, strict: false }))
-      .catch((err) => {
-        logger.error({ err }, 'stock-intake batch post-commit Shopify/OOS failed');
-      });
+    }).catch((err) => {
+      logger.error({ err }, 'stock-intake batch OOS release failed');
+    });
   });
 
   return {
@@ -1195,7 +1288,11 @@ export async function stockIntakeBatch({ items, reasonCode, actorUserId }) {
       };
     }),
     count: accepted.length,
-    shopifySyncQueued: true,
+    shopifySync,
+    shopifySyncQueued: Boolean(shopifySync?.queued || shopifySync?.failed?.length),
+    shopifyWarning: shopifySync?.failed?.length
+      ? `Warehouse saved; Shopify still updating for ${shopifySync.failed.length} SKU(s)`
+      : undefined,
   };
 }
 
@@ -2343,5 +2440,7 @@ export default {
   applyOrderDiscount,
   syncShopifySellableAfterLedger,
   forceSyncVariantsToShopify,
+  applyShopifyAvailableToWarehouse,
   ingestShopifyAvailableIncrease,
+  queueShopifyInventoryIngest,
 };

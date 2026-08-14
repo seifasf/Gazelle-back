@@ -95,6 +95,13 @@ export function registerJobs(agenda) {
     }
   });
 
+  agenda.define(JOB_NAMES.SHOPIFY_INBOUND_INVENTORY, async (job) => {
+    const { variantId, shopifyAvailable } = job.attrs.data || {};
+    if (!variantId || shopifyAvailable == null) return;
+    const { applyShopifyAvailableToWarehouse } = await import('../services/order.service.js');
+    await applyShopifyAvailableToWarehouse(variantId, shopifyAvailable);
+  });
+
   agenda.define(JOB_NAMES.SHOPIFY_CATALOG_SYNC, async () => {
     await syncCatalog();
   });

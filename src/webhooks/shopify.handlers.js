@@ -1,10 +1,11 @@
 import Order from '../models/Order.js';
 import Variant from '../models/Variant.js';
 import Product from '../models/Product.js';
+import Settings from '../models/Settings.js';
 import WebhookReceipt from '../models/WebhookReceipt.js';
 import { withTransaction } from '../utils/transaction.js';
 import { findOrCreateCustomer } from '../services/customer.service.js';
-import { reserveStockForOrder, cancelOrder, syncShopifySellableAfterLedger, ingestShopifyAvailableIncrease } from '../services/order.service.js';
+import { reserveStockForOrder, cancelOrder, syncShopifySellableAfterLedger, queueShopifyInventoryIngest } from '../services/order.service.js';
 import { notifyNewOrder } from '../services/notification.service.js';
 import OrderStatusHistory from '../models/OrderStatusHistory.js';
 import { reportOnlineStockDrift } from '../services/discrepancy.service.js';
@@ -299,7 +300,20 @@ export async function handleInventoryLevelsUpdate(payload) {
   const variant = await Variant.findOne({ shopifyInventoryItemId: inventoryItemId });
   if (!variant) return null;
 
-  // Absolute available is preferred; ignore relative-only adjustments without a level.
+  const settings = await Settings.findOne({ key: 'global' }).select('shopifyLocationId').lean();
+  const configuredLocation = String(settings?.shopifyLocationId || '')
+    .replace(/^gid:\/\/shopify\/Location\//, '');
+  const incomingLocation = payload.location_id != null
+    ? String(payload.location_id).replace(/^gid:\/\/shopify\/Location\//, '')
+    : '';
+  if (configuredLocation && incomingLocation && incomingLocation !== configuredLocation) {
+    logger.info(
+      { sku: variant.sku, incomingLocation, configuredLocation },
+      'Ignoring Shopify inventory update from a non-warehouse location'
+    );
+    return variant;
+  }
+
   const shopifyAvailable =
     payload.available != null
       ? payload.available
@@ -312,11 +326,11 @@ export async function handleInventoryLevelsUpdate(payload) {
   }
 
   try {
-    await ingestShopifyAvailableIncrease(variant._id, shopifyAvailable);
+    await queueShopifyInventoryIngest(variant._id, shopifyAvailable);
   } catch (err) {
     logger.warn(
       { err: err?.message || err, sku: variant.sku, shopifyAvailable },
-      'Shopify inventory ingest / OOS release failed'
+      'Shopify inventory ingest failed'
     );
     await reportOnlineStockDrift(variant._id, shopifyAvailable).catch(() => null);
   }

@@ -1,9 +1,9 @@
 import Settings from '../../models/Settings.js';
 
 /**
- * Shopify inventory sync: OMS warehouse is source of truth when policy=`full`.
- * Sellable on Shopify = realStock − onHoldStock (all orders: Shopify + manual/pickup).
- * Stock moves (orders, returns, intake) force `full` and push with retries.
+ * Shopify inventory sync: two-way when policy=`full`.
+ * OMS sellable (realStock − onHoldStock) writes Shopify available.
+ * Shopify Admin available edits write OMS warehouse (via inventory webhook).
  */
 export async function getShopifyWritePolicy() {
   const settings = await Settings.findOne({ key: 'global' });
