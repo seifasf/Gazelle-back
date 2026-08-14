@@ -86,8 +86,7 @@ export async function findExchangeOrder(req, res, next) {
   try {
     const order = await orderService.findOrderForExchange(req.query.q || req.query.search);
     const city = order?.shippingAddress?.city;
-    const goods = Number(order?.totalSellingPrice) || 0;
-    const suggested = (await orderService.suggestShippingFeeByCity(city, goods));
+    const suggested = await orderService.suggestShippingFeeByCity(city, 0);
     res.json({
       data: order,
       suggestedShippingFee: suggested,

@@ -1614,17 +1614,24 @@ export async function createManualOrder({
     // COD = upgrade + shipping − credit (customer still pays shipping when old is more expensive).
     let returnGoodsValue = 0;
     if (exchange && Array.isArray(bostaReturnItems)) {
-      const priorUnitByVariant = new Map();
-      for (const pi of priorOrder?.items || []) {
-        const vid = String(pi.variantId?._id || pi.variantId || '');
-        if (!vid) continue;
-        priorUnitByVariant.set(vid, Number(pi.unitSellingPrice) || 0);
-      }
+      const priorLines = (priorOrder?.items || []).map((pi) => ({
+        vid: String(pi.variantId?._id || pi.variantId || ''),
+        unit: Number(pi.unitSellingPrice) || 0,
+        remaining: Number(pi.quantity) || 0,
+      }));
       for (const r of bostaReturnItems) {
         const vid = String(r.variantId || '');
         const qty = Number(r.quantity) || 0;
         if (!vid || qty < 1) continue;
-        let unit = priorUnitByVariant.has(vid) ? priorUnitByVariant.get(vid) : null;
+        const payloadUnit = Number(r.unitSellingPrice);
+        let unit = Number.isFinite(payloadUnit) && payloadUnit > 0 ? payloadUnit : null;
+        if (unit == null) {
+          const line = priorLines.find((p) => p.vid === vid && p.remaining > 0);
+          if (line) {
+            unit = line.unit;
+            line.remaining = Math.max(0, line.remaining - qty);
+          }
+        }
         if (unit == null) {
           const variant = await Variant.findById(vid).session(session);
           unit = Number(variant?.sellingPrice) || 0;
@@ -1666,7 +1673,8 @@ export async function createManualOrder({
                 shippingFee: Number.isFinite(feeRaw) && feeRaw > 0 ? feeRaw : null,
                 priorOrder,
                 city: destCity,
-                goodsTotal: total,
+                // City rate always — original-order free shipping must not zero exchange COD.
+                goodsTotal: 0,
               })
             : (() => {
                 // Always use Shopify zone from destination city (ignore stale client defaults like 90).

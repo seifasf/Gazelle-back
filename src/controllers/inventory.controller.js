@@ -69,7 +69,8 @@ export async function lookupVariantBySku(req, res, next) {
 
 export async function lookupVariantFamilyBySku(req, res, next) {
   try {
-    const family = await productService.findVariantFamilyBySku(req.query.sku);
+    const sameColor = req.query.sameColor !== '0' && req.query.sameColor !== 'false';
+    const family = await productService.findVariantFamilyBySku(req.query.sku, { sameColor });
     if (!family) return res.status(404).json({ error: 'Variant not found' });
     res.json({ data: family });
   } catch (err) {

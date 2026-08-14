@@ -150,7 +150,7 @@ function sortSizes(a, b) {
  * Resolve a SKU/barcode to the product family (all sizes), optionally same color.
  * Used by stock intake so staff enter one SKU and fill qty per size.
  */
-export async function findVariantFamilyBySku(sku) {
+export async function findVariantFamilyBySku(sku, { sameColor = true } = {}) {
   const matched = await findVariantBySku(sku);
   if (!matched) return null;
 
@@ -163,10 +163,10 @@ export async function findVariantFamilyBySku(sku) {
     )
     .lean();
 
-  // Prefer same colorway when the product has multiple colors.
-  if (matched.color) {
-    const sameColor = variants.filter((v) => v.color === matched.color);
-    if (sameColor.length > 0) variants = sameColor;
+  // Stock intake: same colorway. Exchange: all colors so size/color can change.
+  if (sameColor && matched.color) {
+    const sameColorway = variants.filter((v) => v.color === matched.color);
+    if (sameColorway.length > 0) variants = sameColorway;
   }
 
   variants.sort(sortSizes);
