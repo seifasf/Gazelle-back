@@ -1172,7 +1172,12 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
   }
 
   await notifyNegativeStockCrossings(allCrossings);
-  await enqueueShopifySync(ledgerForShopify, { forcePolicyFull: true });
+  // Push sellable (real − hold) for every row in the upload — including unchanged
+  // realStock where holds moved since the last Shopify write.
+  await enqueueShopifySync(ledgerForShopify, {
+    forcePolicyFull: true,
+    variantIds: items.map((i) => i.variantId).filter(Boolean),
+  });
   await checkVariantsLowStock(results.map((r) => r.variantId));
 
   const increasedIds = results

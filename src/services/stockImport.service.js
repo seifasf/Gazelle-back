@@ -251,7 +251,7 @@ function matchVariant(parsed, index) {
 }
 
 /**
- * Import pivot totals into OMS realStock. Never writes Shopify.
+ * Import pivot totals into OMS realStock and push sellable qty to Shopify.
  */
 export async function importRealStockFromExcelBuffer(buffer, { actorUserId, apply = true } = {}) {
   const { sheetName, rows } = await parseRealStockExcelBuffer(buffer);
