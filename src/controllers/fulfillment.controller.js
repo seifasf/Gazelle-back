@@ -147,6 +147,7 @@ export async function markOutOfStock(req, res, next) {
   try {
     const order = await fulfillmentService.markOrderOutOfStock(req.params.id, req.user._id, {
       note: req.body?.note,
+      lines: req.body?.lines,
     });
     res.json({ data: order });
   } catch (err) {

@@ -524,8 +524,15 @@ export async function getPickList() {
 /**
  * Park a Ready-to-ship order as out_of_stock (warehouse missing SKUs).
  * Stock hold stays reserved until cancel or ship.
+ *
+ * Multi-item orders should pass `lines` so staff choose per SKU:
+ * - action `oos` — this line is why the order parks as Out of stock
+ * - action `remove` — wrong item / wrong number → quantity 0 (remove line), release hold
+ * - action `keep` — leave on the order
+ *
+ * If OOS lines are all removed and only `keep` lines remain → stays Ready to ship.
  */
-export async function markOrderOutOfStock(orderId, actorUserId, { note } = {}) {
+export async function markOrderOutOfStock(orderId, actorUserId, { note, lines } = {}) {
   const order = await Order.findById(orderId);
   if (!order) {
     const err = new Error('Order not found');
@@ -538,15 +545,166 @@ export async function markOrderOutOfStock(orderId, actorUserId, { note } = {}) {
     throw err;
   }
 
-  const reason = typeof note === 'string' && note.trim()
-    ? note.trim()
-    : 'Warehouse: item(s) out of stock';
+  const itemCount = (order.items || []).length;
+  const lineActions = Array.isArray(lines) ? lines : null;
 
-  return orderService.transitionOrderStatus(orderId, 'out_of_stock', {
-    source: 'user_action',
-    actorUserId,
-    note: reason,
+  if (itemCount > 1 && (!lineActions || !lineActions.length)) {
+    const err = new Error(
+      'This order has multiple items — choose which line is out of stock, or set a wrong line to quantity 0'
+    );
+    err.statusCode = 400;
+    err.code = 'OOS_LINES_REQUIRED';
+    throw err;
+  }
+
+  const reason =
+    typeof note === 'string' && note.trim() ? note.trim() : 'Warehouse: item(s) out of stock';
+
+  if (!lineActions?.length) {
+    return orderService.transitionOrderStatus(orderId, 'out_of_stock', {
+      source: 'user_action',
+      actorUserId,
+      note: reason,
+    });
+  }
+
+  const { withTransaction } = await import('../utils/transaction.js');
+  const { applyLedgerEntries, netOrderLedgerQty } = await import('./inventory.service.js');
+
+  const edit = await withTransaction(async (session) => {
+    const fresh = await Order.findById(orderId).session(session);
+    if (!fresh || fresh.internalStatus !== 'verified_ready_for_shipping') {
+      const err = new Error('Only Ready to ship orders can move to Out of stock');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const byId = new Map(
+      lineActions.filter((l) => l?.itemId).map((l) => [String(l.itemId), l])
+    );
+
+    const removedLabels = [];
+    const oosLabels = [];
+    let ledgerDocs = [];
+
+    for (const item of [...(fresh.items || [])]) {
+      const action = byId.get(String(item._id));
+      if (!action || action.action !== 'remove') continue;
+
+      const lineQty = Number(item.quantity) || 0;
+      if (lineQty < 1) continue;
+
+      const netHold = Math.max(
+        0,
+        await netOrderLedgerQty(
+          fresh._id,
+          item.variantId,
+          ['on_hold_reserve', 'on_hold_release'],
+          session
+        )
+      );
+      const releaseQty = Math.min(lineQty, netHold);
+      if (releaseQty > 0) {
+        const released = await applyLedgerEntries(
+          [
+            {
+              variantId: item.variantId,
+              orderId: fresh._id,
+              ledgerType: 'on_hold_release',
+              quantityDelta: -releaseQty,
+              reasonCode: 'oos_wrong_line_zero',
+              actorUserId,
+            },
+          ],
+          session
+        );
+        ledgerDocs = [...ledgerDocs, ...released];
+      }
+
+      removedLabels.push(`${item.sku || '?'}×${lineQty}`);
+      item.deleteOne();
+    }
+
+    let hasOos = false;
+    for (const item of fresh.items || []) {
+      const action = byId.get(String(item._id));
+      if (action?.action === 'oos') {
+        hasOos = true;
+        oosLabels.push(`${item.sku || '?'}×${item.quantity || 0}`);
+      }
+    }
+
+    // Multi-item: must mark at least one remaining line as OOS, or only remove wrong lines.
+    if (itemCount > 1 && !hasOos && !removedLabels.length) {
+      const err = new Error('Select at least one out-of-stock item, or set a wrong item to quantity 0');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const unitsLeft = (fresh.items || []).reduce((s, i) => s + (Number(i.quantity) || 0), 0);
+    if (unitsLeft < 1) {
+      const err = new Error(
+        'Cannot set every line to zero — cancel the order instead, or leave at least one item'
+      );
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const goodsSum = fresh.items.reduce(
+      (sum, i) => sum + (Number(i.unitSellingPrice) || 0) * (Number(i.quantity) || 0),
+      0
+    );
+    const pct = Number(fresh.discountPercent) || 0;
+    fresh.merchandiseSubtotal = goodsSum;
+    if (pct > 0 && goodsSum > 0) {
+      fresh.discountAmount = Math.round(((goodsSum * pct) / 100) * 100) / 100;
+      fresh.totalSellingPrice = Math.max(
+        0,
+        Math.round((goodsSum - fresh.discountAmount) * 100) / 100
+      );
+    } else {
+      fresh.discountPercent = 0;
+      fresh.discountAmount = 0;
+      fresh.totalSellingPrice = goodsSum;
+    }
+
+    const detailParts = [];
+    if (oosLabels.length) detailParts.push(`OOS: ${oosLabels.join(', ')}`);
+    if (removedLabels.length) detailParts.push(`zeroed: ${removedLabels.join(', ')}`);
+    const staffNote = [reason, detailParts.join(' · ')].filter(Boolean).join(' — ');
+
+    fresh.verificationLog = fresh.verificationLog || [];
+    fresh.verificationLog.push({
+      outcome: 'customer_requested_changes',
+      note: staffNote,
+      actorUserId,
+    });
+    await fresh.save({ session });
+
+    return {
+      order: await Order.findById(fresh._id).session(session),
+      ledgerDocs,
+      hasOos,
+      staffNote,
+      removedLabels,
+    };
   });
+
+  await orderService.syncShopifySellableAfterLedger(edit.ledgerDocs, {
+    forcePolicyFull: true,
+    variantIds: (edit.order.items || []).map((i) => i.variantId),
+  });
+
+  if (edit.hasOos) {
+    return orderService.transitionOrderStatus(orderId, 'out_of_stock', {
+      source: 'user_action',
+      actorUserId,
+      note: edit.staffNote,
+    });
+  }
+
+  // Only wrong lines zeroed — remaining items stay Ready to ship.
+  return edit.order;
 }
 
 export async function getShipmentStatus(orderId) {
