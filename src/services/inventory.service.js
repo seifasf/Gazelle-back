@@ -379,6 +379,38 @@ export async function buildOutstandingHoldReleaseEntries(orderId, items, session
 }
 
 /**
+ * Release ALL remaining on-hold for an order (every variant with net hold > 0).
+ * Use on cancel so edited/removed lines cannot leave orphan holds.
+ */
+export async function buildFullOrderHoldReleaseEntries(orderId, session = null) {
+  if (!orderId) return [];
+  const oid = new mongoose.Types.ObjectId(String(orderId));
+  const pipeline = [
+    {
+      $match: {
+        orderId: oid,
+        ledgerType: { $in: ['on_hold_reserve', 'on_hold_release'] },
+      },
+    },
+    { $group: { _id: '$variantId', net: { $sum: '$quantityDelta' } } },
+    { $match: { net: { $gt: 0 } } },
+  ];
+  const rows = session
+    ? await InventoryLedger.aggregate(pipeline).session(session)
+    : await InventoryLedger.aggregate(pipeline);
+
+  return rows
+    .filter((r) => r._id && Number(r.net) > 0)
+    .map((r) => ({
+      variantId: r._id,
+      orderId: oid,
+      ledgerType: 'on_hold_release',
+      quantityDelta: -Number(r.net),
+      reasonCode: 'cancel_release_hold',
+    }));
+}
+
+/**
  * Manual warehouse adjustment on real_stock.
  */
 export function buildManualAdjustmentEntry({ variantId, quantityDelta, reasonCode, actorUserId }) {
@@ -483,7 +515,14 @@ export async function listOnHoldItems({ search, limit = 500 } = {}) {
         lastHoldAt: r.lastAt,
       };
     })
-    .filter((row) => row.quantity > 0);
+    // Cancelled / returned-to-stock must not appear as open holds.
+    .filter(
+      (row) =>
+        row.quantity > 0
+        && row.orderStatus
+        && row.orderStatus !== 'cancelled'
+        && row.orderStatus !== 'returned_to_stock'
+    );
 
   const term = String(search || '').trim().toLowerCase();
   if (term) {
@@ -521,6 +560,7 @@ export default {
   buildPostDeliveryReturnEntries,
   buildOutstandingReturnRestockEntries,
   buildOutstandingHoldReleaseEntries,
+  buildFullOrderHoldReleaseEntries,
   buildManualAdjustmentEntry,
   buildStockIntakeEntries,
   listOnHoldItems,

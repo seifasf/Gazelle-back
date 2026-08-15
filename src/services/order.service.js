@@ -18,6 +18,7 @@ import {
   buildPostDeliveryReturnEntries,
   buildOutstandingReturnRestockEntries,
   buildOutstandingHoldReleaseEntries,
+  buildFullOrderHoldReleaseEntries,
   buildManualAdjustmentEntry,
   buildStockIntakeEntries,
   netOrderLedgerQty,
@@ -558,10 +559,21 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
       err.statusCode = 404;
       throw err;
     }
+
+    // Already cancelled: still clear any leftover on-hold (idempotent repair).
+    if (order.internalStatus === 'cancelled') {
+      const releaseEntries = await buildFullOrderHoldReleaseEntries(order._id, session);
+      const ledgerDocs = releaseEntries.length
+        ? await applyLedgerEntries(releaseEntries, session)
+        : [];
+      return {
+        order: await Order.findById(orderId).session(session),
+        ledgerDocs,
+        restockVariantIds: releaseEntries.map((e) => e.variantId),
+      };
+    }
+
     if (isTerminalStatus(order.internalStatus)) {
-      if (order.internalStatus === 'cancelled') {
-        return Order.findById(orderId).session(session);
-      }
       const err = new Error('Order already in terminal state');
       err.statusCode = 400;
       throw err;
@@ -593,8 +605,11 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
       throw err;
     }
 
-    const ledgerEntries = buildPreDeliveryReleaseEntries(order._id, order.items);
-    const ledgerDocs = await applyLedgerEntries(ledgerEntries, session);
+    // Clear every remaining hold on this order (not only current line qtys).
+    const ledgerEntries = await buildFullOrderHoldReleaseEntries(order._id, session);
+    const ledgerDocs = ledgerEntries.length
+      ? await applyLedgerEntries(ledgerEntries, session)
+      : [];
 
     order.cancellationReason = reason;
     await order.save({ session });
@@ -609,10 +624,24 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
     await recordCustomerCancellation(order.customerId, session);
 
     newlyCancelled = true;
-    return { order: await Order.findById(orderId).session(session), ledgerDocs };
+    return {
+      order: await Order.findById(orderId).session(session),
+      ledgerDocs,
+      restockVariantIds: ledgerEntries.map((e) => e.variantId),
+    };
   });
 
-  await afterLedgerApplied(cancelled?.ledgerDocs);
+  await afterLedgerApplied(cancelled?.ledgerDocs, {
+    actorUserId,
+    oosNote: 'Auto: cancelled order released hold',
+  });
+
+  if (cancelled?.restockVariantIds?.length) {
+    await releaseOutOfStockOrdersIfRestocked(cancelled.restockVariantIds, {
+      actorUserId,
+      note: 'Auto: cancel released hold — stock free for Ready to ship',
+    });
+  }
 
   const cancelledOrder = cancelled?.order || cancelled;
 
