@@ -12,6 +12,8 @@ import { shopifyRest, shopifyRestPaginated } from './client.js';
 import { handleOrdersCreate, handleOrdersUpdated, mapImportedOrderStatus } from '../../webhooks/shopify.handlers.js';
 import logger from '../../utils/logger.js';
 import { isManualOrderRef } from '../../utils/orderRefs.js';
+import { resolveGender } from '../../utils/gender.js';
+import { normalizeEgPhoneDigits, phoneMatchRegexes } from '../../utils/phone.js';
 
 export async function testShopifyConnection() {
   if (!(await isShopifyConfigured())) {
@@ -363,20 +365,56 @@ function mapShopifyCustomer(sc) {
     fullName,
     phone,
     email: sc.email || undefined,
+    gender: resolveGender(undefined, fullName),
     lifetimeOrders: sc.orders_count ?? 0,
     addresses,
   };
 }
 
-/** Import every customer from Shopify, upserting by Shopify customer id. */
-export async function importAllShopifyCustomers({ maxItems = Infinity } = {}) {
+async function findExistingCustomerForShopifyImport(mapped) {
+  let existing = await Customer.findOne({ shopifyCustomerId: mapped.shopifyCustomerId });
+  if (existing) return existing;
+
+  if (mapped.phone && !String(mapped.phone).startsWith('shopify-')) {
+    const regexes = phoneMatchRegexes(mapped.phone);
+    if (regexes.length) {
+      existing = await Customer.findOne({
+        $or: regexes.map((re) => ({ phone: { $regex: re } })),
+      }).sort({ updatedAt: -1 });
+      if (existing) return existing;
+    }
+    existing = await Customer.findOne({
+      phone: mapped.phone,
+      fullName: mapped.fullName,
+    });
+  }
+  return existing;
+}
+
+/** Import every customer from Shopify, upserting by Shopify customer id / phone. */
+export async function importAllShopifyCustomers({ maxItems = Infinity, onProgress } = {}) {
   if (!(await isShopifyConfigured())) {
     const err = new Error('Shopify credentials not configured');
     err.statusCode = 400;
     throw err;
   }
 
-  const results = { fetched: 0, imported: 0, updated: 0, errors: [] };
+  const results = { fetched: 0, imported: 0, updated: 0, errors: [], genderBackfilled: 0 };
+
+  // Improve Gender filter immediately for names we can infer.
+  const unknowns = await Customer.find({
+    $or: [{ gender: 'unknown' }, { gender: { $exists: false } }, { gender: null }],
+  })
+    .select('_id fullName gender')
+    .lean();
+  for (const c of unknowns) {
+    const g = resolveGender(c.gender, c.fullName);
+    if (g === 'male' || g === 'female') {
+      await Customer.updateOne({ _id: c._id }, { $set: { gender: g } });
+      results.genderBackfilled += 1;
+    }
+  }
+  if (typeof onProgress === 'function') onProgress({ ...results });
 
   await shopifyRestPaginated('/customers.json?limit=250', 'customers', {
     maxItems,
@@ -385,20 +423,34 @@ export async function importAllShopifyCustomers({ maxItems = Infinity } = {}) {
         results.fetched += 1;
         try {
           const mapped = mapShopifyCustomer(sc);
-          const existing = await Customer.findOne({
-            $or: [
-              { shopifyCustomerId: mapped.shopifyCustomerId },
-              ...(mapped.phone && !mapped.phone.startsWith('shopify-')
-                ? [{ phone: mapped.phone, fullName: mapped.fullName }]
-                : []),
-            ],
-          });
+          const existing = await findExistingCustomerForShopifyImport(mapped);
 
           if (existing) {
             existing.shopifyCustomerId = existing.shopifyCustomerId || mapped.shopifyCustomerId;
-            if (!existing.email && mapped.email) existing.email = mapped.email;
-            if ((!existing.addresses || !existing.addresses.length) && mapped.addresses.length) {
-              existing.addresses = mapped.addresses;
+            if (mapped.fullName && mapped.fullName !== 'Unknown') existing.fullName = mapped.fullName;
+            if (mapped.email) existing.email = mapped.email;
+            if (mapped.phone && !String(mapped.phone).startsWith('shopify-')) {
+              const core = normalizeEgPhoneDigits(mapped.phone);
+              if (core.length >= 7) existing.phone = mapped.phone;
+            }
+            if (mapped.addresses?.length) {
+              if (!existing.addresses?.length) existing.addresses = mapped.addresses;
+              else {
+                // Refresh default city/line when Shopify has a fuller address.
+                const cur = existing.addresses.find((a) => a.isDefault) || existing.addresses[0];
+                const next = mapped.addresses[0];
+                if (cur && next?.city && (!cur.city || cur.city === 'Unknown')) cur.city = next.city;
+                if (cur && next?.line1 && !cur.line1) cur.line1 = next.line1;
+              }
+            }
+            if (
+              Number.isFinite(mapped.lifetimeOrders) &&
+              mapped.lifetimeOrders > (existing.lifetimeOrders || 0)
+            ) {
+              existing.lifetimeOrders = mapped.lifetimeOrders;
+            }
+            if (!existing.gender || existing.gender === 'unknown') {
+              existing.gender = mapped.gender || resolveGender(existing.gender, existing.fullName);
             }
             await existing.save();
             results.updated += 1;
@@ -410,11 +462,65 @@ export async function importAllShopifyCustomers({ maxItems = Infinity } = {}) {
           results.errors.push({ customerId: sc.id, error: error.message });
           logger.warn({ customerId: sc.id, err: error }, 'Customer import failed');
         }
+
+        if (typeof onProgress === 'function' && results.fetched % 50 === 0) {
+          onProgress({ ...results });
+        }
       }
+      if (typeof onProgress === 'function') onProgress({ ...results });
     },
   });
 
+  logger.info(results, 'Shopify customer import complete');
   return results;
+}
+
+const customerImportState = {
+  running: false,
+  startedAt: null,
+  finishedAt: null,
+  result: null,
+  error: null,
+  progress: null,
+};
+
+export function getCustomerImportState() {
+  return { ...customerImportState };
+}
+
+/** Long Shopify customer pulls exceed HTTP timeouts — run in background and poll status. */
+export function startCustomerImportInBackground({ maxItems = Infinity } = {}) {
+  if (customerImportState.running) {
+    return { started: false, ...getCustomerImportState() };
+  }
+  customerImportState.running = true;
+  customerImportState.startedAt = new Date();
+  customerImportState.finishedAt = null;
+  customerImportState.error = null;
+  customerImportState.result = null;
+  customerImportState.progress = { fetched: 0, imported: 0, updated: 0, errors: [] };
+
+  importAllShopifyCustomers({
+    maxItems,
+    onProgress: (progress) => {
+      customerImportState.progress = progress;
+    },
+  })
+    .then((result) => {
+      customerImportState.result = result;
+      customerImportState.progress = result;
+      logger.info({ result }, 'Background Shopify customer import finished');
+    })
+    .catch((err) => {
+      customerImportState.error = err?.message || String(err);
+      logger.error({ err }, 'Background Shopify customer import failed');
+    })
+    .finally(() => {
+      customerImportState.running = false;
+      customerImportState.finishedAt = new Date();
+    });
+
+  return { started: true, ...getCustomerImportState() };
 }
 
 /**
@@ -578,6 +684,8 @@ export default {
   importAllShopifyOrders,
   importOpenShopifyOrders,
   importAllShopifyCustomers,
+  startCustomerImportInBackground,
+  getCustomerImportState,
   ensureOrdersLoaded,
   backfillShopifyOrderNames,
   importShopifyOrderByName,

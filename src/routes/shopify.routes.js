@@ -20,5 +20,6 @@ router.get('/locations', adminOnly, shopifyController.getLocations);
 // Data imports: admin + orders manager can pull orders/customers.
 router.post('/import-orders', requireRoles('admin', 'orders_manager'), shopifyController.importOrders);
 router.post('/import-customers', requireRoles('admin', 'orders_manager'), shopifyController.importCustomers);
+router.get('/import-customers/status', requireRoles('admin', 'orders_manager'), shopifyController.importCustomersStatus);
 
 export default router;

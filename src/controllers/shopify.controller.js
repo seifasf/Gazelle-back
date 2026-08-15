@@ -123,9 +123,30 @@ export async function importOrders(req, res, next) {
 
 export async function importCustomers(req, res, next) {
   try {
-    const { importAllShopifyCustomers } = await import('../integrations/shopify/setup.service.js');
-    const customers = await importAllShopifyCustomers();
-    res.json({ data: { customers } });
+    const { startCustomerImportInBackground, getCustomerImportState } = await import(
+      '../integrations/shopify/setup.service.js'
+    );
+    // Optional sync mode for scripts: { wait: true }
+    if (req.body?.wait === true) {
+      const { importAllShopifyCustomers } = await import('../integrations/shopify/setup.service.js');
+      const customers = await importAllShopifyCustomers({
+        maxItems: Number(req.body?.maxItems) || Infinity,
+      });
+      return res.json({ data: { customers } });
+    }
+    const state = startCustomerImportInBackground({
+      maxItems: Number(req.body?.maxItems) || Infinity,
+    });
+    res.status(202).json({ data: { customerImport: state, ...(getCustomerImportState()) } });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function importCustomersStatus(req, res, next) {
+  try {
+    const { getCustomerImportState } = await import('../integrations/shopify/setup.service.js');
+    res.json({ data: getCustomerImportState() });
   } catch (err) {
     next(err);
   }
@@ -201,6 +222,7 @@ export default {
   syncStatus,
   importOrders,
   importCustomers,
+  importCustomersStatus,
   registerWebhooks,
   pushWarehouseStock,
   getLocations,

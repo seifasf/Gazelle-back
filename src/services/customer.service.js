@@ -37,9 +37,23 @@ function hasOrderItemFilters(q = {}) {
   );
 }
 
+/** Normalize Arabic-Indic digits and trim for size compares. */
+function normalizeSizeToken(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+}
+
+function sizeEqualsRegex(size) {
+  const token = escapeRegex(normalizeSizeToken(size));
+  if (!token) return null;
+  // Exact after trim, optional leading zeros ("037" ↔ "37"), ignore case.
+  return new RegExp(`^\\s*0*${token}\\s*$`, 'i');
+}
+
 /**
  * Resolve customer IDs that ordered matching variants / order criteria.
- * Size/color/sku/product filters join Order.items → Variant (+ Product title).
+ * Size/color/sku/product filters join Order.items (+ return lines) → Variant / SKU / embedded size.
  */
 export async function findCustomerIdsByOrderFilters({
   size,
@@ -53,17 +67,17 @@ export async function findCustomerIdsByOrderFilters({
   placedTo,
   shippingMethod,
 } = {}) {
-  const orderMatch = { customerId: { $ne: null } };
-  if (orderStatus && orderStatus !== 'all') orderMatch.internalStatus = String(orderStatus);
-  if (shippingMethod && shippingMethod !== 'all') orderMatch.shippingMethod = String(shippingMethod);
+  const baseMatch = { customerId: { $ne: null } };
+  if (orderStatus && orderStatus !== 'all') baseMatch.internalStatus = String(orderStatus);
+  if (shippingMethod && shippingMethod !== 'all') baseMatch.shippingMethod = String(shippingMethod);
   if (placedFrom || placedTo) {
-    orderMatch.placedAt = {};
-    if (placedFrom) orderMatch.placedAt.$gte = new Date(placedFrom);
+    baseMatch.placedAt = {};
+    if (placedFrom) baseMatch.placedAt.$gte = new Date(placedFrom);
     if (placedTo) {
       const end = new Date(placedTo);
       if (!Number.isNaN(end.getTime())) {
         end.setHours(23, 59, 59, 999);
-        orderMatch.placedAt.$lte = end;
+        baseMatch.placedAt.$lte = end;
       }
     }
   }
@@ -71,31 +85,60 @@ export async function findCustomerIdsByOrderFilters({
   const variantNeeds =
     Boolean(size) || Boolean(color) || Boolean(sku) || Boolean(productId) || Boolean(productSearch) || Boolean(itemSearch);
 
-  if (variantNeeds) {
-    const variantFilter = {};
-    if (size) variantFilter.size = String(size).trim();
-    if (color) variantFilter.color = { $regex: `^${escapeRegex(String(color).trim())}$`, $options: 'i' };
-    if (sku) variantFilter.sku = { $regex: escapeRegex(String(sku).trim()), $options: 'i' };
-    if (productId && mongoose.Types.ObjectId.isValid(productId)) {
-      variantFilter.productId = new mongoose.Types.ObjectId(productId);
-    }
-
-    const text = String(productSearch || itemSearch || '').trim();
-    if (text) {
-      const regex = { $regex: escapeRegex(text), $options: 'i' };
-      const products = await Product.find({ title: regex }).select('_id').lean();
-      const productIds = products.map((p) => p._id);
-      const textOr = [{ sku: regex }];
-      if (productIds.length) textOr.push({ productId: { $in: productIds } });
-      variantFilter.$or = textOr;
-    }
-
-    const variants = await Variant.find(variantFilter).select('_id').lean();
-    if (!variants.length) return [];
-    orderMatch['items.variantId'] = { $in: variants.map((v) => v._id) };
+  if (!variantNeeds) {
+    const ids = await Order.distinct('customerId', baseMatch);
+    return ids.filter(Boolean);
   }
 
-  const ids = await Order.distinct('customerId', orderMatch);
+  const andParts = [];
+  const sizeRe = size ? sizeEqualsRegex(size) : null;
+  if (sizeRe) andParts.push({ size: { $regex: sizeRe } });
+  if (color) {
+    andParts.push({
+      color: { $regex: new RegExp(`^\\s*${escapeRegex(String(color).trim())}\\s*$`, 'i') },
+    });
+  }
+  if (sku) andParts.push({ sku: { $regex: escapeRegex(String(sku).trim()), $options: 'i' } });
+  if (productId && mongoose.Types.ObjectId.isValid(productId)) {
+    andParts.push({ productId: new mongoose.Types.ObjectId(productId) });
+  }
+
+  const text = String(productSearch || itemSearch || '').trim();
+  if (text) {
+    const regex = { $regex: escapeRegex(text), $options: 'i' };
+    const products = await Product.find({
+      $or: [{ title: regex }, { handle: regex }, { tags: regex }],
+    })
+      .select('_id')
+      .lean();
+    const productIds = products.map((p) => p._id);
+    const textOr = [{ sku: regex }];
+    if (productIds.length) textOr.push({ productId: { $in: productIds } });
+    andParts.push({ $or: textOr });
+  }
+
+  const variantFilter = andParts.length === 1 ? andParts[0] : { $and: andParts };
+  const variants = await Variant.find(variantFilter).select('_id sku size').lean();
+  const variantIds = variants.map((v) => v._id);
+  const skus = [...new Set(variants.map((v) => v.sku).filter(Boolean))];
+
+  const lineOr = [];
+  if (variantIds.length) {
+    lineOr.push({ 'items.variantId': { $in: variantIds } });
+    lineOr.push({ 'bostaReturnItems.variantId': { $in: variantIds } });
+  }
+  if (skus.length) {
+    lineOr.push({ 'items.sku': { $in: skus } });
+    lineOr.push({ 'bostaReturnItems.sku': { $in: skus } });
+  }
+  // Embedded size on return/exchange collect lines (when variant link is missing).
+  if (sizeRe) {
+    lineOr.push({ 'bostaReturnItems.size': { $regex: sizeRe } });
+  }
+
+  if (!lineOr.length) return [];
+
+  const ids = await Order.distinct('customerId', { ...baseMatch, $or: lineOr });
   return ids.filter(Boolean);
 }
 
@@ -194,13 +237,10 @@ async function resolveFilteredCustomerQuery(query = {}) {
     });
   }
 
-  // Stored gender only when not inferring from name (male/female still use resolveGender pass).
-  if (query.gender === 'unknown') {
-    parts.push({ gender: 'unknown' });
-  }
-
   const filter = parts.length === 0 ? {} : parts.length === 1 ? parts[0] : { $and: parts };
-  const needsGenderPass = query.gender === 'male' || query.gender === 'female';
+  // Always resolve gender via stored value OR name inference (most profiles are still "unknown").
+  const needsGenderPass =
+    query.gender === 'male' || query.gender === 'female' || query.gender === 'unknown';
   return { filter, needsGenderPass, genderTarget: query.gender };
 }
 
@@ -535,7 +575,7 @@ export async function getCustomerFilterOptions() {
     Product.find({ status: { $ne: 'archived' } })
       .sort({ title: 1 })
       .select('_id title')
-      .limit(500)
+      .limit(2000)
       .lean(),
   ]);
 
