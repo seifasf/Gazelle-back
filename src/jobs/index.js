@@ -149,6 +149,15 @@ export function registerJobs(agenda) {
     return result;
   });
 
+  agenda.define(JOB_NAMES.RELEASE_OUT_OF_STOCK, async () => {
+    const orderService = await import('../services/order.service.js');
+    const result = await orderService.scanOutOfStockOrdersForRelease();
+    if (result?.released?.length) {
+      logger.info(result, 'Scheduled OOS auto-release finished');
+    }
+    return result;
+  });
+
   logger.info('Agenda jobs registered');
 }
 
@@ -163,6 +172,8 @@ export async function scheduleRecurringJobs(agenda) {
   await agenda.every('24 hours', JOB_NAMES.CHECK_SLOW_MOVERS);
   // ~08:00 Cairo daily (cron uses server local; also safe to run every day morning window)
   await agenda.every('0 5 * * *', JOB_NAMES.ORDER_DELAY_CALLBACKS);
+  // Catch OOS orders as soon as warehouse stock covers them (returns / intake / count).
+  await agenda.every('5 minutes', JOB_NAMES.RELEASE_OUT_OF_STOCK);
   logger.info('Agenda recurring jobs scheduled');
 }
 

@@ -197,7 +197,38 @@ async function enqueueShopifySync(
 
 async function afterLedgerApplied(ledgerDocs, opts = {}) {
   await notifyNegativeStockCrossings(ledgerDocs?._negativeCrossings || []);
-  return enqueueShopifySync(ledgerDocs, { forcePolicyFull: true, ...opts });
+  const sync = await enqueueShopifySync(ledgerDocs, { forcePolicyFull: true, ...opts });
+
+  // Any +real stock (intake or return) should try to unblock Out of stock orders.
+  if (!opts.skipOosAutoRelease) {
+    const restockIds = [
+      ...new Set(
+        (Array.isArray(ledgerDocs) ? ledgerDocs : [])
+          .filter(
+            (d) =>
+              d &&
+              (d.ledgerType === 'real_stock_increment_manual' ||
+                d.ledgerType === 'real_stock_increment_return') &&
+              Number(d.quantityDelta) > 0
+          )
+          .map((d) => d.variantId?._id ?? d.variantId)
+          .filter(Boolean)
+          .map(String)
+      ),
+    ];
+    if (restockIds.length) {
+      setImmediate(() => {
+        releaseOutOfStockOrdersIfRestocked(restockIds, {
+          actorUserId: opts.actorUserId || null,
+          note: opts.oosNote || 'Auto: stock back — order ready to ship',
+        }).catch((err) => {
+          logger.error({ err }, 'OOS auto-release after ledger failed');
+        });
+      });
+    }
+  }
+
+  return sync;
 }
 
 /** Public: push Shopify sellable (real − all holds) after hold/real ledger commits. */
@@ -970,11 +1001,18 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
   await afterLedgerApplied(result.ledgerDocs, {
     forcePolicyFull: true,
     variantIds: result.syncVariantIds,
+    actorUserId,
+    oosNote: 'Auto: return confirmed — stock back, order ready to ship',
   });
 
-  // Restock (exchange collect / refund / post-delivery return) may unblock Out of stock orders.
-  if (result.restockVariantIds?.length) {
-    await releaseOutOfStockOrdersIfRestocked(result.restockVariantIds, {
+  // Also release using explicit restock ids (covers edge cases where ledger docs
+  // omit variantId shape). skipOos on afterLedger already queued one pass.
+  const fromLedger = (result.ledgerDocs || [])
+    .filter((d) => d?.ledgerType === 'real_stock_increment_return' && Number(d.quantityDelta) > 0)
+    .map((d) => d.variantId?._id ?? d.variantId);
+  const restockIds = [...new Set([...(result.restockVariantIds || []), ...fromLedger].filter(Boolean))];
+  if (restockIds.length) {
+    await releaseOutOfStockOrdersIfRestocked(restockIds, {
       actorUserId,
       note: 'Auto: return/exchange restocked SKUs — back to Ready to ship',
     });
@@ -985,6 +1023,9 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
 /**
  * After warehouse stock increases, move Out of stock orders back to Ready to ship
  * when every line can be covered by free warehouse stock + that order's existing hold.
+ *
+ * Pass variantIds to limit the scan; omit / empty to scan every out_of_stock order
+ * (used by the periodic safety job).
  */
 export async function releaseOutOfStockOrdersIfRestocked(
   variantIds,
@@ -997,15 +1038,15 @@ export async function releaseOutOfStockOrdersIfRestocked(
         .filter((id) => mongoose.Types.ObjectId.isValid(id))
     ),
   ];
-  if (!ids.length) return { released: [], checked: 0 };
 
-  const objectIds = ids.map((id) => new mongoose.Types.ObjectId(id));
-  const candidates = await Order.find({
-    internalStatus: 'out_of_stock',
-    'items.variantId': { $in: objectIds },
-  })
+  const query = { internalStatus: 'out_of_stock' };
+  if (ids.length) {
+    query['items.variantId'] = { $in: ids.map((id) => new mongoose.Types.ObjectId(id)) };
+  }
+
+  const candidates = await Order.find(query)
     .sort({ verifiedAt: 1, placedAt: 1 })
-    .select('_id items sku shopifyOrderName');
+    .select('_id items shopifyOrderName');
 
   if (!candidates.length) return { released: [], checked: 0 };
 
@@ -1030,6 +1071,19 @@ export async function releaseOutOfStockOrdersIfRestocked(
   for (const order of candidates) {
     const lines = order.items || [];
     if (!lines.length) continue;
+
+    // Fresh stock snapshot for this order's SKUs before deciding.
+    for (const item of lines) {
+      const key = String(item.variantId);
+      if (!stockById.has(key)) continue;
+      const v = await Variant.findById(item.variantId).select('realStock onHoldStock');
+      if (v) {
+        stockById.set(key, {
+          real: v.realStock ?? 0,
+          hold: Math.max(0, v.onHoldStock ?? 0),
+        });
+      }
+    }
 
     let fullyStocked = true;
     for (const item of lines) {
@@ -1074,13 +1128,10 @@ export async function releaseOutOfStockOrdersIfRestocked(
         return true;
       });
       if (didRelease) {
-        await afterLedgerApplied(ledgerDocs);
+        await afterLedgerApplied(ledgerDocs, { skipOosAutoRelease: true });
         released.push(String(order._id));
-        // Refresh in-memory stock map so the next OOS order sees updated holds.
         for (const item of lines) {
           const key = String(item.variantId);
-          const stock = stockById.get(key);
-          if (!stock) continue;
           const v = await Variant.findById(item.variantId).select('realStock onHoldStock');
           if (v) {
             stockById.set(key, {
@@ -1100,12 +1151,19 @@ export async function releaseOutOfStockOrdersIfRestocked(
 
   if (released.length) {
     logger.info(
-      { released: released.length, variantIds: ids },
+      { released: released.length, variantIds: ids.length ? ids : 'all' },
       'Auto-released out_of_stock orders after restock'
     );
   }
 
   return { released, checked: candidates.length };
+}
+
+/** Periodic safety net: re-check every parked OOS order against current warehouse stock. */
+export async function scanOutOfStockOrdersForRelease() {
+  return releaseOutOfStockOrdersIfRestocked([], {
+    note: 'Auto: warehouse stock covers order — back to Ready to ship',
+  });
 }
 
 export async function transitionOrderStatus(orderId, toStatus, meta) {
@@ -2440,6 +2498,7 @@ export default {
   stockIntakeBatch,
   setRealStockBatch,
   releaseOutOfStockOrdersIfRestocked,
+  scanOutOfStockOrdersForRelease,
   createManualOrder,
   findOrderForExchange,
   suggestShippingFeeByCity,

@@ -182,15 +182,19 @@ export async function exportWarehouseBacklogExcel(query = {}) {
 }
 
 /**
- * Pieces entered into warehouse (stock intake / count adjustments with +qty).
+ * Pieces entered into warehouse:
+ * - Manual stock intake / count (+real via real_stock_increment_manual)
+ * - Returns / exchange collect confirmed at warehouse (+real via real_stock_increment_return)
  */
 function escapeRegex(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+const STOCK_BACK_LEDGER_TYPES = ['real_stock_increment_manual', 'real_stock_increment_return'];
+
 export async function listStockIntakes({ from, to, search, limit = 100, skip = 0 } = {}) {
   const filter = {
-    ledgerType: 'real_stock_increment_manual',
+    ledgerType: { $in: STOCK_BACK_LEDGER_TYPES },
     quantityDelta: { $gt: 0 },
   };
   if (from || to) {
@@ -233,7 +237,7 @@ export async function listStockIntakes({ from, to, search, limit = 100, skip = 0
   const lim = Math.min(Math.max(Number(limit) || 100, 1), 500);
   const sk = Math.max(Number(skip) || 0, 0);
 
-  const [rows, total] = await Promise.all([
+  const [rows, total, unitsAgg] = await Promise.all([
     InventoryLedger.find(filter)
       .sort({ createdAt: -1 })
       .skip(sk)
@@ -244,18 +248,34 @@ export async function listStockIntakes({ from, to, search, limit = 100, skip = 0
         populate: { path: 'productId', select: 'title imageUrl' },
       })
       .populate('actorUserId', 'name email')
+      .populate('orderId', 'shopifyOrderName shopifyOrderId')
       .lean(),
     InventoryLedger.countDocuments(filter),
+    InventoryLedger.aggregate([
+      { $match: filter },
+      { $group: { _id: null, units: { $sum: '$quantityDelta' } } },
+    ]),
   ]);
 
   const entries = rows.map((row) => {
     const v = row.variantId && typeof row.variantId === 'object' ? row.variantId : null;
     const product = v?.productId && typeof v.productId === 'object' ? v.productId : null;
+    const order = row.orderId && typeof row.orderId === 'object' ? row.orderId : null;
+    const isReturn = row.ledgerType === 'real_stock_increment_return';
+    const orderRef =
+      order?.shopifyOrderName ||
+      (order?.shopifyOrderId ? String(order.shopifyOrderId) : '') ||
+      '';
     return {
       id: String(row._id),
       enteredAt: row.createdAt,
       quantity: row.quantityDelta,
-      reasonCode: row.reasonCode || 'restock',
+      source: isReturn ? 'return' : 'intake',
+      reasonCode: isReturn
+        ? orderRef
+          ? `return · ${orderRef}`
+          : 'return'
+        : row.reasonCode || 'restock',
       sku: v?.sku || '—',
       title: product?.title || v?.title || v?.sku || '—',
       color: v?.color || '',
@@ -263,11 +283,13 @@ export async function listStockIntakes({ from, to, search, limit = 100, skip = 0
       imageUrl: v?.imageUrl || product?.imageUrl || '',
       realStockNow: v?.realStock ?? null,
       variantId: v?._id ? String(v._id) : null,
-      enteredBy: row.actorUserId?.name || row.actorUserId?.email || '—',
+      orderId: order?._id ? String(order._id) : row.orderId ? String(row.orderId) : null,
+      orderRef: orderRef || null,
+      enteredBy: row.actorUserId?.name || row.actorUserId?.email || (isReturn ? 'Returns' : '—'),
     };
   });
 
-  const unitsEntered = entries.reduce((s, e) => s + (e.quantity || 0), 0);
+  const unitsEntered = Number(unitsAgg[0]?.units) || 0;
 
   return {
     generatedAt: new Date().toISOString(),
@@ -289,13 +311,14 @@ export async function exportStockIntakesExcel(query = {}) {
   const sheet = workbook.addWorksheet('Stock entered');
   sheet.columns = [
     { header: 'Entered at', key: 'enteredAt', width: 22 },
+    { header: 'Source', key: 'source', width: 10 },
     { header: 'Product', key: 'title', width: 32 },
     { header: 'SKU', key: 'sku', width: 20 },
     { header: 'Color', key: 'color', width: 14 },
     { header: 'Size', key: 'size', width: 10 },
     { header: 'Qty entered', key: 'quantity', width: 12 },
     { header: 'WH stock now', key: 'realStockNow', width: 14 },
-    { header: 'Reason', key: 'reasonCode', width: 14 },
+    { header: 'Reason / order', key: 'reasonCode', width: 22 },
     { header: 'Entered by', key: 'enteredBy', width: 20 },
   ];
   for (const row of data.entries) {
