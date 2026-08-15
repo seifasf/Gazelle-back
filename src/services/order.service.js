@@ -2473,8 +2473,13 @@ export async function listOrders({
       .populate('customerId', 'fullName phone riskFlag lifetimeCancelled')
       .populate({
         path: 'items.variantId',
-        select: 'title color size sku productId',
-        populate: { path: 'productId', select: 'title' },
+        select: 'title color size sku imageUrl barcode productId',
+        populate: { path: 'productId', select: 'title imageUrl' },
+      })
+      .populate({
+        path: 'bostaReturnItems.variantId',
+        select: 'title color size sku imageUrl barcode productId',
+        populate: { path: 'productId', select: 'title imageUrl' },
       }),
     Order.countDocuments(filter),
   ]);
@@ -2488,7 +2493,12 @@ export async function getOrderById(orderId) {
     .populate('assignedStockManagerId', 'name email')
     .populate({
       path: 'items.variantId',
-      select: 'title color size imageUrl sku realStock onHoldStock productId',
+      select: 'title color size imageUrl sku barcode realStock onHoldStock productId',
+      populate: { path: 'productId', select: 'title imageUrl' },
+    })
+    .populate({
+      path: 'bostaReturnItems.variantId',
+      select: 'title color size imageUrl sku barcode productId',
       populate: { path: 'productId', select: 'title imageUrl' },
     });
 }
