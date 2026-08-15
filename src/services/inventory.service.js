@@ -411,6 +411,128 @@ export async function buildFullOrderHoldReleaseEntries(orderId, session = null) 
 }
 
 /**
+ * Recompute Variant.onHoldStock from open order ledger holds.
+ * Keeps the puzzle piece (field) locked to ledger truth.
+ */
+export async function reconcileVariantOnHoldFromLedger(variantId, session = null) {
+  if (!variantId) return null;
+  const vid = new mongoose.Types.ObjectId(String(variantId));
+  const pipeline = [
+    {
+      $match: {
+        variantId: vid,
+        orderId: { $ne: null },
+        ledgerType: { $in: ['on_hold_reserve', 'on_hold_release'] },
+      },
+    },
+    { $group: { _id: '$orderId', net: { $sum: '$quantityDelta' } } },
+    { $match: { net: { $gt: 0 } } },
+    { $group: { _id: null, total: { $sum: '$net' } } },
+  ];
+  const rows = session
+    ? await InventoryLedger.aggregate(pipeline).session(session)
+    : await InventoryLedger.aggregate(pipeline);
+  const target = Math.max(0, Number(rows[0]?.total) || 0);
+
+  const variant = session
+    ? await Variant.findById(vid).session(session)
+    : await Variant.findById(vid);
+  if (!variant) return null;
+
+  const previous = Math.max(0, variant.onHoldStock ?? 0);
+  if (previous === target) {
+    return { variantId: String(vid), sku: variant.sku, previous, next: target, changed: false };
+  }
+
+  variant.onHoldStock = target;
+  await variant.save(session ? { session } : undefined);
+  logger.info(
+    { sku: variant.sku, previous, next: target },
+    'Reconciled variant onHoldStock from ledger'
+  );
+  return { variantId: String(vid), sku: variant.sku, previous, next: target, changed: true };
+}
+
+/**
+ * Full stock puzzle repair:
+ * 1) Clear leftover holds on cancelled / returned_to_stock orders
+ * 2) Reconcile every variant's onHoldStock to open ledger holds
+ */
+export async function repairStockIntegrity({ actorUserId = null } = {}) {
+  const Order = (await import('../models/Order.js')).default;
+  const { withTransaction } = await import('../utils/transaction.js');
+
+  const holdNets = await InventoryLedger.aggregate([
+    {
+      $match: {
+        orderId: { $ne: null },
+        ledgerType: { $in: ['on_hold_reserve', 'on_hold_release'] },
+      },
+    },
+    {
+      $group: {
+        _id: { orderId: '$orderId', variantId: '$variantId' },
+        net: { $sum: '$quantityDelta' },
+      },
+    },
+    { $match: { net: { $gt: 0 } } },
+  ]);
+
+  const orphanOrderIds = new Set();
+  for (const row of holdNets) {
+    const order = await Order.findById(row._id.orderId).select('internalStatus').lean();
+    if (
+      order
+      && (order.internalStatus === 'cancelled' || order.internalStatus === 'returned_to_stock')
+    ) {
+      orphanOrderIds.add(String(row._id.orderId));
+    }
+  }
+
+  let orphanHoldsReleased = 0;
+  const touchedVariants = new Set();
+
+  for (const orderId of orphanOrderIds) {
+    const outcome = await withTransaction(async (session) => {
+      const entries = await buildFullOrderHoldReleaseEntries(orderId, session);
+      if (!entries.length) return [];
+      for (const e of entries) {
+        e.reasonCode = 'integrity_orphan_hold_release';
+        e.actorUserId = actorUserId || undefined;
+      }
+      return applyLedgerEntries(entries, session);
+    });
+    orphanHoldsReleased += outcome.length;
+    for (const doc of outcome) {
+      if (doc?.variantId) touchedVariants.add(String(doc.variantId));
+    }
+  }
+
+  // Reconcile all variants that have ledger activity or onHoldStock set.
+  const variantIds = await InventoryLedger.distinct('variantId', {
+    ledgerType: { $in: ['on_hold_reserve', 'on_hold_release'] },
+  });
+  const fieldHoldIds = await Variant.find({ onHoldStock: { $gt: 0 } }).distinct('_id');
+  const allIds = [...new Set([...variantIds, ...fieldHoldIds].map(String))];
+
+  let holdsReconciled = 0;
+  for (const id of allIds) {
+    const result = await reconcileVariantOnHoldFromLedger(id);
+    if (result?.changed) {
+      holdsReconciled += 1;
+      touchedVariants.add(id);
+    }
+  }
+
+  return {
+    orphanOrdersCleared: orphanOrderIds.size,
+    orphanHoldsReleased,
+    holdsReconciled,
+    variantIds: [...touchedVariants],
+  };
+}
+
+/**
  * Manual warehouse adjustment on real_stock.
  */
 export function buildManualAdjustmentEntry({ variantId, quantityDelta, reasonCode, actorUserId }) {
@@ -561,6 +683,8 @@ export default {
   buildOutstandingReturnRestockEntries,
   buildOutstandingHoldReleaseEntries,
   buildFullOrderHoldReleaseEntries,
+  reconcileVariantOnHoldFromLedger,
+  repairStockIntegrity,
   buildManualAdjustmentEntry,
   buildStockIntakeEntries,
   listOnHoldItems,

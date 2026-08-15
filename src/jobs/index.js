@@ -158,6 +158,20 @@ export function registerJobs(agenda) {
     return result;
   });
 
+  agenda.define(JOB_NAMES.STOCK_INTEGRITY, async () => {
+    const { repairStockIntegrity } = await import('../services/inventory.service.js');
+    const orderService = await import('../services/order.service.js');
+    const repair = await repairStockIntegrity();
+    if (repair.holdsReconciled || repair.orphanHoldsReleased) {
+      logger.info(repair, 'Scheduled stock integrity repair finished');
+    }
+    if (repair.variantIds?.length) {
+      await orderService.forceSyncVariantsToShopify(repair.variantIds, { strict: false });
+    }
+    const oos = await orderService.scanOutOfStockOrdersForRelease();
+    return { repair, oos };
+  });
+
   logger.info('Agenda jobs registered');
 }
 
@@ -174,6 +188,8 @@ export async function scheduleRecurringJobs(agenda) {
   await agenda.every('0 5 * * *', JOB_NAMES.ORDER_DELAY_CALLBACKS);
   // Catch OOS orders as soon as warehouse stock covers them (returns / intake / count).
   await agenda.every('5 minutes', JOB_NAMES.RELEASE_OUT_OF_STOCK);
+  // Keep hold field ↔ ledger ↔ terminal orders aligned (stock puzzle).
+  await agenda.every('15 minutes', JOB_NAMES.STOCK_INTEGRITY);
   logger.info('Agenda recurring jobs scheduled');
 }
 

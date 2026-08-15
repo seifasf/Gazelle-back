@@ -683,6 +683,13 @@ async function executeDelivered(order, { source, actorUserId, note }, session) {
     if (ledgerEntries.length) {
       ledgerDocs = await applyLedgerEntries(ledgerEntries, session);
     }
+    // Clear any leftover hold (edited lines / orphans) after delivery finalize.
+    const leftoverHold = await buildFullOrderHoldReleaseEntries(order._id, session);
+    if (leftoverHold.length) {
+      for (const e of leftoverHold) e.reasonCode = 'delivery_clear_leftover_hold';
+      const extra = await applyLedgerEntries(leftoverHold, session);
+      ledgerDocs = [...ledgerDocs, ...extra];
+    }
   } catch (err) {
     // Historical imports / courier / Shopify fulfill: still mark delivered; log inventory gap.
     if (source === 'bosta_webhook' || source === 'shopify_import' || source === 'shopify_webhook') {
@@ -843,6 +850,13 @@ export async function partialLocalDelivery(orderId, actorUserId, { deliveries = 
         ];
       }
     }
+    // Clear any leftover hold (edited/removed lines) so delivered orders never leave orphans.
+    const leftoverHold = await buildFullOrderHoldReleaseEntries(order._id, session);
+    if (leftoverHold.length) {
+      for (const e of leftoverHold) e.reasonCode = 'partial_delivery_clear_leftover_hold';
+      const extra = await applyLedgerEntries(leftoverHold, session);
+      ledgerDocs = [...ledgerDocs, ...extra];
+    }
 
     const newTotal = deliveredLines.reduce(
       (s, i) => s + (Number(i.unitSellingPrice) || 0) * i.quantity,
@@ -936,11 +950,8 @@ export async function returnLocalShippingToStock(orderId, actorUserId, { note } 
     const fmtLines = (lines) =>
       (lines || []).map((i) => `${i.sku || '?'}×${i.quantity || 0}`).join(', ') || 'none';
 
-    const releaseEntries = await buildOutstandingHoldReleaseEntries(
-      order._id,
-      order.items,
-      session
-    );
+    const releaseEntries = await buildFullOrderHoldReleaseEntries(order._id, session);
+    for (const e of releaseEntries) e.reasonCode = 'local_failed_return_to_stock';
     const ledgerDocs = releaseEntries.length
       ? await applyLedgerEntries(releaseEntries, session)
       : [];
@@ -1097,6 +1108,16 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
       ? await applyLedgerEntries(ledgerEntries, session)
       : [];
 
+    // Always clear any leftover on-hold for this order (sold RTOs can still have
+    // orphan holds if items were edited; undelivered paths may miss a line).
+    const leftoverHold = await buildFullOrderHoldReleaseEntries(order._id, session);
+    let allLedgerDocs = ledgerDocs;
+    if (leftoverHold.length) {
+      for (const e of leftoverHold) e.reasonCode = 'return_clear_leftover_hold';
+      const extra = await applyLedgerEntries(leftoverHold, session);
+      allLedgerDocs = [...ledgerDocs, ...extra];
+    }
+
     await transitionOrder(
       order,
       'returned_to_stock',
@@ -1116,7 +1137,7 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
 
     return {
       order: await Order.findById(orderId).session(session),
-      ledgerDocs,
+      ledgerDocs: allLedgerDocs,
       restockVariantIds,
       syncVariantIds: [
         ...new Set(
@@ -1124,6 +1145,7 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
             ...(order.items || []).map((i) => i.variantId),
             ...(order.bostaReturnItems || []).map((i) => i.variantId),
             ...restockVariantIds,
+            ...leftoverHold.map((e) => e.variantId),
           ]
             .map((id) => (id != null ? String(id) : null))
             .filter(Boolean)
