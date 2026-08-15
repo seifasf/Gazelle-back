@@ -2266,33 +2266,6 @@ export async function getOrderStateCounts() {
   }
   counts.total = rows.reduce((sum, r) => sum + r.count, 0);
 
-  // Refund pickups have their own tab — keep classic return lanes free of isReturnOrder.
-  const [returningExRefund, awaitingExRefund, stockedExRefund, refundOrders] = await Promise.all([
-    Order.countDocuments({
-      placedAt: { $gte: cutoff },
-      internalStatus: 'returning_to_origin',
-      isReturnOrder: { $ne: true },
-    }),
-    Order.countDocuments({
-      placedAt: { $gte: cutoff },
-      internalStatus: 'returned_awaiting_receipt',
-      isReturnOrder: { $ne: true },
-    }),
-    Order.countDocuments({
-      placedAt: { $gte: cutoff },
-      internalStatus: 'returned_to_stock',
-      isReturnOrder: { $ne: true },
-    }),
-    Order.countDocuments({
-      placedAt: { $gte: cutoff },
-      isReturnOrder: true,
-    }),
-  ]);
-  counts.returning_to_origin = returningExRefund;
-  counts.returned_awaiting_receipt = awaitingExRefund;
-  counts.returned_to_stock = stockedExRefund;
-  counts.refund_orders = refundOrders;
-
   // Fulfillment queue excludes customer pickup (handled on the order page)
   // and orders with a future ship-after date.
   const shipReady = shipAfterNotDueFilter();
@@ -2325,6 +2298,12 @@ export async function getOrderStateCounts() {
         delayedUntil: { $gt: todayEnd },
       },
     ],
+  });
+
+  // Legacy alias (Refund orders tab removed — refunds sit in return lanes with a type tag).
+  counts.refund_orders = await Order.countDocuments({
+    placedAt: { $gte: cutoff },
+    isReturnOrder: true,
   });
 
   return counts;
