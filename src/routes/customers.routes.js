@@ -8,6 +8,8 @@ const router = Router();
 router.use(authenticate);
 
 router.get('/', requireRoles('admin', 'orders_manager'), customersController.listCustomers);
+router.get('/filter-options', requireRoles('admin', 'orders_manager'), customersController.filterOptions);
+router.get('/export', requireRoles('admin', 'orders_manager'), customersController.exportCustomers);
 router.get('/lookup/by-phone', requireRoles('admin', 'orders_manager'), customersController.lookupByPhone);
 router.get('/:id', requireRoles('admin', 'orders_manager'), customersController.getCustomer);
 router.get('/:id/orders', requireRoles('admin', 'orders_manager'), customersController.getCustomerOrders);

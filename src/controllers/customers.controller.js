@@ -1,9 +1,28 @@
 import * as customerService from '../services/customer.service.js';
+import { sendExcel } from '../utils/excelExport.js';
 
 export async function listCustomers(req, res, next) {
   try {
     const result = await customerService.listCustomers(req.query);
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function filterOptions(req, res, next) {
+  try {
+    const data = await customerService.getCustomerFilterOptions();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function exportCustomers(req, res, next) {
+  try {
+    const { buffer, filename } = await customerService.exportCustomersExcel(req.query);
+    sendExcel(res, { buffer, filename });
   } catch (err) {
     next(err);
   }
@@ -47,4 +66,12 @@ export async function updateRiskFlag(req, res, next) {
   }
 }
 
-export default { listCustomers, lookupByPhone, getCustomer, getCustomerOrders, updateRiskFlag };
+export default {
+  listCustomers,
+  filterOptions,
+  exportCustomers,
+  lookupByPhone,
+  getCustomer,
+  getCustomerOrders,
+  updateRiskFlag,
+};
