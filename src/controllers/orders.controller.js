@@ -418,6 +418,19 @@ export async function partialLocalDelivery(req, res, next) {
   }
 }
 
+export async function returnLocalShippingToStock(req, res, next) {
+  try {
+    const order = await orderService.returnLocalShippingToStock(
+      req.params.id,
+      req.user._id,
+      req.body || {}
+    );
+    res.json({ data: order });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export default {
   listOrders,
   getStateCounts,
@@ -439,4 +452,5 @@ export default {
   delayOrder,
   applyDiscount,
   partialLocalDelivery,
+  returnLocalShippingToStock,
 };

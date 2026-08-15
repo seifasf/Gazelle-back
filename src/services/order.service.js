@@ -790,13 +790,29 @@ export async function partialLocalDelivery(orderId, actorUserId, { deliveries = 
       throw err;
     }
 
-    // Finalize stock for delivered units; release hold only for returned units.
+    // Finalize stock for delivered units; release remaining hold for unreceived units
+    // (back to sellable warehouse / Shopify). Use outstanding-hold helper so partial
+    // qty on the same SKU cannot over-release.
     const deliveryEntries = await buildDeliveryStockEntries(order._id, deliveredLines, session);
-    const releaseEntries = buildPreDeliveryReleaseEntries(order._id, undeliveredLines);
-    const ledgerEntries = [...deliveryEntries, ...releaseEntries];
+    // Apply delivery first so hold math for undelivered lines sees updated net hold.
     let ledgerDocs = [];
-    if (ledgerEntries.length) {
-      ledgerDocs = await applyLedgerEntries(ledgerEntries, session);
+    if (deliveryEntries.length) {
+      ledgerDocs = await applyLedgerEntries(deliveryEntries, session);
+    }
+    const releaseEntries = await buildOutstandingHoldReleaseEntries(
+      order._id,
+      undeliveredLines,
+      session
+    );
+    if (releaseEntries.length) {
+      const released = await applyLedgerEntries(releaseEntries, session);
+      ledgerDocs = [...ledgerDocs, ...released];
+      if (released._negativeCrossings?.length) {
+        ledgerDocs._negativeCrossings = [
+          ...(ledgerDocs._negativeCrossings || []),
+          ...released._negativeCrossings,
+        ];
+      }
     }
 
     const newTotal = deliveredLines.reduce(
@@ -845,7 +861,98 @@ export async function partialLocalDelivery(orderId, actorUserId, { deliveries = 
 
   await afterLedgerApplied(delivered?._ledgerDocs);
   await checkVariantsLowStock((delivered?.items || []).map((i) => i.variantId));
+
+  // Unreceived pieces are sellable again — unblock any Out of stock orders waiting on them.
+  const fromLedger = (delivered?._ledgerDocs || [])
+    .filter((d) => d?.ledgerType === 'on_hold_release' && Number(d.quantityDelta) < 0)
+    .map((d) => d.variantId?._id ?? d.variantId)
+    .filter(Boolean);
+  if (fromLedger.length) {
+    await releaseOutOfStockOrdersIfRestocked(fromLedger, {
+      actorUserId,
+      note: 'Auto: partial local delivery returned pieces to stock',
+    });
+  }
+
   return delivered;
+}
+
+/**
+ * Local courier failed delivery / refused / came back with the bag:
+ * release all holds and mark returned_to_stock immediately (no Bosta warehouse wait).
+ * Also works from failed_delivery when shippingMethod is local_shipping.
+ */
+export async function returnLocalShippingToStock(orderId, actorUserId, { note } = {}) {
+  const result = await withTransaction(async (session) => {
+    const order = await Order.findById(orderId).session(session);
+    if (!order) {
+      const err = new Error('Order not found');
+      err.statusCode = 404;
+      throw err;
+    }
+    if (order.shippingMethod !== 'local_shipping') {
+      const err = new Error('Only local shipping orders can return to stock this way');
+      err.statusCode = 400;
+      throw err;
+    }
+    const allowed = ['local_shipping', 'failed_delivery'];
+    if (!allowed.includes(order.internalStatus)) {
+      const err = new Error(
+        'Order must be in Local shipping or Failed delivery to return the package to stock'
+      );
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const fmtLines = (lines) =>
+      (lines || []).map((i) => `${i.sku || '?'}×${i.quantity || 0}`).join(', ') || 'none';
+
+    const releaseEntries = await buildOutstandingHoldReleaseEntries(
+      order._id,
+      order.items,
+      session
+    );
+    const ledgerDocs = releaseEntries.length
+      ? await applyLedgerEntries(releaseEntries, session)
+      : [];
+
+    const staffNote =
+      (typeof note === 'string' && note.trim()) ||
+      `Local failed delivery — package back, released hold on ${fmtLines(order.items)}`;
+
+    await transitionOrder(
+      order,
+      'returned_to_stock',
+      { source: 'user_action', actorUserId, note: staffNote },
+      session
+    );
+
+    await Customer.updateOne(
+      { _id: order.customerId },
+      { $inc: { lifetimeRejectedOrReturned: 1 } },
+      { session }
+    );
+
+    return {
+      order: await Order.findById(orderId).session(session),
+      ledgerDocs,
+      restockVariantIds: (order.items || []).map((i) => i.variantId).filter(Boolean),
+    };
+  });
+
+  await afterLedgerApplied(result.ledgerDocs, {
+    actorUserId,
+    oosNote: 'Auto: local failed delivery returned to stock',
+  });
+
+  if (result.restockVariantIds?.length) {
+    await releaseOutOfStockOrdersIfRestocked(result.restockVariantIds, {
+      actorUserId,
+      note: 'Auto: local failed delivery — stock free, order ready to ship',
+    });
+  }
+
+  return result.order;
 }
 
 export async function confirmReturnedToStock(orderId, actorUserId, note) {
@@ -2489,6 +2596,7 @@ export default {
   cancelOrder,
   markDelivered,
   partialLocalDelivery,
+  returnLocalShippingToStock,
   confirmReturnedToStock,
   transitionOrderStatus,
   reserveStockForOrder,
