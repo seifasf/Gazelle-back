@@ -2,6 +2,7 @@ import Order from '../models/Order.js';
 import OrderStatusHistory from '../models/OrderStatusHistory.js';
 import Variant from '../models/Variant.js';
 import Customer from '../models/Customer.js';
+import InventoryLedger from '../models/InventoryLedger.js';
 import mongoose from 'mongoose';
 import { withTransaction } from '../utils/transaction.js';
 import { isManualOrderRef } from '../utils/orderRefs.js';
@@ -1226,14 +1227,49 @@ export async function releaseOutOfStockOrdersIfRestocked(
   const released = [];
   const releaseNote = note || 'Auto: stock restocked — back to Ready to ship';
 
+  /**
+   * Holds that truly compete for shelf stock: Ready to ship / with courier / etc.
+   * Other Out-of-stock orders are a soft queue — they must not block each other
+   * when warehouse real qty is enough for the oldest order (FIFO).
+   */
+  async function competingPipelineHold(variantId, excludeOrderId) {
+    const vid = new mongoose.Types.ObjectId(String(variantId));
+    const rows = await InventoryLedger.aggregate([
+      {
+        $match: {
+          variantId: vid,
+          orderId: { $ne: null },
+          ledgerType: { $in: ['on_hold_reserve', 'on_hold_release'] },
+        },
+      },
+      { $group: { _id: '$orderId', net: { $sum: '$quantityDelta' } } },
+      { $match: { net: { $gt: 0 } } },
+    ]);
+    let competing = 0;
+    for (const row of rows) {
+      if (excludeOrderId && String(row._id) === String(excludeOrderId)) continue;
+      const o = await Order.findById(row._id).select('internalStatus').lean();
+      if (!o) continue;
+      // Soft / terminal — do not treat as shelf competition.
+      if (
+        o.internalStatus === 'out_of_stock' ||
+        o.internalStatus === 'cancelled' ||
+        o.internalStatus === 'returned_to_stock'
+      ) {
+        continue;
+      }
+      competing += Number(row.net) || 0;
+    }
+    return competing;
+  }
+
   for (const order of candidates) {
     const lines = order.items || [];
     if (!lines.length) continue;
 
-    // Fresh stock snapshot for this order's SKUs before deciding.
+    // Fresh warehouse real for this order's SKUs before deciding.
     for (const item of lines) {
       const key = String(item.variantId);
-      if (!stockById.has(key)) continue;
       const v = await Variant.findById(item.variantId).select('realStock onHoldStock');
       if (v) {
         stockById.set(key, {
@@ -1251,15 +1287,9 @@ export async function releaseOutOfStockOrdersIfRestocked(
         fullyStocked = false;
         break;
       }
-      const orderHold = Math.max(
-        0,
-        await netOrderLedgerQty(order._id, item.variantId, [
-          'on_hold_reserve',
-          'on_hold_release',
-        ])
-      );
-      // Free sellable + units already reserved for this OOS order.
-      const availableForOrder = stock.real - stock.hold + orderHold;
+      // Shelf left after Ready/shipping holds only (other OOS do not block FIFO).
+      const pipelineHold = await competingPipelineHold(item.variantId, order._id);
+      const availableForOrder = stock.real - pipelineHold;
       if (availableForOrder < need) {
         fullyStocked = false;
         break;
