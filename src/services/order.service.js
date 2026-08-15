@@ -2337,6 +2337,9 @@ export async function listOrders({
   shippingMethod,
   isExchangeOrder,
   isReturnOrder,
+  returnKind,
+  placedFrom,
+  placedTo,
   delayed,
   limit = 50,
   skip = 0,
@@ -2358,6 +2361,53 @@ export async function listOrders({
   if (isReturnOrder === true || isReturnOrder === 'true') filter.isReturnOrder = true;
   if (isReturnOrder === false || isReturnOrder === 'false') {
     filter.isReturnOrder = { $ne: true };
+  }
+  // returnKind: exchange | refund | refused (Customer refused / never delivered RTO)
+  if (returnKind === 'exchange') {
+    filter.isExchangeOrder = true;
+  } else if (returnKind === 'refund') {
+    filter.$and = [
+      ...(filter.$and || []),
+      { isExchangeOrder: { $ne: true } },
+      {
+        $or: [
+          { isReturnOrder: true },
+          { deliveredAt: { $exists: true, $ne: null } },
+        ],
+      },
+    ];
+  } else if (returnKind === 'refused') {
+    filter.$and = [
+      ...(filter.$and || []),
+      { isExchangeOrder: { $ne: true } },
+      { isReturnOrder: { $ne: true } },
+      {
+        $or: [
+          { deliveredAt: null },
+          { deliveredAt: { $exists: false } },
+        ],
+      },
+    ];
+  }
+  if (placedFrom || placedTo) {
+    const range = { ...(filter.placedAt || {}) };
+    if (placedFrom) {
+      const from = new Date(`${String(placedFrom).slice(0, 10)}T00:00:00.000+03:00`);
+      if (!Number.isNaN(from.getTime())) range.$gte = from;
+    }
+    if (placedTo) {
+      const to = new Date(`${String(placedTo).slice(0, 10)}T23:59:59.999+03:00`);
+      if (!Number.isNaN(to.getTime())) range.$lte = to;
+    }
+    if (range.$gte || range.$lte) {
+      // Keep cutover floor if present
+      if (filter.placedAt?.$gte && range.$gte) {
+        range.$gte = new Date(Math.max(filter.placedAt.$gte.getTime(), range.$gte.getTime()));
+      } else if (filter.placedAt?.$gte && !range.$gte) {
+        range.$gte = filter.placedAt.$gte;
+      }
+      filter.placedAt = range;
+    }
   }
   if (delayed === true || delayed === '1' || delayed === 'true') {
     filter.delayedUntil = { $exists: true, $ne: null };

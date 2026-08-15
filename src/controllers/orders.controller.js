@@ -39,6 +39,9 @@ export async function listOrders(req, res, next) {
       shippingMethod,
       isExchangeOrder,
       isReturnOrder,
+      returnKind,
+      placedFrom,
+      placedTo,
       delayed,
     } = req.query;
     const statusFilter = clampStatusFilterForRole(req.user.role, status);
@@ -50,6 +53,9 @@ export async function listOrders(req, res, next) {
       shippingMethod,
       isExchangeOrder,
       isReturnOrder,
+      returnKind,
+      placedFrom,
+      placedTo,
       delayed,
       limit: Number(limit) || 50,
       skip: Number(skip) || 0,
