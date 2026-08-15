@@ -2341,7 +2341,7 @@ export async function listOrders({
   if (isReturnOrder === false || isReturnOrder === 'false') {
     filter.isReturnOrder = { $ne: true };
   }
-  // returnKind: exchange | refund | refused (Customer refused / never delivered RTO)
+  // returnKind: exchange | refund | refused — same rules as frontend getReturnKind()
   if (returnKind === 'exchange') {
     filter.isExchangeOrder = true;
   } else if (returnKind === 'refund') {
@@ -2351,7 +2351,7 @@ export async function listOrders({
       {
         $or: [
           { isReturnOrder: true },
-          { deliveredAt: { $exists: true, $ne: null } },
+          { deliveredAt: { $type: 'date' } },
         ],
       },
     ];
