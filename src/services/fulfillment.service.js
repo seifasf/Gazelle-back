@@ -207,13 +207,15 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
       }
       await order.save();
       try {
-        // Re-sync money so existing AWB COD stays 0 for paid / correct shipping for COD.
-        await syncShopifyMoneyOntoOrder(order);
+        // Re-pull Shopify ship-to + money, then push onto the existing AWB.
+        order = (await syncShopifyMoneyOntoOrder(order)) || order;
+        order = await Order.findById(orderId).populate('customerId');
+        await updateDeliveryAddressAndCod(order.bostaDeliveryId, order, order.customerId);
         await updateDeliveryPackageDescription(order.bostaDeliveryId, order);
       } catch (err) {
         logger.warn(
           { err: err.message, orderId, deliveryId: order.bostaDeliveryId },
-          'Could not refresh Bosta package description'
+          'Could not refresh Bosta address/COD/description from Shopify'
         );
       }
       return {
