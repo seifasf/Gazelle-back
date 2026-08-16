@@ -135,7 +135,8 @@ export function registerJobs(agenda) {
   agenda.define(JOB_NAMES.CHECK_SLOW_MOVERS, async () => checkSlowMovers());
 
   agenda.define(JOB_NAMES.SHOPIFY_ORDERS_SYNC, async () => {
-    // Pull recently updated Shopify orders so cancel/fulfill status lands in OMS.
+    // Pull recently updated Shopify orders (cancel / address / money).
+    // Fulfillment on Shopify is OMS verify cleanup only — never maps to delivered.
     const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
     const result = await importShopifyOrdersSince({ since, dateField: 'updated_at' });
     logger.info(result, 'Scheduled Shopify orders sync finished');

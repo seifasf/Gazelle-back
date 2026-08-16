@@ -47,7 +47,8 @@ function shopifyOrderGid(order) {
 }
 
 /**
- * Mark a Shopify order fulfilled when OMS leaves pending verification.
+ * Mark a Shopify order fulfilled when OMS verifies with the customer.
+ * This is Shopify queue cleanup only — it must NEVER drive OMS delivery status.
  * Manual / M-xxxx orders are skipped — stock-only sync applies there.
  */
 export async function markShopifyOrderFulfilled(order) {

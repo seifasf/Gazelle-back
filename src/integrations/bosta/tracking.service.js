@@ -194,7 +194,11 @@ async function transitionToward(orderId, fromStatus, toStatus, meta) {
       ],
     },
     delivered: {
+      // False Shopify-fulfillment→delivered must be correctable from live Bosta.
+      returning_to_origin: [],
       returned_awaiting_receipt: ['returning_to_origin'],
+      failed_delivery: [],
+      in_transit: [],
     },
   };
 
@@ -358,16 +362,26 @@ export async function processBostaStatusUpdate({ deliveryId, state, payload, not
     return order;
   }
 
-  // Shopify-imported "delivered" can still move into failure / return lanes from Bosta.
+  // False OMS "delivered" (Shopify fulfill) while Bosta never delivered — unwind sale first.
+  const bostaReallyDelivered =
+    stateCode === 45 || Boolean(payload?.state?.deliveryTime) || Boolean(payload?.deliveryTime);
   if (
     order.internalStatus === 'delivered' &&
-    !['returning_to_origin', 'returned_awaiting_receipt', 'failed_delivery'].includes(internalStatus)
+    internalStatus !== 'delivered' &&
+    !bostaReallyDelivered
   ) {
-    logger.info(
-      { orderId: order._id, state: stateLabel, internalStatus, type: normalizeBostaType(type) },
-      'Ignoring Bosta update on delivered order'
-    );
-    return order;
+    try {
+      await orderService.unwindFalseDeliveredSale(order._id, {
+        note: `Unwound false delivered before Bosta → ${internalStatus} (${stateLabel})`,
+      });
+      const refreshed = await Order.findById(order._id);
+      if (refreshed) Object.assign(order, refreshed.toObject());
+    } catch (err) {
+      logger.warn(
+        { err: err?.message || err, orderId: order._id, internalStatus },
+        'False-delivered unwind failed — continuing status sync'
+      );
+    }
   }
 
   // Never move backwards (e.g. in_transit → picked_up_by_bosta).

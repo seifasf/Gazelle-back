@@ -153,6 +153,25 @@ export function resolveInternalStatusForBosta(state, { type, exceptionCode } = {
     return 'failed_delivery';
   }
 
+  // Mid-flight SEND with an open exception (postponed / not home / etc.) — not delivered.
+  const openEx =
+    exceptionCode != null
+      ? Number(exceptionCode)
+      : Array.isArray(state?.exception) && state.exception.length
+        ? Number(state.exception[state.exception.length - 1]?.code)
+        : state?.lastExceptionCode != null
+          ? Number(state.lastExceptionCode)
+          : null;
+  if (
+    !isReturnType &&
+    openEx != null &&
+    Number.isFinite(openEx) &&
+    code != null &&
+    code !== BOSTA_STATE.DELIVERED
+  ) {
+    return 'failed_delivery';
+  }
+
   return defaultInternalStatusForState(state);
 }
 

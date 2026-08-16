@@ -182,7 +182,7 @@ export async function syncOrderStatesFromBosta({
       { bostaDeliveryId: { $exists: true, $ne: null } },
       { bostaTrackingNumber: { $exists: true, $ne: null } },
     ],
-    internalStatus: { $nin: ['cancelled', 'returned_to_stock', 'delivered'] },
+    internalStatus: { $nin: ['cancelled', 'returned_to_stock'] },
   };
   if (sinceOk) linkedBase.placedAt = { $gte: sinceOk };
 

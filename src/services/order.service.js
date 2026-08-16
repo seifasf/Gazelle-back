@@ -677,6 +677,15 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
 }
 
 async function executeDelivered(order, { source, actorUserId, note }, session) {
+  // Shopify fulfillment is verify-queue cleanup only — never OMS delivery.
+  if (source === 'shopify_webhook') {
+    const err = new Error(
+      'Shopify fulfillment cannot mark OMS delivered — use Bosta / pickup confirmation'
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+
   // Release remaining hold for this order + always decrement warehouse stock.
   const ledgerEntries = await buildDeliveryStockEntries(order._id, order.items, session);
   let ledgerDocs = [];
@@ -692,8 +701,9 @@ async function executeDelivered(order, { source, actorUserId, note }, session) {
       ledgerDocs = [...ledgerDocs, ...extra];
     }
   } catch (err) {
-    // Historical imports / courier / Shopify fulfill: still mark delivered; log inventory gap.
-    if (source === 'bosta_webhook' || source === 'shopify_import' || source === 'shopify_webhook') {
+    // Historical imports / courier: still mark delivered; log inventory gap.
+    // shopify_webhook is rejected above — never a soft-skip path for Shopify fulfill.
+    if (source === 'bosta_webhook' || source === 'shopify_import') {
       logger.warn(
         { err: err.message, orderId: order._id, source },
         'Delivery stock ledger skipped (insufficient stock) — status still applied'
@@ -709,6 +719,64 @@ async function executeDelivered(order, { source, actorUserId, note }, session) {
   await recordDeliveryJournal(delivered, actorUserId);
   delivered._ledgerDocs = ledgerDocs;
   return delivered;
+}
+
+/**
+ * When Bosta says the package was never actually delivered, unwind a false OMS
+ * "delivered" (Shopify fulfill cleanup used to set this). Real post-sale returns
+ * keep the sale decrement until warehouse confirm restocks.
+ */
+export async function unwindFalseDeliveredSale(orderId, { note } = {}) {
+  const result = await withTransaction(async (session) => {
+    const order = await Order.findById(orderId).session(session);
+    if (!order || order.internalStatus !== 'delivered') {
+      return { skipped: true, reason: 'not_delivered' };
+    }
+
+    const restock = await buildOutstandingReturnRestockEntries(order._id, order.items, session);
+    const hold = await buildMissingHoldEntries(order._id, order.items, session);
+    let ledgerDocs = [];
+    if (restock.length) {
+      for (const e of restock) e.reasonCode = 'undo_false_delivered';
+      ledgerDocs = await applyLedgerEntries(restock, session);
+    }
+    if (hold.length) {
+      for (const e of hold) e.reasonCode = 'undo_false_delivered_rehold';
+      const extra = await applyLedgerEntries(hold, session);
+      ledgerDocs = [...ledgerDocs, ...extra];
+    }
+
+    if (order.deliveredAt || order.closedAt) {
+      order.deliveredAt = undefined;
+      order.closedAt = undefined;
+      await order.save({ session });
+    }
+
+    await Customer.updateOne(
+      { _id: order.customerId, lifetimeDelivered: { $gte: 1 } },
+      { $inc: { lifetimeDelivered: -1 } },
+      { session }
+    );
+
+    return {
+      skipped: false,
+      restocked: restock.length,
+      reheld: hold.length,
+      ledgerDocs,
+      orderId: String(order._id),
+      items: order.items,
+      note:
+        note ||
+        'Unwound false delivered sale (Shopify fulfill ≠ Bosta delivery) — stock/hold realigned',
+    };
+  });
+
+  if (!result.skipped) {
+    await afterLedgerApplied(result.ledgerDocs, {
+      variantIds: collectVariantIds(result.ledgerDocs, result.items),
+    });
+  }
+  return result;
 }
 
 export async function markDelivered(orderId, source, actorUserId, note, existingSession) {
@@ -2715,6 +2783,7 @@ export default {
   bulkVerifyOrders,
   cancelOrder,
   markDelivered,
+  unwindFalseDeliveredSale,
   partialLocalDelivery,
   returnLocalShippingToStock,
   confirmReturnedToStock,

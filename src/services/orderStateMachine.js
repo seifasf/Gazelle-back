@@ -52,8 +52,14 @@ export const ORDER_TRANSITIONS = {
   // Warehouse can confirm receipt even if Bosta never flipped to "Back at Bosta".
   returning_to_origin: ['returned_awaiting_receipt', 'returned_to_stock'],
   returned_awaiting_receipt: ['returned_to_stock'],
-  // Customer return / RTO after a successful delivery is handled via Bosta return sync + stock confirm.
-  delivered: ['returning_to_origin', 'returned_awaiting_receipt'],
+  // Customer return / RTO after a successful delivery.
+  // Also allow Bosta to correct false "delivered" (Shopify fulfill ≠ delivery).
+  delivered: [
+    'returning_to_origin',
+    'returned_awaiting_receipt',
+    'failed_delivery',
+    'in_transit',
+  ],
   returned_to_stock: [],
   cancelled: [],
 };

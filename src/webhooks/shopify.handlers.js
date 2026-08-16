@@ -53,7 +53,9 @@ function shopifyOrderNameFromPayload(payload = {}) {
 /** Map a Shopify order payload to an internal OMS status for historical imports. */
 function mapImportedOrderStatus(payload) {
   if (payload.cancelled_at) return 'cancelled';
-  if (payload.fulfillment_status === 'fulfilled') return 'delivered';
+  // Shopify "fulfilled" is NOT delivery — OMS marks Shopify fulfilled on verify (cleanup).
+  // Only treat as delivered when Shopify already closed the order (archived history).
+  if (payload.closed_at && payload.fulfillment_status === 'fulfilled') return 'delivered';
   return 'pending_verification';
 }
 
@@ -240,8 +242,8 @@ export async function handleOrdersUpdated(payload) {
   await order.save();
 
   // Do NOT map Shopify "fulfilled" → OMS delivered.
-  // Shopify marks fulfilled when a fulfillment/AWB is created; Bosta (or pickup
-  // confirmation in OMS) remains the source of truth for delivery / stock decrement.
+  // Shopify fulfillment is verify cleanup only (markShopifyOrderFulfilled on confirm).
+  // Bosta (or local/pickup confirmation in OMS) is the source of truth for delivery.
 
   return order;
 }

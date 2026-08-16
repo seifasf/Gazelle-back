@@ -253,9 +253,15 @@ export async function buildDeliveryStockEntries(orderId, items, session) {
       });
     }
 
-    const alreadyDec = Math.abs(
+    // Net sold units = decrements − returns (undo/repair must not skip a real sale).
+    const decremented = Math.abs(
       await netOrderLedgerQty(orderId, item.variantId, ['real_stock_decrement'], session)
     );
+    const returned = Math.max(
+      0,
+      await netOrderLedgerQty(orderId, item.variantId, ['real_stock_increment_return'], session)
+    );
+    const alreadyDec = Math.max(0, decremented - returned);
     const needDec = Math.max(0, qty - alreadyDec);
     if (needDec > 0) {
       entries.push({
