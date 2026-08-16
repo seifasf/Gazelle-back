@@ -230,13 +230,15 @@ export async function handleOrdersUpdated(payload) {
 
   const shipping = payload.shipping_address;
   if (shipping) {
+    const fullName = `${shipping.first_name || ''} ${shipping.last_name || ''}`.trim();
+    const prev = order.shippingAddress?.toObject?.() || order.shippingAddress || {};
     order.shippingAddress = {
-      fullName: `${shipping.first_name || ''} ${shipping.last_name || ''}`.trim(),
-      line1: shipping.address1 || order.shippingAddress?.line1,
-      line2: shipping.address2,
-      city: shipping.city || order.shippingAddress?.city,
-      zone: shipping.province,
-      phone: shipping.phone || order.shippingAddress?.phone,
+      fullName: fullName || prev.fullName || 'Customer',
+      line1: shipping.address1 || prev.line1,
+      line2: shipping.address2 != null ? shipping.address2 : prev.line2,
+      city: shipping.city || prev.city,
+      zone: shipping.province || prev.zone,
+      phone: shipping.phone || prev.phone,
     };
   }
   await order.save();

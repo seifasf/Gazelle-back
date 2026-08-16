@@ -512,9 +512,11 @@ export async function createDelivery(order, customer) {
     throw err;
   }
 
-  const phone = shipping.phone || customer?.phone;
+  const phone = String(shipping.phone || '').trim();
   if (!phone) {
-    const err = new Error('Customer phone is required to create a Bosta delivery');
+    const err = new Error(
+      'Shopify shipping phone is required to create a Bosta delivery. Fix the ship-to phone on Shopify, then retry.'
+    );
     err.statusCode = 400;
     throw err;
   }
@@ -532,7 +534,27 @@ export async function createDelivery(order, customer) {
     err.statusCode = 500;
     throw err;
   }
-  const { firstName, lastName } = splitName(shipping.fullName || customer?.fullName);
+
+  // Receiver = Shopify ship-to name only (not the customer account name).
+  const shipToName = String(shipping.fullName || '').trim();
+  if (!shipToName) {
+    const err = new Error(
+      'Shopify ship-to name is required for Bosta. Fix shipping address name on Shopify, then retry.'
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+  const { firstName, lastName } = splitName(shipToName);
+  if (customer?.fullName && customer.fullName.trim() !== shipToName) {
+    logger.info(
+      {
+        orderId: String(order._id),
+        accountName: customer.fullName,
+        shipToName,
+      },
+      'Bosta receiver uses Shopify ship-to name (differs from customer account)'
+    );
+  }
 
   // Shopify sometimes puts country in city ("Egypt") and the real city in province/zone.
   let resolved = await resolveBostaCityId(city);
@@ -845,8 +867,19 @@ export async function updateDeliveryAddressAndCod(deliveryId, order, customer) {
     throw err;
   }
 
-  const phone = shipping.phone || customer?.phone;
-  const { firstName, lastName } = splitName(shipping.fullName || customer?.fullName);
+  const phone = String(shipping.phone || '').trim();
+  if (!phone) {
+    const err = new Error('Shopify shipping phone is required to update Bosta');
+    err.statusCode = 400;
+    throw err;
+  }
+  const shipToName = String(shipping.fullName || '').trim();
+  if (!shipToName) {
+    const err = new Error('Shopify ship-to name is required to update Bosta');
+    err.statusCode = 400;
+    throw err;
+  }
+  const { firstName, lastName } = splitName(shipToName);
 
   let resolved = await resolveBostaCityId(city);
   if (!resolved || isCountryLabel(city)) {
