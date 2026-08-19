@@ -24,6 +24,7 @@ import {
   buildStockIntakeEntries,
   netOrderLedgerQty,
 } from './inventory.service.js';
+import { CONFIRMABLE_RETURN_STATUSES, exchangeConfirmActions } from './returnStockPlan.js';
 import {
   TERMINAL_ORDER_STATUSES,
   ORDER_STATUSES,
@@ -1073,8 +1074,7 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
       throw err;
     }
 
-    const confirmable = ['returned_awaiting_receipt', 'returning_to_origin'];
-    if (!confirmable.includes(order.internalStatus)) {
+    if (!CONFIRMABLE_RETURN_STATUSES.includes(order.internalStatus)) {
       const err = new Error('Only returning / Back at Bosta orders can be confirmed into warehouse stock');
       err.statusCode = 400;
       throw err;
@@ -1104,13 +1104,7 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
 
     const skipCollectRestock = Boolean(order.skipCollectRestock);
 
-    if (order.isExchangeOrder && skipCollectRestock) {
-      ledgerEntries = [];
-      restockVariantIds = [];
-      confirmNote =
-        note ||
-        `Exception: factory-broken collect not restocked (${fmtLines(collectLines)})`;
-    } else if (order.isExchangeOrder) {
+    if (order.isExchangeOrder) {
       const collectRestock = await buildOutstandingReturnRestockEntries(
         order._id,
         collectLines,
@@ -1122,27 +1116,44 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
         session
       );
       const outboundHold = await buildOutstandingHoldReleaseEntries(order._id, order.items, session);
+      const actions = exchangeConfirmActions(order, {
+        outboundRestockLen: outboundRestock.length,
+        hasCollectLines: Boolean(collectLines?.length),
+      });
 
-      // Sold exchange: restock what the courier collected (preferred) and/or sold outbound.
-      if (collectRestock.length || (order.deliveredAt && collectLines?.length)) {
-        ledgerEntries = collectRestock.length
+      const collectPlusReal = actions.applyCollectPlusReal
+        ? collectRestock.length
           ? collectRestock
-          : await buildOutstandingReturnRestockEntries(order._id, collectLines, session);
-        // If collect lines never decremented (customer return of different SKUs), still +real
-        // for the collect quantities when this is an explicit exchange collect.
-        if (!ledgerEntries.length && collectLines?.length) {
-          ledgerEntries = buildPostDeliveryReturnEntries(order._id, collectLines);
-        }
-        restockVariantIds = (collectLines || []).map((i) => i.variantId).filter(Boolean);
+          : buildPostDeliveryReturnEntries(order._id, collectLines)
+        : [];
+      const outboundEntries = actions.applyOutboundRestock
+        ? outboundRestock
+        : actions.applyOutboundHold
+          ? outboundHold
+          : [];
+
+      ledgerEntries = [...collectPlusReal, ...outboundEntries];
+      restockVariantIds = [
+        ...(actions.applyCollectPlusReal ? collectLines || [] : []),
+        ...(actions.applyOutboundRestock ? order.items || [] : []),
+      ]
+        .map((i) => i.variantId)
+        .filter(Boolean);
+
+      if (skipCollectRestock) {
+        confirmNote =
+          note ||
+          `Exception: factory-broken collect not restocked (${fmtLines(collectLines)})`;
+      } else if (actions.applyCollectPlusReal && (actions.applyOutboundHold || actions.applyOutboundRestock)) {
+        confirmNote =
+          note ||
+          `Exchange returned — restocked collect ${fmtLines(collectLines)}; outbound ${
+            actions.applyOutboundRestock ? 'restocked' : 'hold released'
+          } (${fmtLines(order.items)})`;
+      } else if (actions.applyCollectPlusReal) {
         confirmNote =
           note || `Exchange collect received — restocked ${fmtLines(collectLines)}`;
-      } else if (outboundRestock.length) {
-        ledgerEntries = outboundRestock;
-        restockVariantIds = (order.items || []).map((i) => i.variantId).filter(Boolean);
-        confirmNote =
-          note || `Exchange package returned after sale — restocked ${fmtLines(order.items)}`;
       } else {
-        ledgerEntries = outboundHold;
         confirmNote =
           note ||
           `Exchange not delivered — released hold on ${fmtLines(order.items)}`;
