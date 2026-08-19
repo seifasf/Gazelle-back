@@ -8,6 +8,7 @@ import '../models/Customer.js';
 import * as kpiService from './kpi.service.js';
 import logger from '../utils/logger.js';
 import { ORDERS_PLACED_FROM_YMD } from '../constants/index.js';
+import { classifyReturnKind } from '../utils/returnKind.js';
 
 /** Business calendar for Gazelle (Egypt). */
 const BUSINESS_TZ = 'Africa/Cairo';
@@ -846,6 +847,49 @@ function setBoundedCache(cache, key, data) {
   }
 }
 
+function ordersPlacedCutoff() {
+  return new Date(`${ORDERS_PLACED_FROM_YMD}T00:00:00+03:00`);
+}
+
+async function warehouseReturnsSnapshot() {
+  const cutoff = ordersPlacedCutoff();
+  const openStatuses = ['returning_to_origin', 'returned_awaiting_receipt'];
+  const [returningToOrigin, backAtBosta, openExchanges] = await Promise.all([
+    Order.countDocuments({ placedAt: { $gte: cutoff }, internalStatus: 'returning_to_origin' }),
+    Order.countDocuments({ placedAt: { $gte: cutoff }, internalStatus: 'returned_awaiting_receipt' }),
+    Order.countDocuments({
+      placedAt: { $gte: cutoff },
+      isExchangeOrder: true,
+      internalStatus: { $in: openStatuses },
+    }),
+  ]);
+  return {
+    returningToOrigin,
+    backAtBosta,
+    openTotal: returningToOrigin + backAtBosta,
+    openExchanges,
+  };
+}
+
+async function warehouseConfirmsByKind({ from, to }) {
+  const history = await OrderStatusHistory.find({
+    toStatus: 'returned_to_stock',
+    createdAt: { $gte: from, $lte: to },
+  })
+    .select('orderId')
+    .lean();
+  const ids = [...new Set(history.map((h) => String(h.orderId)))];
+  const counts = { refused: 0, exchange: 0, refund: 0 };
+  if (!ids.length) return { total: 0, ...counts };
+  const orders = await Order.find({ _id: { $in: ids } })
+    .select('isExchangeOrder isReturnOrder deliveredAt')
+    .lean();
+  for (const order of orders) {
+    counts[classifyReturnKind(order)] += 1;
+  }
+  return { total: orders.length, ...counts };
+}
+
 async function buildDashboardCore(range, preset) {
   const orderRange = ordersMetricsRange(range);
   const emptyPayment = {
@@ -855,11 +899,16 @@ async function buildDashboardCore(range, preset) {
     online: { count: 0, revenueExclShipping: 0, revenueInclShipping: 0, percentByCount: 0 },
   };
 
-  const [ordersByStatus, deliveredLifetime, totalClosed, payment] = await Promise.all([
-    Order.aggregate([{ $group: { _id: '$internalStatus', count: { $sum: 1 } } }]),
-    Order.countDocuments({ internalStatus: 'delivered' }),
-    Order.countDocuments({ closedAt: { $exists: true } }),
+  const cutoff = ordersPlacedCutoff();
+  const [ordersByStatus, deliveredLifetime, totalClosed, payment, warehouseReturns] = await Promise.all([
+    Order.aggregate([
+      { $match: { placedAt: { $gte: cutoff } } },
+      { $group: { _id: '$internalStatus', count: { $sum: 1 } } },
+    ]),
+    Order.countDocuments({ internalStatus: 'delivered', placedAt: { $gte: cutoff } }),
+    Order.countDocuments({ closedAt: { $exists: true }, placedAt: { $gte: cutoff } }),
     orderRange.empty ? Promise.resolve(emptyPayment) : paymentSplitForRange(orderRange),
+    warehouseReturnsSnapshot(),
   ]);
 
   const statusMap = Object.fromEntries(ordersByStatus.map((s) => [s._id, s.count]));
@@ -887,6 +936,7 @@ async function buildDashboardCore(range, preset) {
     ordersPlaced,
     revenueToday: revenueExclShipping,
     revenueCustom: revenueExclShipping,
+    warehouseReturns,
   };
 }
 
@@ -943,7 +993,7 @@ async function buildDashboardSummary(range, preset) {
 
 async function buildDashboardDetails(range) {
   const orderRange = ordersMetricsRange(range);
-  const [dailyBreakdown, topProducts, orderMix, returnsAnalytics] = await Promise.all([
+  const [dailyBreakdown, topProducts, orderMix, returnsAnalytics, warehouseByKind] = await Promise.all([
     orderRange.empty ? Promise.resolve([]) : dailyBreakdownForRange(orderRange),
     orderRange.empty ? Promise.resolve([]) : topProductsForRange(orderRange),
     orderRange.empty
@@ -952,14 +1002,15 @@ async function buildDashboardDetails(range) {
           channel: { chatPercent: 0, onlineStorePercent: 0 },
         })
       : orderMixForRange(orderRange),
-    // Money / returns analytics stay on the full selected range
     returnsAnalyticsForRange(range),
+    warehouseConfirmsByKind(range),
   ]);
 
   return {
     dailyBreakdown,
     orderMix,
     returnsAnalytics,
+    warehouseByKind,
     returns: {
       amount: returnsAnalytics.amount ?? 0,
       count: returnsAnalytics.count ?? 0,
