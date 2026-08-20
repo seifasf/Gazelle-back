@@ -1,8 +1,6 @@
 /**
- * +real the Bosta collect SKUs for exchanges confirmed into stock AFTER the
- * 13 Aug 2026 warehouse Excel (`warehouse_physical_count`).
- *
- * Those confirms only released outbound hold and never added the collected pair.
+ * +real Bosta collect SKUs for exchanges confirmed into stock after the
+ * 20 Jul 2026 order cutover, when confirm only released outbound hold.
  *
  *   node scripts/repair-missed-exchange-collect.js          # dry-run
  *   node scripts/repair-missed-exchange-collect.js --apply
@@ -19,7 +17,7 @@ import {
   releaseOutOfStockOrdersIfRestocked,
 } from '../src/services/order.service.js';
 
-const EXCEL_CUTOFF = new Date('2026-08-13T11:03:30.458Z');
+const EXCEL_CUTOFF = new Date('2026-07-20T00:00:00.000Z');
 const apply = process.argv.includes('--apply');
 
 await connectDatabase();

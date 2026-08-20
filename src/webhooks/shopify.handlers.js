@@ -271,6 +271,11 @@ export async function handleProductsUpdate(payload) {
 
   for (const variant of payload.variants || []) {
     const gid = variant.admin_graphql_api_id || `gid://shopify/ProductVariant/${variant.id}`;
+    const sku = String(variant.sku || '').trim();
+    if (!sku) {
+      await Variant.deleteOne({ shopifyVariantId: gid });
+      continue;
+    }
     const color = variant.option1 || variant.option2;
     const size = variant.option2 && variant.option1 ? variant.option2 : variant.option3;
     await Variant.findOneAndUpdate(
@@ -281,7 +286,7 @@ export async function handleProductsUpdate(payload) {
         shopifyInventoryItemId: variant.inventory_item_id
           ? `gid://shopify/InventoryItem/${variant.inventory_item_id}`
           : '',
-        sku: variant.sku || gid,
+        sku,
         barcode: variant.barcode || '',
         title: variant.title || product.title,
         color: color || undefined,

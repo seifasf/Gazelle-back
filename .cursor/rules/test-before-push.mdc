@@ -1,0 +1,15 @@
+---
+description: Test frontend and backend before any git push or deploy
+alwaysApply: true
+---
+
+# Test before push or deploy
+
+Never `git push`, create a PR that will deploy, or trigger Render/Vercel deploys until **both** apps are verified for the change.
+
+1. Run frontend tests from `Gazelle-fron`: `npm test`
+2. Run backend tests from `Gazelle-back`: `npm test`
+3. If the change is UI, exercise the flow in the browser (or closest substitute).
+4. If the change is stock, Bosta, Shopify, or order status, check the matching backend path still matches the UI.
+5. Fix failures before pushing. Do not skip tests with `--no-verify`.
+6. Do not push unless the user asked **and** tests passed.

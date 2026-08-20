@@ -45,13 +45,15 @@ export async function syncCatalogFromShopify() {
     );
 
     for (const { node: sv } of sp.variants.edges) {
+      const sku = String(sv.sku || '').trim();
+      if (!sku) continue;
       const existing = await Variant.findOne({ shopifyVariantId: sv.id });
       const { color, size } = parseVariantOptions(sv.selectedOptions, sp.options);
       const update = {
         productId: product._id,
         shopifyVariantId: sv.id,
         shopifyInventoryItemId: sv.inventoryItem?.id || '',
-        sku: sv.sku || sv.id,
+        sku,
         barcode: sv.barcode || '',
         title: sv.title || product.title,
         color: sv.resolvedColor || color,
