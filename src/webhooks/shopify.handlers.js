@@ -16,6 +16,7 @@ import {
   applyShopifyMoneyFields,
   isShopifyOrderPaid,
 } from '../integrations/shopify/orderMoney.js';
+import { applyShopifyPaymentIncentives } from '../integrations/shopify/applyPaymentIncentives.service.js';
 
 export { mapShopifyPaymentMethod, mapShopifyShippingFee };
 
@@ -60,6 +61,10 @@ function mapImportedOrderStatus(payload) {
 }
 
 export async function handleOrdersCreate(payload, { reserveStock = true, statusOverride, source = 'shopify_webhook' } = {}) {
+  if (source === 'shopify_webhook') {
+    payload = (await applyShopifyPaymentIncentives(payload)) || payload;
+  }
+
   const shopifyOrderId = String(payload.id);
   const existing = await Order.findOne({ shopifyOrderId });
   if (existing) {
