@@ -1,13 +1,13 @@
 /**
  * Shopify payment incentives (enforced via Admin API after the order lands):
  * - Pay online (Paymob): 5% off merchandise (ONLINE5)
- * - Cash on delivery: EGP 20 fee
+ * - Cash on delivery: EGP 25 fee
  *
- * Also treats a Releasit / additional-fee line as the COD fee so we do not add 20 twice.
+ * Also treats a Releasit / additional-fee line as the COD fee so we do not add 25 twice.
  */
 
 export const ONLINE_DISCOUNT_CODE = 'ONLINE5';
-export const COD_FEE_EGP = 20;
+export const COD_FEE_EGP = 25;
 export const COD_FEE_SKU = 'GAZELLE-COD-FEE';
 export const COD_FEE_TITLE = 'رسوم الدفع عند الاستلام';
 export const INCENTIVE_ATTR = 'gazelle_pay';

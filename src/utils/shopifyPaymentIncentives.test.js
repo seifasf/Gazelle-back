@@ -33,13 +33,13 @@ describe('Shopify payment incentives plan', () => {
     const payload = {
       financial_status: 'pending',
       line_items: [{ sku: 'GMC-2-1007', title: 'Boot' }],
-      current_total_additional_fees_set: { shop_money: { amount: '20.0' } },
+      current_total_additional_fees_set: { shop_money: { amount: '25.0' } },
     };
     assert.equal(orderHasCodFee(payload), true);
     assert.equal(incentivesNeedShopifyEdit(planPaymentIncentives(payload, 'cod')), false);
   });
 
-  it('COD: add EGP 20 and strip the online 5% code', () => {
+  it('COD: add EGP 25 and strip the online 5% code', () => {
     const plan = planPaymentIncentives(codOrder, 'cod');
     assert.equal(plan.addCodFee, true);
     assert.equal(plan.removeOnlineDiscount, true);

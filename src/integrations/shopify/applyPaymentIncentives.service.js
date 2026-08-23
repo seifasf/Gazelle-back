@@ -43,7 +43,7 @@ async function beginEdit(orderId) {
 async function commitEdit(calculatedOrderId) {
   const data = await shopifyGraphQL(
     `mutation Commit($id: ID!) {
-      orderEditCommit(id: $id, notifyCustomer: false, staffNote: "Gazelle: online 5% / COD EGP 20") {
+      orderEditCommit(id: $id, notifyCustomer: false, staffNote: "Gazelle: online 5% / COD EGP 25") {
         order { id }
         userErrors { field message }
       }
@@ -109,7 +109,7 @@ async function addFee(calculatedOrderId) {
 async function addFeeDecimal(calculatedOrderId) {
   const data = await shopifyGraphQL(
     `mutation AddFeeDec($id: ID!, $title: String!) {
-      orderEditAddCustomItem(id: $id, title: $title, quantity: 1, originalUnitPrice: 20.0, taxable: false) {
+      orderEditAddCustomItem(id: $id, title: $title, quantity: 1, originalUnitPrice: 25.0, taxable: false) {
         userErrors { field message }
       }
     }`,
@@ -189,7 +189,7 @@ function alreadyStamped(payload) {
 }
 
 /**
- * COD → add EGP 20 (skip if Releasit already added it) and strip ONLINE5.
+ * COD → add EGP 25 (skip if Releasit already added it) and strip ONLINE5.
  * Online → 5% off merchandise and drop a leftover COD fee.
  */
 export async function applyShopifyPaymentIncentives(payload) {
