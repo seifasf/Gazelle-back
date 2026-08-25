@@ -17,6 +17,11 @@ import {
   isShopifyOrderPaid,
 } from '../integrations/shopify/orderMoney.js';
 import { applyShopifyPaymentIncentives } from '../integrations/shopify/applyPaymentIncentives.service.js';
+import {
+  hasCompleteShopifyAddress,
+  mapShopifyShippingAddress,
+  shopifyCustomerPhone,
+} from '../utils/shopifyShippingAddress.js';
 
 export { mapShopifyPaymentMethod, mapShopifyShippingFee };
 
@@ -73,24 +78,16 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
   }
 
   const customerPayload = payload.customer || {};
-  const shipping = payload.shipping_address || payload.billing_address || {};
-  const shippingAddress = {
-    fullName: `${shipping.first_name || ''} ${shipping.last_name || ''}`.trim() || 'Unknown',
-    line1: shipping.address1 || '',
-    line2: shipping.address2,
-    city: shipping.city || '',
-    zone: shipping.province || shipping.city,
-    phone: shipping.phone || customerPayload.phone,
-  };
+  const shippingAddress = mapShopifyShippingAddress(payload);
 
   const customer = await findOrCreateCustomer({
     fullName:
       `${customerPayload.first_name || ''} ${customerPayload.last_name || ''}`.trim() ||
       shippingAddress.fullName,
-    phone: customerPayload.phone || shipping.phone || 'unknown',
+    phone: shopifyCustomerPhone(payload, shippingAddress),
     email: customerPayload.email,
     shopifyCustomerId: customerPayload.id,
-    shippingAddress,
+    shippingAddress: hasCompleteShopifyAddress(payload) ? shippingAddress : null,
   });
 
   const items = [];
@@ -171,7 +168,11 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
           fromStatus: null,
           toStatus: internalStatus,
           source,
-          note: source === 'shopify_import' ? 'Imported from Shopify' : 'Order ingested from Shopify',
+          note: source === 'shopify_import'
+            ? 'Imported from Shopify'
+            : hasCompleteShopifyAddress(payload)
+              ? 'Order ingested from Shopify'
+              : 'Order ingested from Shopify — street/phone withheld (Shopify PII). Confirm address on verification call.',
         },
       ],
       { session }
