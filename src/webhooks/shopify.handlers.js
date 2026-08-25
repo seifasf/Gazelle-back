@@ -18,7 +18,7 @@ import {
   isShopifyOrderPaid,
 } from '../integrations/shopify/orderMoney.js';
 import { applyShopifyPaymentIncentives } from '../integrations/shopify/applyPaymentIncentives.service.js';
-import { shopifyMerchandiseTotal } from '../utils/shopifyPaymentIncentives.js';
+import { isCodFeeLine, shopifyMerchandiseTotal } from '../utils/shopifyPaymentIncentives.js';
 import {
   hasCompleteShopifyAddress,
   mapShopifyShippingAddress,
@@ -104,6 +104,7 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
 
   const items = [];
   for (const line of payload.line_items || []) {
+    if (isCodFeeLine(line)) continue;
     const variant = await resolveVariant(line);
     if (!variant) {
       logger.warn({ sku: line.sku, variantId: line.variant_id }, 'Variant not found for line item');
@@ -141,7 +142,9 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
   const shippingFee = mapShopifyShippingFee(payload);
   const onlinePaid = paymentMethod === 'online' && isShopifyOrderPaid(payload);
 
-  const order = await withTransaction(async (session) => {
+  let order;
+  try {
+  order = await withTransaction(async (session) => {
     let ledgerDocs = [];
     const [created] = await Order.create(
       [
@@ -196,6 +199,30 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
 
     return { order: created, ledgerDocs };
   });
+  } catch (err) {
+    logger.error(
+      { err: err?.message || err, shopifyOrderId, name: shopifyOrderNameFromPayload(payload) },
+      'Shopify ingest transaction failed — creating a stub so the order still appears'
+    );
+    const existing = await Order.findOne({ shopifyOrderId });
+    if (existing) return existing;
+    const stub = await Order.create({
+      shopifyOrderId,
+      ...(shopifyOrderNameFromPayload(payload)
+        ? { shopifyOrderName: shopifyOrderNameFromPayload(payload) }
+        : {}),
+      customerId: customer._id,
+      shippingAddress,
+      shippingMethod: 'bosta',
+      paymentMethod,
+      shippingFee: Number.isFinite(Number(shippingFee)) ? shippingFee : 0,
+      internalStatus: 'pending_verification',
+      totalSellingPrice: Number(shopifyMerchandiseTotal(payload, shippingFee)) || 0,
+      items,
+      placedAt: new Date(payload.created_at || Date.now()),
+    });
+    order = { order: stub, ledgerDocs: [] };
+  }
 
   await syncShopifySellableAfterLedger(order.ledgerDocs);
 
@@ -428,9 +455,8 @@ export async function processShopifyWebhookJob({ receiptId, topic }) {
 export async function retryFailedShopifyOrderCreates({ limit = 40 } = {}) {
   const receipts = await WebhookReceipt.find({
     source: 'shopify',
-    topic: 'orders/create',
-    processedAt: { $exists: false },
-    error: { $exists: true, $ne: null },
+    topic: { $in: ['orders/create', 'orders/updated'] },
+    $or: [{ processedAt: { $exists: false } }, { processedAt: null }],
   })
     .sort({ createdAt: 1 })
     .limit(limit);
