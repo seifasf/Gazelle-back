@@ -568,6 +568,19 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
     throw err;
   }
 
+  const peek = await Order.findById(orderId).select('shippingMethod internalStatus');
+  if (
+    source === 'user_action' &&
+    peek?.shippingMethod === 'local_shipping' &&
+    ['local_shipping', 'failed_delivery'].includes(peek.internalStatus)
+  ) {
+    return returnLocalShippingToStock(orderId, actorUserId, {
+      note: cancelNote,
+      reason,
+      intent: 'cancel',
+    });
+  }
+
   let newlyCancelled = false;
   const cancelled = await withTransaction(async (session) => {
     const order = await Order.findById(orderId).session(session);
@@ -1009,7 +1022,7 @@ export async function partialLocalDelivery(orderId, actorUserId, { deliveries = 
  * Admin confirms the local courier brought the package back.
  * Moves to back_from_local_shipping — warehouse then scans on Returns (hold stays until scan).
  */
-export async function returnLocalShippingToStock(orderId, actorUserId, { note } = {}) {
+export async function returnLocalShippingToStock(orderId, actorUserId, { note, intent, reason } = {}) {
   return withTransaction(async (session) => {
     const order = await Order.findById(orderId).session(session);
     if (!order) {
@@ -1031,9 +1044,18 @@ export async function returnLocalShippingToStock(orderId, actorUserId, { note } 
       throw err;
     }
 
+    const kind = ['cancel', 'exchange', 'failed'].includes(intent) ? intent : 'failed';
+    order.localReturnIntent = kind;
+    if (kind === 'cancel' && reason) order.cancellationReason = reason;
+    await order.save({ session });
+
     const staffNote =
       (typeof note === 'string' && note.trim()) ||
-      'Admin confirmed package is back from local shipping — scan on Returns';
+      (kind === 'cancel'
+        ? 'Cancel — package back from local shipping, scan on Returns'
+        : kind === 'exchange'
+          ? 'Exchange — package back from local shipping, scan on Returns'
+          : 'Admin confirmed package is back from local shipping — scan on Returns');
 
     await transitionOrder(
       order,
@@ -1181,27 +1203,45 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
       allLedgerDocs = [...ledgerDocs, ...extra];
     }
 
+    const localIntent = order.shippingMethod === 'local_shipping' ? order.localReturnIntent : null;
+    const nextStatus =
+      localIntent === 'cancel'
+        ? 'cancelled'
+        : localIntent === 'exchange'
+          ? 'pending_verification'
+          : 'returned_to_stock';
+
     await transitionOrder(
       order,
-      'returned_to_stock',
+      nextStatus,
       {
         source: 'user_action',
         actorUserId,
-        note: confirmNote,
+        note:
+          nextStatus === 'cancelled'
+            ? `${confirmNote} — cancelled after warehouse scan`
+            : nextStatus === 'pending_verification'
+              ? `${confirmNote} — scanned back, ready to exchange`
+              : confirmNote,
       },
       session
     );
 
-    await Customer.updateOne(
-      { _id: order.customerId },
-      { $inc: { lifetimeRejectedOrReturned: 1 } },
-      { session }
-    );
+    if (nextStatus === 'cancelled') {
+      await recordCustomerCancellation(order.customerId, session);
+    } else {
+      await Customer.updateOne(
+        { _id: order.customerId },
+        { $inc: { lifetimeRejectedOrReturned: 1 } },
+        { session }
+      );
+    }
 
     return {
       order: await Order.findById(orderId).session(session),
       ledgerDocs: allLedgerDocs,
       restockVariantIds,
+      nextStatus,
       syncVariantIds: [
         ...new Set(
           [
@@ -1238,7 +1278,31 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
       note: 'Auto: return/exchange restocked SKUs — back to Ready to ship',
     });
   }
-  return result.order;
+
+  const confirmed = result.order;
+  if (
+    result.nextStatus === 'cancelled' &&
+    confirmed?.orderSource === 'shopify' &&
+    confirmed?.shopifyOrderId
+  ) {
+    try {
+      const { cancelShopifyOrder } = await import('../integrations/shopify/mutations/orderCancel.js');
+      await cancelShopifyOrder({
+        shopifyOrderId: confirmed.shopifyOrderId,
+        reason: confirmed.cancellationReason || 'other',
+        staffNote: 'Cancelled after warehouse scanned local-shipping return',
+        notifyCustomer: false,
+        refund: confirmed.paymentMethod === 'online',
+      });
+    } catch (err) {
+      logger.warn(
+        { err: err?.message || err, orderId: String(confirmed._id) },
+        'Shopify cancel after local return scan failed'
+      );
+    }
+  }
+
+  return confirmed;
 }
 
 /**

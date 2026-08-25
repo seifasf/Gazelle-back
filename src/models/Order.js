@@ -87,6 +87,11 @@ const orderSchema = new mongoose.Schema(
     bostaShipmentError: String,
     localShippingNote: String,
     localShippingMarkedAt: Date,
+    /** Why a local-shipping bag came back: failed delivery, cancel, or exchange. */
+    localReturnIntent: {
+      type: String,
+      enum: ['failed', 'cancel', 'exchange'],
+    },
     /** Set when an order returns from out_of_stock → Ready to ship (Fulfillment “From OOS” tab). */
     returnedFromOutOfStockAt: { type: Date, index: true },
     assignedOrdersManagerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
