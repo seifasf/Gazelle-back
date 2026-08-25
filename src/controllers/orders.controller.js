@@ -126,7 +126,10 @@ export async function getOrder(req, res, next) {
   try {
     const order = await orderService.getOrderById(req.params.id);
     if (!order) return res.status(404).json({ error: 'Order not found' });
-    res.json({ data: order });
+    const { resolveBostaCourierFee } = await import('../constants/shippingZones.js');
+    const data = typeof order.toObject === 'function' ? order.toObject() : order;
+    data.bostaCourierFee = resolveBostaCourierFee(data);
+    res.json({ data });
   } catch (err) {
     next(err);
   }
