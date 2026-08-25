@@ -1,9 +1,7 @@
 /**
- * Shopify payment incentives (enforced via Admin API after the order lands):
- * - Pay online (Paymob): 5% off merchandise (ONLINE5)
- * - Cash on delivery: EGP 25 fee
- *
- * Also treats a Releasit / additional-fee line as the COD fee so we do not add 25 twice.
+ * Shopify payment incentives (Admin API after the order lands):
+ * - Pay online: 5% off merchandise (ONLINE5) on Shopify
+ * - COD EGP 25 is OMS-only (policy + Bosta). Never add it on the website.
  */
 
 export const ONLINE_DISCOUNT_CODE = 'ONLINE5';
@@ -73,11 +71,19 @@ export function planPaymentIncentives(payload, paymentMethod) {
   }
 
   return {
-    addCodFee: !hasFee,
+    addCodFee: false,
     removeCodFee: false,
     addOnlineDiscount: false,
     removeOnlineDiscount: hasOnline,
   };
+}
+
+/** Goods total for OMS — strip shipping and any Shopify/Releasit COD fee line. */
+export function shopifyMerchandiseTotal(payload = {}, shippingFee = 0) {
+  const total = parseFloat(payload.total_price) || 0;
+  const feeOnShopify = orderHasCodFee(payload) ? COD_FEE_EGP : 0;
+  const ship = Number(shippingFee) || 0;
+  return Math.max(0, Math.round((total - ship - feeOnShopify) * 100) / 100);
 }
 
 export function incentivesNeedShopifyEdit(plan) {

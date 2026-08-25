@@ -5,6 +5,7 @@ import {
   incentivesNeedShopifyEdit,
   orderHasCodFee,
   orderHasOnlineDiscount,
+  shopifyMerchandiseTotal,
 } from './shopifyPaymentIncentives.js';
 
 describe('Shopify payment incentives plan', () => {
@@ -36,12 +37,12 @@ describe('Shopify payment incentives plan', () => {
       current_total_additional_fees_set: { shop_money: { amount: '25.0' } },
     };
     assert.equal(orderHasCodFee(payload), true);
-    assert.equal(incentivesNeedShopifyEdit(planPaymentIncentives(payload, 'cod')), false);
+    assert.equal(planPaymentIncentives(payload, 'cod').addCodFee, false);
   });
 
-  it('COD: add EGP 25 and strip the online 5% code', () => {
+  it('COD: never add EGP 25 on Shopify; strip leftover online 5% code', () => {
     const plan = planPaymentIncentives(codOrder, 'cod');
-    assert.equal(plan.addCodFee, true);
+    assert.equal(plan.addCodFee, false);
     assert.equal(plan.removeOnlineDiscount, true);
     assert.equal(plan.removeCodFee, false);
     assert.equal(incentivesNeedShopifyEdit(plan), true);
@@ -71,12 +72,27 @@ describe('Shopify payment incentives plan', () => {
     assert.equal(incentivesNeedShopifyEdit(plan), false);
   });
 
-  it('COD already with fee and no discount needs no edit', () => {
+  it('COD never writes the fee to Shopify', () => {
     const payload = {
       financial_status: 'pending',
-      line_items: [{ sku: 'GAZELLE-COD-FEE', title: 'رسوم الدفع عند الاستلام' }],
+      line_items: [{ sku: 'GMC-2-1007', title: 'Boot' }],
     };
     const plan = planPaymentIncentives(payload, 'cod');
+    assert.equal(plan.addCodFee, false);
     assert.equal(incentivesNeedShopifyEdit(plan), false);
+  });
+
+  it('strips a Shopify COD fee from OMS merchandise', () => {
+    const total = shopifyMerchandiseTotal(
+      {
+        total_price: '1115.00',
+        line_items: [
+          { sku: 'GMC-2-1007', title: 'Boot' },
+          { sku: 'GAZELLE-COD-FEE', title: 'رسوم الدفع عند الاستلام' },
+        ],
+      },
+      95
+    );
+    assert.equal(total, 995);
   });
 });

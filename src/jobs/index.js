@@ -1,4 +1,4 @@
-import { processShopifyWebhookJob } from '../webhooks/shopify.handlers.js';
+import { processShopifyWebhookJob, retryFailedShopifyOrderCreates } from '../webhooks/shopify.handlers.js';
 import { processBostaStatusUpdate, pollStuckOrders } from '../integrations/bosta/tracking.service.js';
 import { syncBostaReturns } from '../integrations/bosta/returns.service.js';
 import { syncOrderStatesFromBosta } from '../integrations/bosta/orderStates.service.js';
@@ -135,11 +135,13 @@ export function registerJobs(agenda) {
   agenda.define(JOB_NAMES.CHECK_SLOW_MOVERS, async () => checkSlowMovers());
 
   agenda.define(JOB_NAMES.SHOPIFY_ORDERS_SYNC, async () => {
-    // Pull recently updated Shopify orders (cancel / address / money).
-    // Fulfillment on Shopify is OMS verify cleanup only — never maps to delivered.
+    const retry = await retryFailedShopifyOrderCreates().catch((err) => {
+      logger.warn({ err: err?.message || err }, 'Failed Shopify order retry skipped');
+      return null;
+    });
     const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
     const result = await importShopifyOrdersSince({ since, dateField: 'updated_at' });
-    logger.info(result, 'Scheduled Shopify orders sync finished');
+    logger.info({ ...result, retry }, 'Scheduled Shopify orders sync finished');
     return result;
   });
 

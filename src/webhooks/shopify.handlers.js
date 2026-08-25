@@ -5,6 +5,7 @@ import Settings from '../models/Settings.js';
 import WebhookReceipt from '../models/WebhookReceipt.js';
 import { withTransaction } from '../utils/transaction.js';
 import { findOrCreateCustomer } from '../services/customer.service.js';
+import Customer from '../models/Customer.js';
 import { reserveStockForOrder, cancelOrder, syncShopifySellableAfterLedger, queueShopifyInventoryIngest } from '../services/order.service.js';
 import { notifyNewOrder } from '../services/notification.service.js';
 import OrderStatusHistory from '../models/OrderStatusHistory.js';
@@ -17,6 +18,7 @@ import {
   isShopifyOrderPaid,
 } from '../integrations/shopify/orderMoney.js';
 import { applyShopifyPaymentIncentives } from '../integrations/shopify/applyPaymentIncentives.service.js';
+import { shopifyMerchandiseTotal } from '../utils/shopifyPaymentIncentives.js';
 import {
   hasCompleteShopifyAddress,
   mapShopifyShippingAddress,
@@ -66,10 +68,6 @@ function mapImportedOrderStatus(payload) {
 }
 
 export async function handleOrdersCreate(payload, { reserveStock = true, statusOverride, source = 'shopify_webhook' } = {}) {
-  if (source === 'shopify_webhook') {
-    payload = (await applyShopifyPaymentIncentives(payload)) || payload;
-  }
-
   const shopifyOrderId = String(payload.id);
   const existing = await Order.findOne({ shopifyOrderId });
   if (existing) {
@@ -80,15 +78,29 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
   const customerPayload = payload.customer || {};
   const shippingAddress = mapShopifyShippingAddress(payload);
 
-  const customer = await findOrCreateCustomer({
-    fullName:
-      `${customerPayload.first_name || ''} ${customerPayload.last_name || ''}`.trim() ||
-      shippingAddress.fullName,
-    phone: shopifyCustomerPhone(payload, shippingAddress),
-    email: customerPayload.email,
-    shopifyCustomerId: customerPayload.id,
-    shippingAddress: hasCompleteShopifyAddress(payload) ? shippingAddress : null,
-  });
+  let customer;
+  try {
+    customer = await findOrCreateCustomer({
+      fullName:
+        `${customerPayload.first_name || ''} ${customerPayload.last_name || ''}`.trim() ||
+        shippingAddress.fullName,
+      phone: shopifyCustomerPhone(payload, shippingAddress),
+      email: customerPayload.email,
+      shopifyCustomerId: customerPayload.id,
+      shippingAddress: hasCompleteShopifyAddress(payload) ? shippingAddress : null,
+    });
+  } catch (err) {
+    logger.warn({ err: err?.message || err, shopifyOrderId }, 'Customer create failed — using fallback customer');
+    customer = await Customer.findOne({ shopifyCustomerId: String(customerPayload.id || '') });
+    if (!customer) {
+      customer = await Customer.create({
+        fullName: shippingAddress.fullName || 'Unknown',
+        phone: shopifyCustomerPhone(payload, shippingAddress),
+        shopifyCustomerId: customerPayload.id ? String(customerPayload.id) : undefined,
+        addresses: [],
+      });
+    }
+  }
 
   const items = [];
   for (const line of payload.line_items || []) {
@@ -107,13 +119,20 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
   }
 
   if (items.length === 0) {
-    throw new Error('No resolvable line items for order');
+    logger.error(
+      {
+        shopifyOrderId,
+        name: shopifyOrderNameFromPayload(payload),
+        skus: (payload.line_items || []).map((l) => l.sku || l.title),
+      },
+      'Shopify order has no catalog variants — ingesting anyway so it still appears in OMS'
+    );
   }
 
   const internalStatus = statusOverride || 'pending_verification';
   // Only hold stock for genuinely-open orders. Historical (delivered/cancelled)
   // imports must not distort warehouse on-hold inventory.
-  const shouldReserve = reserveStock && internalStatus === 'pending_verification';
+  const shouldReserve = reserveStock && internalStatus === 'pending_verification' && items.length > 0;
   const deliveredAt =
     internalStatus === 'delivered'
       ? new Date(payload.updated_at || payload.closed_at || payload.created_at || Date.now())
@@ -145,10 +164,7 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
               }
             : {}),
           internalStatus,
-          totalSellingPrice: Math.max(
-            0,
-            (parseFloat(payload.total_price) || 0) - shippingFee
-          ),
+          totalSellingPrice: shopifyMerchandiseTotal(payload, shippingFee),
           items,
           placedAt: new Date(payload.created_at || Date.now()),
           ...(deliveredAt ? { deliveredAt } : {}),
@@ -188,6 +204,15 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
     await notifyNewOrder(order.order, { source: 'shopify' });
   }
 
+  if (source === 'shopify_webhook') {
+    applyShopifyPaymentIncentives(payload).catch((err) => {
+      logger.warn(
+        { err: err?.message || err, shopifyOrderId },
+        'Shopify payment incentive edit failed after OMS ingest'
+      );
+    });
+  }
+
   return order.order;
 }
 
@@ -207,8 +232,10 @@ export async function handleOrdersCancelled(payload) {
 
 export async function handleOrdersUpdated(payload) {
   const shopifyOrderId = String(payload.id);
-  const order = await Order.findOne({ shopifyOrderId });
-  if (!order) return null;
+  let order = await Order.findOne({ shopifyOrderId });
+  if (!order) {
+    return handleOrdersCreate(payload, { source: 'shopify_webhook' });
+  }
 
   // Shopify cancel is authoritative when staff cancel in Admin.
   if (payload.cancelled_at && order.internalStatus !== 'cancelled') {
@@ -390,8 +417,39 @@ export async function processShopifyWebhookJob({ receiptId, topic }) {
   } catch (error) {
     receipt.error = error.message;
     await receipt.save();
+    if (topic === 'orders/create' || topic === 'orders/updated') {
+      logger.error({ err: error.message, topic, name: payload?.name }, 'Shopify order webhook failed — will retry on sync');
+      return null;
+    }
     throw error;
   }
+}
+
+export async function retryFailedShopifyOrderCreates({ limit = 40 } = {}) {
+  const receipts = await WebhookReceipt.find({
+    source: 'shopify',
+    topic: 'orders/create',
+    processedAt: { $exists: false },
+    error: { $exists: true, $ne: null },
+  })
+    .sort({ createdAt: 1 })
+    .limit(limit);
+
+  let recovered = 0;
+  for (const receipt of receipts) {
+    try {
+      await handleOrdersCreate(receipt.payload, { source: 'shopify_import' });
+      receipt.processedAt = new Date();
+      receipt.error = undefined;
+      await receipt.save();
+      recovered += 1;
+    } catch (err) {
+      receipt.error = err.message;
+      await receipt.save();
+    }
+  }
+  if (recovered) logger.info({ recovered, scanned: receipts.length }, 'Retried failed Shopify order webhooks');
+  return { recovered, scanned: receipts.length };
 }
 
 export { mapImportedOrderStatus };
@@ -404,4 +462,5 @@ export default {
   handleProductsUpdate,
   handleInventoryLevelsUpdate,
   processShopifyWebhookJob,
+  retryFailedShopifyOrderCreates,
 };
