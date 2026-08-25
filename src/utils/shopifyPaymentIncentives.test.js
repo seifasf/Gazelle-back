@@ -40,15 +40,15 @@ describe('Shopify payment incentives plan', () => {
     assert.equal(planPaymentIncentives(payload, 'cod').addCodFee, false);
   });
 
-  it('COD: never add EGP 25 on Shopify; strip leftover online 5% code', () => {
+  it('never edits Shopify for COD 25 or ONLINE5', () => {
     const plan = planPaymentIncentives(codOrder, 'cod');
     assert.equal(plan.addCodFee, false);
-    assert.equal(plan.removeOnlineDiscount, true);
+    assert.equal(plan.removeOnlineDiscount, false);
     assert.equal(plan.removeCodFee, false);
-    assert.equal(incentivesNeedShopifyEdit(plan), true);
+    assert.equal(incentivesNeedShopifyEdit(plan), false);
   });
 
-  it('online: drop a leftover COD fee and add 5% when missing', () => {
+  it('never adds 5% or a COD line on Shopify for online orders', () => {
     const unpaidOnline = {
       financial_status: 'paid',
       line_items: [
@@ -57,12 +57,13 @@ describe('Shopify payment incentives plan', () => {
       ],
     };
     const plan = planPaymentIncentives(unpaidOnline, 'online');
-    assert.equal(plan.removeCodFee, true);
+    assert.equal(plan.removeCodFee, false);
     assert.equal(plan.addCodFee, false);
-    assert.equal(plan.addOnlineDiscount, true);
+    assert.equal(plan.addOnlineDiscount, false);
+    assert.equal(incentivesNeedShopifyEdit(plan), false);
   });
 
-  it('online already 5% off and no fee needs no edit', () => {
+  it('online already 5% off needs no Shopify edit', () => {
     const payload = {
       financial_status: 'paid',
       discount_codes: [{ code: 'ONLINE5' }],

@@ -1,7 +1,5 @@
 /**
- * Shopify payment incentives (Admin API after the order lands):
- * - Pay online: 5% off merchandise (ONLINE5) on Shopify
- * - COD EGP 25 is OMS-only (policy + Bosta). Never add it on the website.
+ * Do not write COD EGP 25 or ONLINE5 onto Shopify. Checkout stays as placed.
  */
 
 export const ONLINE_DISCOUNT_CODE = 'ONLINE5';
@@ -57,24 +55,12 @@ export function isOnlineFiveDiscount(app = {}) {
  * @param {object} payload Shopify REST order
  * @param {'cod' | 'online'} paymentMethod
  */
-export function planPaymentIncentives(payload, paymentMethod) {
-  const hasFee = orderHasCodFee(payload);
-  const hasOnline = orderHasOnlineDiscount(payload);
-
-  if (paymentMethod === 'online') {
-    return {
-      addCodFee: false,
-      removeCodFee: hasFee,
-      addOnlineDiscount: !hasOnline,
-      removeOnlineDiscount: false,
-    };
-  }
-
+export function planPaymentIncentives(_payload, _paymentMethod) {
   return {
     addCodFee: false,
     removeCodFee: false,
     addOnlineDiscount: false,
-    removeOnlineDiscount: hasOnline,
+    removeOnlineDiscount: false,
   };
 }
 

@@ -17,7 +17,6 @@ import {
   applyShopifyMoneyFields,
   isShopifyOrderPaid,
 } from '../integrations/shopify/orderMoney.js';
-import { applyShopifyPaymentIncentives } from '../integrations/shopify/applyPaymentIncentives.service.js';
 import { isCodFeeLine, shopifyMerchandiseTotal } from '../utils/shopifyPaymentIncentives.js';
 import {
   hasCompleteShopifyAddress,
@@ -257,15 +256,6 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
   // Only alert on genuine real-time orders — bulk imports must not spam the feed.
   if (source === 'shopify_webhook' && internalStatus === 'pending_verification') {
     await notifyNewOrder(order.order, { source: 'shopify' });
-  }
-
-  if (source === 'shopify_webhook') {
-    applyShopifyPaymentIncentives(payload).catch((err) => {
-      logger.warn(
-        { err: err?.message || err, shopifyOrderId },
-        'Shopify payment incentive edit failed after OMS ingest'
-      );
-    });
   }
 
   return order.order;
