@@ -338,6 +338,21 @@ export async function updateShippingAddress(req, res, next) {
 
     await order.save();
 
+    const Customer = (await import('../models/Customer.js')).default;
+    const { isPlaceholderCustomerName, isPlaceholderPhone } = await import(
+      '../utils/shopifyShippingAddress.js'
+    );
+    const customerDoc = await Customer.findById(order.customerId?._id || order.customerId);
+    if (customerDoc) {
+      if (fullName !== undefined && !isPlaceholderCustomerName(fullName)) {
+        customerDoc.fullName = String(fullName).trim();
+      }
+      if (phone !== undefined && !isPlaceholderPhone(phone)) {
+        customerDoc.phone = String(phone).trim();
+      }
+      await customerDoc.save();
+    }
+
     let shopifyPickupWarning = null;
     if (order.shippingMethod === 'pickup') {
       try {

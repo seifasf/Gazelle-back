@@ -45,3 +45,45 @@ export function shopifyCustomerPhone(payload = {}, shippingAddress = {}) {
   if (payload.id) return `shopify-order-${payload.id}`;
   return 'unknown';
 }
+
+export function isPlaceholderPhone(phone) {
+  const p = String(phone || '').trim();
+  if (!p || /^unknown$/i.test(p)) return true;
+  if (/^shopify-(cust|order)-/i.test(p)) return true;
+  return String(p).replace(/\D/g, '').length < 10;
+}
+
+export function isPlaceholderCustomerName(name) {
+  const n = String(name || '').trim();
+  return !n || /^unknown$/i.test(n);
+}
+
+export function isPlaceholderStreet(line1) {
+  const s = String(line1 || '').trim();
+  return !s || s === SHOPIFY_ADDRESS_PLACEHOLDER;
+}
+
+/** Confirmed verification needs a real name, EG phone, and street from Shopify Admin. */
+export function assertContactReadyToConfirm(order) {
+  const addr = order?.shippingAddress || {};
+  if (isPlaceholderCustomerName(addr.fullName)) {
+    const err = new Error('Save the customer name from Shopify Admin before confirming');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (isPlaceholderPhone(addr.phone)) {
+    const err = new Error('Save a real phone number from Shopify Admin before confirming');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (order?.shippingMethod !== 'pickup' && isPlaceholderStreet(addr.line1)) {
+    const err = new Error('Save the street address from Shopify Admin before confirming');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (order?.shippingMethod !== 'pickup' && !String(addr.city || '').trim()) {
+    const err = new Error('Save the city from Shopify Admin before confirming');
+    err.statusCode = 400;
+    throw err;
+  }
+}

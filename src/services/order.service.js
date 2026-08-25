@@ -46,6 +46,7 @@ import {
 import { recordDeliveryJournal } from './accounting.service.js';
 import { recordCustomerCancellation } from './customer.service.js';
 import logger from '../utils/logger.js';
+import { assertContactReadyToConfirm } from '../utils/shopifyShippingAddress.js';
 
 async function recordStatusChange(
   { orderId, fromStatus, toStatus, source, actorUserId, note },
@@ -479,6 +480,8 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
     await order.save();
     return order;
   }
+
+  assertContactReadyToConfirm(order);
 
   const verified = await withTransaction(async (session) => {
     const fresh = await Order.findById(orderId).session(session);

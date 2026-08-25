@@ -27,6 +27,33 @@ import {
 
 export { mapShopifyPaymentMethod, mapShopifyShippingFee };
 
+async function fillCityFromShopifyGraphql(payload, shippingAddress) {
+  try {
+    const { shopifyGraphQL } = await import('../integrations/shopify/client.js');
+    const gid = payload.admin_graphql_api_id || `gid://shopify/Order/${payload.id}`;
+    const res = await shopifyGraphQL(
+      `query ($id: ID!) {
+        order(id: $id) {
+          shippingAddress { city province }
+          billingAddress { city province }
+        }
+      }`,
+      { id: gid }
+    );
+    const city = res?.order?.shippingAddress?.city || res?.order?.billingAddress?.city;
+    if (city && String(city).trim()) {
+      return {
+        ...shippingAddress,
+        city: String(city).trim(),
+        zone: res?.order?.shippingAddress?.province || shippingAddress.zone,
+      };
+    }
+  } catch (err) {
+    logger.warn({ err: err?.message || err, shopifyOrderId: payload?.id }, 'Shopify city enrich skipped');
+  }
+  return shippingAddress;
+}
+
 async function resolveVariant(lineItem) {
   if (!lineItem.variant_id && !lineItem.sku) return null;
 
@@ -76,7 +103,8 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
   }
 
   const customerPayload = payload.customer || {};
-  const shippingAddress = mapShopifyShippingAddress(payload);
+  let shippingAddress = mapShopifyShippingAddress(payload);
+  shippingAddress = await fillCityFromShopifyGraphql(payload, shippingAddress);
 
   let customer;
   try {
