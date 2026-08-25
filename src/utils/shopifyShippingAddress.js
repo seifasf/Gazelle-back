@@ -1,7 +1,7 @@
 /**
  * Shopify Basic / unapproved custom apps strip customer PII from Admin API
  * and webhooks. Province/country often remain; street, city, name, phone do not.
- * OMS still requires line1 + city on orders — use explicit fallbacks so ingest
+ * OMS still requires line1 + city on orders - use explicit fallbacks so ingest
  * does not drop the order.
  */
 
@@ -61,6 +61,19 @@ export function isPlaceholderCustomerName(name) {
 export function isPlaceholderStreet(line1) {
   const s = String(line1 || '').trim();
   return !s || s === SHOPIFY_ADDRESS_PLACEHOLDER;
+}
+
+/** Prefer a stored OMS customer over Shopify-stripped Unknown / shopify-cust- ids. */
+export function applyKnownCustomerContact(shippingAddress, customer) {
+  if (!customer || !shippingAddress) return shippingAddress;
+  const next = { ...shippingAddress };
+  if (isPlaceholderCustomerName(next.fullName) && !isPlaceholderCustomerName(customer.fullName)) {
+    next.fullName = customer.fullName;
+  }
+  if (isPlaceholderPhone(next.phone) && !isPlaceholderPhone(customer.phone)) {
+    next.phone = customer.phone;
+  }
+  return next;
 }
 
 /** Confirmed verification needs a real name, EG phone, and street from Shopify Admin. */

@@ -6,6 +6,7 @@ import {
   shopifyCustomerPhone,
   SHOPIFY_ADDRESS_PLACEHOLDER,
   assertContactReadyToConfirm,
+  applyKnownCustomerContact,
 } from './shopifyShippingAddress.js';
 
 describe('mapShopifyShippingAddress', () => {
@@ -42,6 +43,17 @@ describe('shopifyCustomerPhone', () => {
       shopifyCustomerPhone({ customer: { id: 9523816333538 } }, {}),
       'shopify-cust-9523816333538'
     );
+  });
+});
+
+describe('applyKnownCustomerContact', () => {
+  it('fills Unknown from an existing OMS customer', () => {
+    const next = applyKnownCustomerContact(
+      { fullName: 'Unknown', phone: 'shopify-cust-1', line1: 'x', city: 'Cairo' },
+      { fullName: 'Rasha Radi', phone: '01002590056' }
+    );
+    assert.equal(next.fullName, 'Rasha Radi');
+    assert.equal(next.phone, '01002590056');
   });
 });
 

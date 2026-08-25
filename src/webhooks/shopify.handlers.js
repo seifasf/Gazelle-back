@@ -21,6 +21,7 @@ import { isCodFeeLine, shopifyMerchandiseTotal } from '../utils/shopifyPaymentIn
 import {
   hasCompleteShopifyAddress,
   mapShopifyShippingAddress,
+  applyKnownCustomerContact,
   shopifyCustomerPhone,
 } from '../utils/shopifyShippingAddress.js';
 
@@ -128,6 +129,8 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
       });
     }
   }
+
+  shippingAddress = applyKnownCustomerContact(shippingAddress, customer);
 
   const items = [];
   for (const line of payload.line_items || []) {

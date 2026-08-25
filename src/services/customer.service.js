@@ -10,6 +10,7 @@ import logger from '../utils/logger.js';
 import { isManualOrderRef } from '../utils/orderRefs.js';
 import { normalizeEgPhoneDigits, phoneMatchRegexes } from '../utils/phone.js';
 import { resolveGender } from '../utils/gender.js';
+import { isPlaceholderCustomerName, isPlaceholderPhone, isPlaceholderStreet } from '../utils/shopifyShippingAddress.js';
 import { workbookBuffer, styleHeaderRow } from '../utils/excelExport.js';
 
 function escapeRegex(value) {
@@ -327,22 +328,24 @@ export async function findOrCreateCustomer({ fullName, phone, email, shopifyCust
   let customer = shopifyCustomerId
     ? await Customer.findOne({ shopifyCustomerId: String(shopifyCustomerId) })
     : null;
-  if (!customer) {
+  if (!customer && !isPlaceholderPhone(phone)) {
     const byPhone = await findCustomerByPhone(phone);
     customer = byPhone?.customer
       ? await Customer.findById(byPhone.customer._id)
       : null;
   }
-  if (!customer) customer = await Customer.findOne({ phone, fullName });
+  if (!customer && !isPlaceholderPhone(phone) && !isPlaceholderCustomerName(fullName)) {
+    customer = await Customer.findOne({ phone, fullName });
+  }
 
   if (!customer) {
     customer = await Customer.create({
-      fullName,
-      phone,
+      fullName: isPlaceholderCustomerName(fullName) ? 'Unknown' : fullName,
+      phone: isPlaceholderPhone(phone) ? phone : phone,
       email,
       shopifyCustomerId: shopifyCustomerId ? String(shopifyCustomerId) : undefined,
       addresses:
-        shippingAddress?.line1 && shippingAddress?.city
+        shippingAddress?.line1 && shippingAddress?.city && !isPlaceholderStreet(shippingAddress.line1)
           ? [
               {
                 label: 'Shipping',
@@ -357,7 +360,12 @@ export async function findOrCreateCustomer({ fullName, phone, email, shopifyCust
     });
   } else {
     const patch = {};
-    if (fullName && fullName !== customer.fullName) patch.fullName = fullName;
+    if (fullName && !isPlaceholderCustomerName(fullName) && fullName !== customer.fullName) {
+      patch.fullName = fullName;
+    }
+    if (phone && !isPlaceholderPhone(phone) && phone !== customer.phone) {
+      patch.phone = phone;
+    }
     if (email && !customer.email) patch.email = email;
     if (shopifyCustomerId && !customer.shopifyCustomerId) patch.shopifyCustomerId = String(shopifyCustomerId);
     if (Object.keys(patch).length) {
