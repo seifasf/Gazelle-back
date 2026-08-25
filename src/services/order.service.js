@@ -541,6 +541,21 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
   }
 
   await notifyOrderVerified(verified);
+
+  if (verified?.shippingMethod === 'pickup') {
+    try {
+      const { zeroShopifyShippingForPickup } = await import(
+        '../integrations/shopify/zeroPickupShipping.service.js'
+      );
+      await zeroShopifyShippingForPickup(verified);
+    } catch (err) {
+      logger.warn(
+        { err: err?.message || err, orderId: String(verified?._id) },
+        'Shopify pickup shipping zero failed — OMS fee is 0; retry by saving shipping method'
+      );
+    }
+  }
+
   return verified;
 }
 
@@ -991,12 +1006,11 @@ export async function partialLocalDelivery(orderId, actorUserId, { deliveries = 
 }
 
 /**
- * Local courier failed delivery / refused / came back with the bag:
- * release all holds and mark returned_to_stock immediately (no Bosta warehouse wait).
- * Also works from failed_delivery when shippingMethod is local_shipping.
+ * Admin confirms the local courier brought the package back.
+ * Moves to back_from_local_shipping — warehouse then scans on Returns (hold stays until scan).
  */
 export async function returnLocalShippingToStock(orderId, actorUserId, { note } = {}) {
-  const result = await withTransaction(async (session) => {
+  return withTransaction(async (session) => {
     const order = await Order.findById(orderId).session(session);
     if (!order) {
       const err = new Error('Order not found');
@@ -1004,65 +1018,32 @@ export async function returnLocalShippingToStock(orderId, actorUserId, { note } 
       throw err;
     }
     if (order.shippingMethod !== 'local_shipping') {
-      const err = new Error('Only local shipping orders can return to stock this way');
+      const err = new Error('Only local shipping orders can return this way');
       err.statusCode = 400;
       throw err;
     }
     const allowed = ['local_shipping', 'failed_delivery'];
     if (!allowed.includes(order.internalStatus)) {
       const err = new Error(
-        'Order must be in Local shipping or Failed delivery to return the package to stock'
+        'Order must be in Local shipping or Failed delivery to mark back from local shipping'
       );
       err.statusCode = 400;
       throw err;
     }
 
-    const fmtLines = (lines) =>
-      (lines || []).map((i) => `${i.sku || '?'}×${i.quantity || 0}`).join(', ') || 'none';
-
-    const releaseEntries = await buildFullOrderHoldReleaseEntries(order._id, session);
-    for (const e of releaseEntries) e.reasonCode = 'local_failed_return_to_stock';
-    const ledgerDocs = releaseEntries.length
-      ? await applyLedgerEntries(releaseEntries, session)
-      : [];
-
     const staffNote =
       (typeof note === 'string' && note.trim()) ||
-      `Local failed delivery — package back, released hold on ${fmtLines(order.items)}`;
+      'Admin confirmed package is back from local shipping — scan on Returns';
 
     await transitionOrder(
       order,
-      'returned_to_stock',
+      'back_from_local_shipping',
       { source: 'user_action', actorUserId, note: staffNote },
       session
     );
 
-    await Customer.updateOne(
-      { _id: order.customerId },
-      { $inc: { lifetimeRejectedOrReturned: 1 } },
-      { session }
-    );
-
-    return {
-      order: await Order.findById(orderId).session(session),
-      ledgerDocs,
-      restockVariantIds: (order.items || []).map((i) => i.variantId).filter(Boolean),
-    };
+    return Order.findById(orderId).session(session);
   });
-
-  await afterLedgerApplied(result.ledgerDocs, {
-    actorUserId,
-    oosNote: 'Auto: local failed delivery returned to stock',
-  });
-
-  if (result.restockVariantIds?.length) {
-    await releaseOutOfStockOrdersIfRestocked(result.restockVariantIds, {
-      actorUserId,
-      note: 'Auto: local failed delivery — stock free, order ready to ship',
-    });
-  }
-
-  return result.order;
 }
 
 export async function confirmReturnedToStock(orderId, actorUserId, note) {
@@ -1075,7 +1056,9 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
     }
 
     if (!CONFIRMABLE_RETURN_STATUSES.includes(order.internalStatus)) {
-      const err = new Error('Only returning / Back at Bosta orders can be confirmed into warehouse stock');
+      const err = new Error(
+        'Only returning / Back at Bosta / back from local shipping orders can be confirmed into warehouse stock'
+      );
       err.statusCode = 400;
       throw err;
     }
@@ -1470,7 +1453,11 @@ export async function transitionOrderStatus(orderId, toStatus, meta) {
   }
   if (toStatus === 'verified_ready_for_shipping') await notifyOrderVerified(updated);
   else if (toStatus === 'failed_delivery') await notifyFailedDelivery(updated);
-  else if (toStatus === 'returned_awaiting_receipt' || toStatus === 'returning_to_origin') {
+  else if (
+    toStatus === 'returned_awaiting_receipt'
+    || toStatus === 'returning_to_origin'
+    || toStatus === 'back_from_local_shipping'
+  ) {
     await notifyReturnToOrigin(updated);
   } else if (toStatus === 'delivered') {
     await checkVariantsLowStock((updated?.items || []).map((i) => i.variantId));

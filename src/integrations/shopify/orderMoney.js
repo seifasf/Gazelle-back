@@ -73,7 +73,10 @@ export function applyShopifyMoneyFields(order, payload = {}) {
   if (!order || !payload) return order;
 
   const shippingFee = mapShopifyShippingFee(payload);
-  if (Number.isFinite(shippingFee) && shippingFee >= 0) {
+  // Warehouse pickup is always EGP 0 — do not restore Shopify checkout shipping.
+  if (order.shippingMethod === 'pickup') {
+    order.shippingFee = 0;
+  } else if (Number.isFinite(shippingFee) && shippingFee >= 0) {
     order.shippingFee = shippingFee;
   }
 

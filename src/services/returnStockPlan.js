@@ -60,4 +60,8 @@ export function exchangeConfirmActions(order, { outboundRestockLen = 0, hasColle
   };
 }
 
-export const CONFIRMABLE_RETURN_STATUSES = ['returned_awaiting_receipt', 'returning_to_origin'];
+export const CONFIRMABLE_RETURN_STATUSES = [
+  'returned_awaiting_receipt',
+  'returning_to_origin',
+  'back_from_local_shipping',
+];

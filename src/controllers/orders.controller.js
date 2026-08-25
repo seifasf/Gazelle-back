@@ -7,6 +7,7 @@ const STOCK_MANAGER_ORDER_STATUSES = new Set([
   'out_of_stock',
   'picked_up_by_bosta',
   'local_shipping',
+  'back_from_local_shipping',
   'in_transit',
   'returning_to_origin',
   'returned_awaiting_receipt',
@@ -331,6 +332,18 @@ export async function updateShippingAddress(req, res, next) {
 
     await order.save();
 
+    let shopifyPickupWarning = null;
+    if (order.shippingMethod === 'pickup') {
+      try {
+        const { zeroShopifyShippingForPickup } = await import(
+          '../integrations/shopify/zeroPickupShipping.service.js'
+        );
+        await zeroShopifyShippingForPickup(order);
+      } catch (err) {
+        shopifyPickupWarning = `Pickup saved in Gazelle (shipping EGP 0), but Shopify shipping was not cleared: ${err.message}`;
+      }
+    }
+
     let bostaSync = null;
     if (
       addressChanged
@@ -353,7 +366,11 @@ export async function updateShippingAddress(req, res, next) {
       }
     }
 
-    res.json({ data: order, ...(bostaSync ? { bostaUpdated: true } : {}) });
+    res.json({
+      data: order,
+      ...(bostaSync ? { bostaUpdated: true } : {}),
+      ...(shopifyPickupWarning ? { warning: shopifyPickupWarning } : {}),
+    });
   } catch (err) {
     next(err);
   }

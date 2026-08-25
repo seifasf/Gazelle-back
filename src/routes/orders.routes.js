@@ -38,7 +38,7 @@ router.post(
 );
 router.post(
   '/:id/local-return-to-stock',
-  requireRoles('admin', 'orders_manager', 'stock_manager'),
+  requireRoles('admin', 'orders_manager'),
   ordersController.returnLocalShippingToStock
 );
 router.post('/:id/exchange', requireRoles('admin', 'orders_manager'), ordersController.exchangeItem);

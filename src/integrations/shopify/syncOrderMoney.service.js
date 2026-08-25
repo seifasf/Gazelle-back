@@ -54,7 +54,9 @@ export async function syncShopifyMoneyOntoOrder(order) {
     };
 
     applyShopifyMoneyFields(order, payload);
-    applyShopifyShippingAddress(order, payload);
+    if (order.shippingMethod !== 'pickup') {
+      applyShopifyShippingAddress(order, payload);
+    }
     await order.save();
 
     logger.info(

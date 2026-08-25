@@ -42,13 +42,22 @@ export const ORDER_TRANSITIONS = {
     'in_transit',
     'failed_delivery',
     'returning_to_origin',
+    'back_from_local_shipping',
     'returned_to_stock',
   ],
   // Bosta webhooks can skip steps (e.g. exception → RTO without a separate in_transit event).
   picked_up_by_bosta: ['in_transit', 'delivered', 'failed_delivery', 'returning_to_origin'],
   in_transit: ['delivered', 'failed_delivery', 'returning_to_origin'],
   // Local failed delivery can go straight back to warehouse stock (courier returns the bag).
-  failed_delivery: ['in_transit', 'returning_to_origin', 'delivered', 'returned_to_stock'],
+  failed_delivery: [
+    'in_transit',
+    'returning_to_origin',
+    'delivered',
+    'back_from_local_shipping',
+    'returned_to_stock',
+  ],
+  // Admin confirmed the local courier brought the bag back — warehouse scans on Returns.
+  back_from_local_shipping: ['returned_to_stock', 'pending_verification'],
   // Warehouse can confirm receipt even if Bosta never flipped to "Back at Bosta".
   returning_to_origin: ['returned_awaiting_receipt', 'returned_to_stock'],
   returned_awaiting_receipt: ['returned_to_stock'],

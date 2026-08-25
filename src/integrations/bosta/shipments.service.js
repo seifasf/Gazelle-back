@@ -36,6 +36,16 @@ export function isOrderPrepaidForBosta(order) {
  *   (exchangeCreditAmount) subtracted from COD so customer still pays shipping net of refund
  * - Creator / normal COD → goods + shipping
  */
+const COD_FEE_EGP = 25;
+
+function itemsMerchandiseTotal(order) {
+  return (order.items || []).reduce((s, i) => {
+    const price = Number(i.unitSellingPrice) || 0;
+    const qty = Number(i.quantity) || 0;
+    return s + price * qty;
+  }, 0);
+}
+
 export function bostaCodAmountForOrder(order) {
   if (!order) return 0;
   if (isOrderPrepaidForBosta(order)) return 0;
@@ -43,7 +53,15 @@ export function bostaCodAmountForOrder(order) {
   const goods = Number(order.totalSellingPrice) || 0;
   const ship = Number(order.shippingFee) || 0;
   const credit = order.isExchangeOrder ? Number(order.exchangeCreditAmount) || 0 : 0;
-  return Math.max(0, Math.round((goods + ship - credit) * 100) / 100);
+  const itemsGoods = itemsMerchandiseTotal(order);
+  // Shopify COD often already folds EGP 25 into totalSellingPrice; manual COD does not.
+  const extraCodFee =
+    order.isExchangeOrder || itemsGoods <= 0
+      ? 0
+      : Math.abs(goods - itemsGoods) < 1
+        ? COD_FEE_EGP
+        : 0;
+  return Math.max(0, Math.round((goods + ship - credit + extraCodFee) * 100) / 100);
 }
 
 /** Bosta delivery type codes (live API — verified against Gazelle Bosta account). */

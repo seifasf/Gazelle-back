@@ -391,6 +391,17 @@ export async function pickAndPackOrder(orderId, actorUserId) {
   if (order.shippingMethod === 'pickup') {
     order.assignedStockManagerId = actorUserId;
     await order.save();
+    try {
+      const { zeroShopifyShippingForPickup } = await import(
+        '../integrations/shopify/zeroPickupShipping.service.js'
+      );
+      await zeroShopifyShippingForPickup(order);
+    } catch (err) {
+      logger.warn(
+        { err: err?.message || err, orderId: String(order._id) },
+        'Shopify pickup shipping zero failed at handoff'
+      );
+    }
     await orderService.transitionOrderStatus(orderId, 'delivered', {
       source: 'user_action',
       actorUserId,

@@ -853,10 +853,11 @@ function ordersPlacedCutoff() {
 
 async function warehouseReturnsSnapshot() {
   const cutoff = ordersPlacedCutoff();
-  const openStatuses = ['returning_to_origin', 'returned_awaiting_receipt'];
-  const [returningToOrigin, backAtBosta, openExchanges] = await Promise.all([
+  const openStatuses = ['returning_to_origin', 'returned_awaiting_receipt', 'back_from_local_shipping'];
+  const [returningToOrigin, backAtBosta, backFromLocal, openExchanges] = await Promise.all([
     Order.countDocuments({ placedAt: { $gte: cutoff }, internalStatus: 'returning_to_origin' }),
     Order.countDocuments({ placedAt: { $gte: cutoff }, internalStatus: 'returned_awaiting_receipt' }),
+    Order.countDocuments({ placedAt: { $gte: cutoff }, internalStatus: 'back_from_local_shipping' }),
     Order.countDocuments({
       placedAt: { $gte: cutoff },
       isExchangeOrder: true,
@@ -866,7 +867,8 @@ async function warehouseReturnsSnapshot() {
   return {
     returningToOrigin,
     backAtBosta,
-    openTotal: returningToOrigin + backAtBosta,
+    backFromLocalShipping: backFromLocal,
+    openTotal: returningToOrigin + backAtBosta + backFromLocal,
     openExchanges,
   };
 }

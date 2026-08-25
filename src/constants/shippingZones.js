@@ -23,6 +23,8 @@ export const SHOPIFY_SHIPPING_ZONES = [
     id: 'cairo-50',
     name: 'Cairo-50',
     fee: 95,
+    /** What Bosta invoices Gazelle (not the customer shipping rate). */
+    bostaFee: 50,
     freeOver: SHOPIFY_FREE_SHIPPING_MIN,
     // Shopify provinces: 6th of October | Cairo | Giza | Helwan
     places: [
@@ -37,6 +39,7 @@ export const SHOPIFY_SHIPPING_ZONES = [
     id: 'zone2-60',
     name: 'Zone2-60',
     fee: 100,
+    bostaFee: 60,
     freeOver: SHOPIFY_FREE_SHIPPING_MIN,
     // Al Sharqia | Ismailia | Monufia | Port Said | Qalyubia | Alexandria
     places: [
@@ -50,6 +53,7 @@ export const SHOPIFY_SHIPPING_ZONES = [
     id: 'zone3-70',
     name: 'Zone3-70',
     fee: 105,
+    bostaFee: 65,
     freeOver: SHOPIFY_FREE_SHIPPING_MIN,
     // Beheira | Beni Suef | Dakahlia | Damietta | Faiyum | Gharbia | Kafr el-Sheikh | Suez
     places: [
@@ -63,6 +67,7 @@ export const SHOPIFY_SHIPPING_ZONES = [
     id: 'zone4-90',
     name: 'Zone4-90',
     fee: 140,
+    bostaFee: 85,
     freeOver: SHOPIFY_FREE_SHIPPING_MIN,
     // Aswan | Asyut | Luxor | Minya | Qena | Sohag
     places: [
@@ -74,6 +79,7 @@ export const SHOPIFY_SHIPPING_ZONES = [
     id: 'zone5-100',
     name: 'Zone5-100',
     fee: 195,
+    bostaFee: 110,
     freeOver: null,
     // North Sinai | South Sinai | Matrouh | Red Sea | New Valley
     places: [
@@ -134,4 +140,23 @@ export function resolveShopifyZoneShippingFee(city, goodsTotal = 0) {
     Number.isFinite(zone.freeOver) &&
     safeGoods >= zone.freeOver;
   return { fee: free ? 0 : zone.fee, zone, free };
+}
+
+/** Default Bosta courier cost when city is unknown (Cairo-50). */
+export const DEFAULT_BOSTA_COURIER_FEE = 50;
+
+/**
+ * What Bosta charges Gazelle for this destination — not the Shopify/customer shipping fee.
+ * Pickup and local courier are 0 (Bosta is not used).
+ */
+export function resolveBostaCourierFee(orderOrCity) {
+  if (orderOrCity && typeof orderOrCity === 'object') {
+    const method = orderOrCity.shippingMethod || 'bosta';
+    if (method === 'pickup' || method === 'local_shipping') return 0;
+    const city = orderOrCity.shippingAddress?.city;
+    const zone = findShopifyShippingZone(city);
+    return zone?.bostaFee ?? DEFAULT_BOSTA_COURIER_FEE;
+  }
+  const zone = findShopifyShippingZone(orderOrCity);
+  return zone?.bostaFee ?? DEFAULT_BOSTA_COURIER_FEE;
 }
