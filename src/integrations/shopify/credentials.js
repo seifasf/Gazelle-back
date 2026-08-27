@@ -108,26 +108,31 @@ async function fetchClientCredentialsToken(creds) {
 }
 
 /**
- * Return a usable Admin API access token. For client-credentials apps the token
- * is refreshed automatically when missing/expired. For a static token (env var
- * or legacy admin-created custom app) the stored token is returned as-is.
+ * Return a usable Admin API access token.
+ *
+ * Prefer client credentials (Partner / Dev Dashboard app) when configured.
+ * Never fall back to a leftover SHOPIFY_ACCESS_TOKEN from another app (botit) —
+ * that token returns ACCESS_DENIED for customer name/phone/street.
  */
 export async function getValidAccessToken() {
   const creds = await getShopifyCredentials();
 
-  // Explicit static token from environment always wins.
-  if (config.SHOPIFY_ACCESS_TOKEN) return config.SHOPIFY_ACCESS_TOKEN;
-
   if (usesClientCredentials(creds)) {
+    const settings = await Settings.findOne({ key: 'global' });
+    const cached = settings?.shopifyAccessToken || null;
+    const expiresAt = settings?.shopifyTokenExpiresAt || null;
+    // Only reuse a token that was issued by client credentials (has expiry).
+    // A legacy botit shpat_ in Mongo has no expiry and must be refreshed away.
     const stillValid =
-      creds.accessToken &&
-      creds.tokenExpiresAt &&
-      new Date(creds.tokenExpiresAt).getTime() - 60_000 > Date.now();
-    if (stillValid) return creds.accessToken;
+      Boolean(cached) &&
+      Boolean(expiresAt) &&
+      new Date(expiresAt).getTime() - 60_000 > Date.now();
+    if (stillValid) return cached;
     return fetchClientCredentialsToken(creds);
   }
 
-  // Legacy admin-created custom app token (no client credentials available).
+  if (config.SHOPIFY_ACCESS_TOKEN) return config.SHOPIFY_ACCESS_TOKEN;
+
   return creds.accessToken;
 }
 

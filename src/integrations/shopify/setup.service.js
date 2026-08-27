@@ -64,31 +64,49 @@ export async function getShopifyStatus() {
     Customer.countDocuments(),
   ]);
 
-  const authMode = config.SHOPIFY_ACCESS_TOKEN
-    ? 'static_token'
-    : settings?.shopifyClientId
-      ? 'client_credentials'
-      : settings?.shopifyAccessToken
-        ? 'static_token'
-        : 'none';
+  let adminShopDomain = settings?.shopifyShopDomain || settings?.shopifyPublicDomain;
+  let apiVersion = settings?.shopifyApiVersion || null;
+  let clientIdConfigured = Boolean(settings?.shopifyClientId || config.SHOPIFY_CLIENT_ID);
+  try {
+    const creds = await getShopifyCredentials();
+    adminShopDomain = creds.shopDomain || adminShopDomain;
+    apiVersion = creds.apiVersion || apiVersion;
+    clientIdConfigured = Boolean(creds.clientId && creds.clientSecret);
+  } catch {
+    // status should still return if credential resolve fails
+  }
+
+  // Mirror getValidAccessToken: client credentials win when present.
+  const authMode = clientIdConfigured
+    ? 'client_credentials'
+    : config.SHOPIFY_ACCESS_TOKEN || settings?.shopifyAccessToken
+      ? 'static_token'
+      : 'none';
 
   const inferredMode =
     settings?.shopifyCatalogMode ||
     (configured ? 'admin' : productCount > 0 ? 'storefront' : 'none');
 
-  let adminShopDomain = settings?.shopifyShopDomain || settings?.shopifyPublicDomain;
-  let apiVersion = settings?.shopifyApiVersion || null;
-  try {
-    const creds = await getShopifyCredentials();
-    adminShopDomain = creds.shopDomain || adminShopDomain;
-    apiVersion = creds.apiVersion || apiVersion;
-  } catch {
-    // status should still return if credential resolve fails
+  let installedAppTitle = null;
+  let installedAppId = null;
+  if (configured) {
+    try {
+      const { shopifyGraphQL } = await import('./client.js');
+      const data = await shopifyGraphQL(`{
+        currentAppInstallation { app { id title } }
+      }`);
+      installedAppTitle = data?.currentAppInstallation?.app?.title || null;
+      installedAppId = data?.currentAppInstallation?.app?.id || null;
+    } catch {
+      // status should still return if GraphQL fails
+    }
   }
 
   return {
     configured,
     authMode,
+    installedAppTitle,
+    installedAppId,
     catalogMode: inferredMode,
     healthy: settings?.shopifyConnectionHealthy ?? false,
     shopName: settings?.shopifyShopName,

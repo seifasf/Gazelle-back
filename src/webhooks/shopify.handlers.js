@@ -23,33 +23,96 @@ import {
   mapShopifyShippingAddress,
   applyKnownCustomerContact,
   shopifyCustomerPhone,
+  isPlaceholderCustomerName,
+  isPlaceholderPhone,
+  isPlaceholderStreet,
 } from '../utils/shopifyShippingAddress.js';
 
 export { mapShopifyPaymentMethod, mapShopifyShippingFee };
 
-async function fillCityFromShopifyGraphql(payload, shippingAddress) {
+/**
+ * Webhooks on Basic/unapproved apps often omit PII. After switching to an
+ * approved Partner app token, Admin GraphQL can still return name/phone/street
+ * — backfill placeholders so OMS does not stay on "Address not available".
+ */
+async function enrichContactFromShopifyGraphql(payload, shippingAddress) {
+  const needsName = isPlaceholderCustomerName(shippingAddress?.fullName);
+  const needsPhone = isPlaceholderPhone(shippingAddress?.phone);
+  const needsStreet = isPlaceholderStreet(shippingAddress?.line1);
+  const needsCity = !String(shippingAddress?.city || '').trim() || shippingAddress?.city === 'Unknown';
+  if (!needsName && !needsPhone && !needsStreet && !needsCity) return shippingAddress;
+
   try {
     const { shopifyGraphQL } = await import('../integrations/shopify/client.js');
     const gid = payload.admin_graphql_api_id || `gid://shopify/Order/${payload.id}`;
     const res = await shopifyGraphQL(
       `query ($id: ID!) {
         order(id: $id) {
-          shippingAddress { city province }
-          billingAddress { city province }
+          phone
+          email
+          shippingAddress {
+            name firstName lastName phone
+            address1 address2 city province country zip
+          }
+          billingAddress {
+            name firstName lastName phone
+            address1 address2 city province country zip
+          }
+          customer { firstName lastName phone email }
         }
       }`,
       { id: gid }
     );
-    const city = res?.order?.shippingAddress?.city || res?.order?.billingAddress?.city;
-    if (city && String(city).trim()) {
-      return {
-        ...shippingAddress,
-        city: String(city).trim(),
-        zone: res?.order?.shippingAddress?.province || shippingAddress.zone,
-      };
+    const order = res?.order;
+    if (!order) return shippingAddress;
+
+    const ship = order.shippingAddress || {};
+    const bill = order.billingAddress || {};
+    const cust = order.customer || {};
+    const next = { ...shippingAddress };
+
+    if (needsName) {
+      const fullName =
+        String(ship.name || '').trim() ||
+        `${ship.firstName || ''} ${ship.lastName || ''}`.trim() ||
+        String(bill.name || '').trim() ||
+        `${bill.firstName || ''} ${bill.lastName || ''}`.trim() ||
+        `${cust.firstName || ''} ${cust.lastName || ''}`.trim();
+      if (fullName) next.fullName = fullName;
     }
+
+    if (needsPhone) {
+      const phone =
+        String(ship.phone || '').trim() ||
+        String(bill.phone || '').trim() ||
+        String(order.phone || '').trim() ||
+        String(cust.phone || '').trim();
+      if (phone) next.phone = phone;
+    }
+
+    if (needsStreet) {
+      const line1 = String(ship.address1 || bill.address1 || '').trim();
+      if (line1) {
+        next.line1 = line1;
+        next.line2 = ship.address2 || bill.address2 || next.line2;
+      }
+    }
+
+    const city = String(ship.city || bill.city || '').trim();
+    if (city && needsCity) {
+      next.city = city;
+      next.zone = ship.province || bill.province || next.zone;
+    } else if (city && (!next.city || next.city === 'Unknown')) {
+      next.city = city;
+      next.zone = ship.province || bill.province || next.zone;
+    }
+
+    return next;
   } catch (err) {
-    logger.warn({ err: err?.message || err, shopifyOrderId: payload?.id }, 'Shopify city enrich skipped');
+    logger.warn(
+      { err: err?.message || err, shopifyOrderId: payload?.id },
+      'Shopify contact enrich skipped'
+    );
   }
   return shippingAddress;
 }
@@ -104,7 +167,7 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
 
   const customerPayload = payload.customer || {};
   let shippingAddress = mapShopifyShippingAddress(payload);
-  shippingAddress = await fillCityFromShopifyGraphql(payload, shippingAddress);
+  shippingAddress = await enrichContactFromShopifyGraphql(payload, shippingAddress);
 
   let customer;
   try {
@@ -322,6 +385,16 @@ export async function handleOrdersUpdated(payload) {
       phone: shipping.phone || prev.phone,
     };
   }
+
+  const current = order.shippingAddress?.toObject?.() || order.shippingAddress || {};
+  if (
+    isPlaceholderCustomerName(current.fullName) ||
+    isPlaceholderPhone(current.phone) ||
+    isPlaceholderStreet(current.line1)
+  ) {
+    order.shippingAddress = await enrichContactFromShopifyGraphql(payload, current);
+  }
+
   await order.save();
 
   // Do NOT map Shopify "fulfilled" → OMS delivered.
