@@ -49,4 +49,15 @@ describe('OMS COD fee (system only, not Shopify)', () => {
       195
     );
   });
+
+  it('creator gift with zero total and zero shipping collects nothing', () => {
+    const order = {
+      paymentMethod: 'cod',
+      isCreatorOrder: true,
+      totalSellingPrice: 0,
+      shippingFee: 0,
+    };
+    assert.equal(omsCodFeeEgp(order), 0);
+    assert.equal(omsCodCollectAmount(order), 0);
+  });
 });

@@ -85,6 +85,17 @@ const orderSchema = new mongoose.Schema(
       default: 'none',
     },
     bostaShipmentError: String,
+    /** Live Bosta invoice breakdown (from calculator or delivery API). */
+    bostaFeeBreakdown: {
+      shippingFee: { type: Number, min: 0 },
+      openPackageFee: { type: Number, min: 0 },
+      nextDayTransferFee: { type: Number, min: 0 },
+      vat: { type: Number, min: 0 },
+      insuranceFee: { type: Number, min: 0 },
+      total: { type: Number, min: 0 },
+      fetchedAt: Date,
+      source: { type: String, enum: ['calculator', 'delivery'] },
+    },
     localShippingNote: String,
     localShippingMarkedAt: Date,
     /** Why a local-shipping bag came back: failed delivery, cancel, or exchange. */

@@ -14,7 +14,7 @@
     "sync-shopify": "node scripts/sync-shopify-catalog.js",
     "sync-data": "node scripts/sync-live-data.js",
     "verify:redesign": "node scripts/verify-redesign.js",
-    "test": "node --test src/services/*.test.js src/utils/*.test.js src/constants/*.test.js src/integrations/shopify/*.test.js"
+    "test": "node --test src/services/*.test.js src/utils/*.test.js src/constants/*.test.js src/integrations/shopify/*.test.js src/integrations/bosta/*.test.js"
   },
   "engines": {
     "node": ">=20.0.0"

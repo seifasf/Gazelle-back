@@ -128,10 +128,10 @@ export async function getOrder(req, res, next) {
   try {
     const order = await orderService.getOrderById(req.params.id);
     if (!order) return res.status(404).json({ error: 'Order not found' });
-    const { resolveBostaCourierFee } = await import('../constants/shippingZones.js');
     const { enrichOrderMoneyFields } = await import('../utils/omsCod.js');
-    const data = enrichOrderMoneyFields(order);
-    data.bostaCourierFee = resolveBostaCourierFee(data);
+    const { enrichBostaFeeFields } = await import('../integrations/bosta/bostaFees.service.js');
+    let data = enrichOrderMoneyFields(order);
+    data = await enrichBostaFeeFields(data);
     res.json({ data });
   } catch (err) {
     next(err);
@@ -312,7 +312,7 @@ export async function updateShippingAddress(req, res, next) {
       || String(nextAddress.fullName || '') !== String(prev.fullName || '');
 
     // Always recalculate Shopify zone fee for Bosta when destination is known.
-    if (order.shippingMethod === 'bosta' && !order.isReturnOrder) {
+    if (order.shippingMethod === 'bosta' && !order.isReturnOrder && !order.isCreatorOrder) {
       const destCity = String(nextAddress.city || '').trim();
       if (destCity) {
         const goods = Number(order.totalSellingPrice) || 0;

@@ -303,6 +303,13 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
       throw err;
     }
 
+    try {
+      const { syncBostaFeesForOrder } = await import('../integrations/bosta/bostaFees.service.js');
+      await syncBostaFeesForOrder(saved, { force: true });
+    } catch (err) {
+      logger.warn({ err: err.message, orderId }, 'Could not sync Bosta fee breakdown after create');
+    }
+
     return {
       deliveryId,
       trackingNumber,

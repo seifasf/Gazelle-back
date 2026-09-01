@@ -2055,7 +2055,7 @@ export async function createManualOrder({
         ? LOCAL_SHIPPING_FEE
         : method === 'pickup'
           ? 0
-          : exchange
+            : exchange
             ? await resolveExchangeShippingFee({
                 shippingFee: Number.isFinite(feeRaw) && feeRaw > 0 ? feeRaw : null,
                 priorOrder,
@@ -2063,7 +2063,9 @@ export async function createManualOrder({
                 // City rate always — original-order free shipping must not zero exchange COD.
                 goodsTotal: 0,
               })
-            : (() => {
+            : isCreatorOrder && Number.isFinite(feeRaw) && feeRaw >= 0
+              ? feeRaw
+              : (() => {
                 // Always use Shopify zone from destination city (ignore stale client defaults like 90).
                 if (destCity) return zoneResolved.fee;
                 if (Number.isFinite(feeRaw) && feeRaw > 0) return feeRaw;
