@@ -30,3 +30,14 @@ export function omsCodCollectAmount(order) {
   const fee = omsCodFeeEgp(order);
   return Math.max(0, Math.round((goods + ship - credit + fee) * 100) / 100);
 }
+
+/** Attach OMS-only COD fee fields for API responses (never stored on Shopify). */
+export function enrichOrderMoneyFields(order) {
+  const data =
+    order && typeof order.toObject === 'function'
+      ? order.toObject({ virtuals: true })
+      : { ...order };
+  data.codFeeEgp = omsCodFeeEgp(data);
+  data.codCollectAmount = omsCodCollectAmount(data);
+  return data;
+}

@@ -62,6 +62,8 @@ export async function listOrders(req, res, next) {
       skip: Number(skip) || 0,
       sort: delayed === '1' || delayed === 'true' ? { delayedUntil: 1 } : undefined,
     });
+    const { enrichOrderMoneyFields } = await import('../utils/omsCod.js');
+    result.orders = result.orders.map((order) => enrichOrderMoneyFields(order));
     res.json(result);
   } catch (err) {
     next(err);
@@ -127,11 +129,9 @@ export async function getOrder(req, res, next) {
     const order = await orderService.getOrderById(req.params.id);
     if (!order) return res.status(404).json({ error: 'Order not found' });
     const { resolveBostaCourierFee } = await import('../constants/shippingZones.js');
-    const { omsCodCollectAmount, omsCodFeeEgp } = await import('../utils/omsCod.js');
-    const data = typeof order.toObject === 'function' ? order.toObject() : order;
+    const { enrichOrderMoneyFields } = await import('../utils/omsCod.js');
+    const data = enrichOrderMoneyFields(order);
     data.bostaCourierFee = resolveBostaCourierFee(data);
-    data.codFeeEgp = omsCodFeeEgp(data);
-    data.codCollectAmount = omsCodCollectAmount(data);
     res.json({ data });
   } catch (err) {
     next(err);
