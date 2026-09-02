@@ -646,6 +646,362 @@ function pct(part, whole) {
   return Math.round((part / whole) * 1000) / 10;
 }
 
+function round1(n) {
+  return Math.round((Number(n) || 0) * 10) / 10;
+}
+
+function roundMoney(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+function medianOf(sorted) {
+  if (!sorted.length) return null;
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2) return sorted[mid];
+  return (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function hoursBetween(from, to) {
+  if (!from || !to) return null;
+  const a = new Date(from).getTime();
+  const b = new Date(to).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return null;
+  return (b - a) / (1000 * 60 * 60);
+}
+
+function daysBetween(from, to) {
+  const h = hoursBetween(from, to);
+  return h == null ? null : h / 24;
+}
+
+/**
+ * Delivery success + transit times for the selected range (OMS + Bosta statuses).
+ * Success = delivered ÷ (delivered + failed + refused/RTO returns).
+ */
+async function deliveryPerformanceForRange({ from, to }) {
+  const [delivered, failed, refusedReturns, transitOrders] = await Promise.all([
+    Order.countDocuments({
+      internalStatus: 'delivered',
+      deliveredAt: { $gte: from, $lte: to },
+    }),
+    Order.countDocuments({
+      internalStatus: 'failed_delivery',
+      lastStatusUpdateAt: { $gte: from, $lte: to },
+    }),
+    Order.countDocuments({
+      isExchangeOrder: { $ne: true },
+      isReturnOrder: { $ne: true },
+      deliveredAt: { $exists: false },
+      internalStatus: {
+        $in: ['returning_to_origin', 'returned_awaiting_receipt', 'returned_to_stock', 'back_from_local_shipping'],
+      },
+      lastStatusUpdateAt: { $gte: from, $lte: to },
+    }),
+    Order.find({
+      internalStatus: 'delivered',
+      deliveredAt: { $gte: from, $lte: to },
+      placedAt: { $exists: true },
+    })
+      .select('placedAt deliveredAt')
+      .lean(),
+  ]);
+
+  const attempted = delivered + failed + refusedReturns;
+  const successRate = attempted > 0 ? pct(delivered, attempted) : null;
+
+  const hours = transitOrders
+    .map((o) => hoursBetween(o.placedAt, o.deliveredAt))
+    .filter((h) => h != null && h >= 0 && h < 24 * 60)
+    .sort((a, b) => a - b);
+
+  const avgHours = hours.length
+    ? round1(hours.reduce((s, h) => s + h, 0) / hours.length)
+    : null;
+  const medianHours = hours.length ? round1(medianOf(hours)) : null;
+  const p90Hours =
+    hours.length > 0 ? round1(hours[Math.min(hours.length - 1, Math.floor(hours.length * 0.9))]) : null;
+
+  return {
+    successRate,
+    delivered,
+    failed,
+    refused: refusedReturns,
+    attempted,
+    transit: {
+      avgHours,
+      medianHours,
+      p90Hours,
+      avgDays: avgHours == null ? null : round1(avgHours / 24),
+      medianDays: medianHours == null ? null : round1(medianHours / 24),
+      sampleSize: hours.length,
+    },
+  };
+}
+
+/**
+ * Collected vs expected cash by payment method (Shopify/OMS expected · Bosta/Paymob collected).
+ */
+async function moneyCollectedVsExpectedForRange(range, { paymobReceived, codCollected } = {}) {
+  const { from, to } = range;
+  const { omsCodCollectAmount } = await import('../utils/omsCod.js');
+
+  const [codDelivered, onlinePaid] = await Promise.all([
+    Order.find({
+      $or: [{ paymentMethod: 'cod' }, { paymentMethod: { $exists: false } }, { paymentMethod: null }],
+      internalStatus: 'delivered',
+      deliveredAt: { $gte: from, $lte: to },
+      isReturnOrder: { $ne: true },
+    })
+      .select(
+        'totalSellingPrice shippingFee paymentMethod onlinePaymentStatus onlinePaidAt isCreatorOrder isExchangeOrder isReturnOrder exchangeCreditAmount bostaCollectedAmount'
+      )
+      .lean(),
+    Order.find({
+      paymentMethod: 'online',
+      $or: [
+        { onlinePaidAt: { $gte: from, $lte: to } },
+        { onlinePaidAt: { $exists: false }, placedAt: { $gte: from, $lte: to }, onlinePaymentStatus: 'paid' },
+      ],
+    })
+      .select('totalSellingPrice shippingFee onlinePaymentAmount onlinePaymentStatus')
+      .lean(),
+  ]);
+
+  let codExpected = 0;
+  let codCollectedOnDelivered = 0;
+  for (const order of codDelivered) {
+    const due = omsCodCollectAmount(order);
+    codExpected += due;
+    const got = Number(order.bostaCollectedAmount) || 0;
+    codCollectedOnDelivered += Math.min(got, due || got);
+  }
+  codExpected = roundMoney(codExpected);
+  codCollectedOnDelivered = roundMoney(codCollectedOnDelivered);
+
+  let onlineExpected = 0;
+  for (const order of onlinePaid) {
+    const paid = Number(order.onlinePaymentAmount);
+    if (Number.isFinite(paid) && paid > 0) onlineExpected += paid;
+    else onlineExpected += (Number(order.totalSellingPrice) || 0) + (Number(order.shippingFee) || 0);
+  }
+  onlineExpected = roundMoney(onlineExpected);
+
+  const codGot = roundMoney(codCollected?.amount ?? codCollectedOnDelivered);
+  const onlineGot = roundMoney(paymobReceived?.amount ?? 0);
+
+  const byMethod = {
+    cod: {
+      label: 'Cash on delivery (Bosta)',
+      expected: codExpected,
+      collected: codGot,
+      gap: roundMoney(codExpected - codGot),
+      expectedCount: codDelivered.length,
+      collectedCount: codCollected?.count ?? 0,
+    },
+    online: {
+      label: 'Online (Paymob)',
+      expected: onlineExpected,
+      collected: onlineGot,
+      gap: roundMoney(onlineExpected - onlineGot),
+      expectedCount: onlinePaid.length,
+      collectedCount: paymobReceived?.count ?? 0,
+    },
+  };
+
+  const expectedTotal = roundMoney(codExpected + onlineExpected);
+  const collectedTotal = roundMoney(codGot + onlineGot);
+
+  return {
+    byMethod,
+    totals: {
+      expected: expectedTotal,
+      collected: collectedTotal,
+      gap: roundMoney(expectedTotal - collectedTotal),
+      collectionRate: expectedTotal > 0 ? pct(collectedTotal, expectedTotal) : null,
+    },
+  };
+}
+
+/**
+ * Refund / return detail: gender, reason, days after delivery.
+ */
+async function refundsDetailForRange({ from, to }) {
+  const { resolveGender } = await import('../utils/gender.js');
+
+  const history = await OrderStatusHistory.find({
+    toStatus: 'returned_to_stock',
+    createdAt: { $gte: from, $lte: to },
+  })
+    .select('orderId createdAt')
+    .lean();
+
+  const ids = [...new Set(history.map((h) => String(h.orderId)))];
+  const refundAtByOrder = {};
+  for (const h of history) {
+    const id = String(h.orderId);
+    const t = new Date(h.createdAt).getTime();
+    if (!refundAtByOrder[id] || t < refundAtByOrder[id]) refundAtByOrder[id] = t;
+  }
+
+  const orders = ids.length
+    ? await Order.find({ _id: { $in: ids } })
+        .populate('customerId', 'fullName gender')
+        .select(
+          'shopifyOrderName shopifyOrderId paymentMethod totalSellingPrice shippingFee customerId shippingAddress isExchangeOrder isReturnOrder deliveredAt cancellationReason placedAt'
+        )
+        .lean()
+    : [];
+
+  const gender = { male: 0, female: 0, unknown: 0 };
+  const reason = { refund: 0, refused: 0, exchange: 0 };
+  const daySamples = [];
+  const buckets = {
+    'same-day': 0,
+    '1-3d': 0,
+    '4-7d': 0,
+    '8-14d': 0,
+    '15d+': 0,
+    'never-delivered': 0,
+  };
+  const rows = [];
+  let amount = 0;
+
+  for (const order of orders) {
+    const kind = classifyReturnKind(order);
+    reason[kind] = (reason[kind] || 0) + 1;
+    amount += Number(order.totalSellingPrice) || 0;
+
+    const name = order.customerId?.fullName || order.shippingAddress?.fullName || '';
+    const g = resolveGender(order.customerId?.gender, name);
+    gender[g] = (gender[g] || 0) + 1;
+
+    const refundAt = refundAtByOrder[String(order._id)]
+      ? new Date(refundAtByOrder[String(order._id)])
+      : null;
+    let daysAfter = null;
+    if (order.deliveredAt && refundAt) {
+      daysAfter = daysBetween(order.deliveredAt, refundAt);
+      if (daysAfter != null && daysAfter >= 0) {
+        daySamples.push(daysAfter);
+        if (daysAfter < 1) buckets['same-day'] += 1;
+        else if (daysAfter <= 3) buckets['1-3d'] += 1;
+        else if (daysAfter <= 7) buckets['4-7d'] += 1;
+        else if (daysAfter <= 14) buckets['8-14d'] += 1;
+        else buckets['15d+'] += 1;
+      }
+    } else {
+      buckets['never-delivered'] += 1;
+    }
+
+    rows.push({
+      orderId: String(order._id),
+      orderName: order.shopifyOrderName || order.shopifyOrderId || String(order._id),
+      gender: g,
+      reason: kind,
+      reasonLabel:
+        kind === 'exchange'
+          ? 'Exchange'
+          : kind === 'refund'
+            ? 'Refund / post-delivery return'
+            : 'Refused / failed (never delivered)',
+      daysAfterDelivery: daysAfter == null ? null : round1(daysAfter),
+      amount: Number(order.totalSellingPrice) || 0,
+      note: order.cancellationReason || null,
+      deliveredAt: order.deliveredAt || null,
+      returnedAt: refundAt,
+    });
+  }
+
+  daySamples.sort((a, b) => a - b);
+  const genderMix = mixFromCounts(gender);
+  const reasonMix = mixFromCounts(reason);
+
+  return {
+    count: orders.length,
+    amount: roundMoney(amount),
+    gender: {
+      ...genderMix,
+      malePercent: genderMix.male?.percent ?? 0,
+      femalePercent: genderMix.female?.percent ?? 0,
+      unknownPercent: genderMix.unknown?.percent ?? 0,
+    },
+    reason: {
+      ...reasonMix,
+      refundPercent: reasonMix.refund?.percent ?? 0,
+      refusedPercent: reasonMix.refused?.percent ?? 0,
+      exchangePercent: reasonMix.exchange?.percent ?? 0,
+    },
+    daysAfterDelivery: {
+      avg: daySamples.length
+        ? round1(daySamples.reduce((s, d) => s + d, 0) / daySamples.length)
+        : null,
+      median: daySamples.length ? round1(medianOf(daySamples)) : null,
+      sampleSize: daySamples.length,
+      buckets: Object.entries(buckets).map(([label, count]) => ({ label, count })),
+    },
+    rows: rows
+      .sort((a, b) => (b.returnedAt?.getTime?.() || 0) - (a.returnedAt?.getTime?.() || 0))
+      .slice(0, 40),
+  };
+}
+
+/**
+ * Exchange frequency by collected SKU / size (what customers send back).
+ */
+async function exchangeSkuStatsForRange({ from, to }) {
+  const exchanges = await Order.find({
+    isExchangeOrder: true,
+    placedAt: { $gte: from, $lte: to },
+  })
+    .select('bostaReturnItems items shopifyOrderName')
+    .lean();
+
+  const bySku = new Map();
+  const bySize = new Map();
+
+  for (const order of exchanges) {
+    const lines =
+      Array.isArray(order.bostaReturnItems) && order.bostaReturnItems.length
+        ? order.bostaReturnItems
+        : [];
+    for (const line of lines) {
+      const sku = String(line.sku || 'unknown').trim() || 'unknown';
+      const size =
+        line.size != null && String(line.size).trim() !== ''
+          ? String(line.size).trim()
+          : '—';
+      const qty = Number(line.quantity) || 1;
+      const key = `${sku}::${size}`;
+      const cur = bySku.get(key) || {
+        sku,
+        size,
+        color: line.color || '',
+        title: line.title || '',
+        quantity: 0,
+        exchangeOrders: 0,
+      };
+      cur.quantity += qty;
+      cur.exchangeOrders += 1;
+      bySku.set(key, cur);
+
+      const sizeRow = bySize.get(size) || { size, quantity: 0, exchangeOrders: 0 };
+      sizeRow.quantity += qty;
+      sizeRow.exchangeOrders += 1;
+      bySize.set(size, sizeRow);
+    }
+  }
+
+  const topSkus = [...bySku.values()].sort((a, b) => b.quantity - a.quantity).slice(0, 20);
+  const topSizes = [...bySize.values()].sort((a, b) => b.quantity - a.quantity).slice(0, 12);
+
+  return {
+    exchangeOrderCount: exchanges.length,
+    linesCollected: topSkus.reduce((s, r) => s + r.quantity, 0),
+    topSkus,
+    topSizes,
+  };
+}
+
 function mixFromCounts(counts) {
   const total = Object.values(counts).reduce((s, n) => s + n, 0);
   const shares = {};
@@ -902,16 +1258,27 @@ async function buildDashboardCore(range, preset) {
   };
 
   const cutoff = ordersPlacedCutoff();
-  const [ordersByStatus, deliveredLifetime, totalClosed, payment, warehouseReturns] = await Promise.all([
-    Order.aggregate([
-      { $match: { placedAt: { $gte: cutoff } } },
-      { $group: { _id: '$internalStatus', count: { $sum: 1 } } },
-    ]),
-    Order.countDocuments({ internalStatus: 'delivered', placedAt: { $gte: cutoff } }),
-    Order.countDocuments({ closedAt: { $exists: true }, placedAt: { $gte: cutoff } }),
-    orderRange.empty ? Promise.resolve(emptyPayment) : paymentSplitForRange(orderRange),
-    warehouseReturnsSnapshot(),
-  ]);
+  const [ordersByStatus, deliveredLifetime, totalClosed, payment, warehouseReturns, deliveryPerformance] =
+    await Promise.all([
+      Order.aggregate([
+        { $match: { placedAt: { $gte: cutoff } } },
+        { $group: { _id: '$internalStatus', count: { $sum: 1 } } },
+      ]),
+      Order.countDocuments({ internalStatus: 'delivered', placedAt: { $gte: cutoff } }),
+      Order.countDocuments({ closedAt: { $exists: true }, placedAt: { $gte: cutoff } }),
+      orderRange.empty ? Promise.resolve(emptyPayment) : paymentSplitForRange(orderRange),
+      warehouseReturnsSnapshot(),
+      orderRange.empty
+        ? Promise.resolve({
+            successRate: null,
+            delivered: 0,
+            failed: 0,
+            refused: 0,
+            attempted: 0,
+            transit: { avgHours: null, medianHours: null, p90Hours: null, avgDays: null, medianDays: null, sampleSize: 0 },
+          })
+        : deliveryPerformanceForRange(orderRange),
+    ]);
 
   const statusMap = Object.fromEntries(ordersByStatus.map((s) => [s._id, s.count]));
   const deliverySuccessRate =
@@ -922,6 +1289,7 @@ async function buildDashboardCore(range, preset) {
   return {
     ordersByStatus: statusMap,
     deliverySuccessRate,
+    deliveryPerformance,
     deliveredCount: deliveredLifetime,
     totalClosed,
     range: {
@@ -953,6 +1321,11 @@ async function buildDashboardMoney(range) {
       gazelleReturnCountForRange(range),
     ]);
 
+  const moneyCollected = await moneyCollectedVsExpectedForRange(range, {
+    paymobReceived,
+    codCollected,
+  });
+
   const returnCount = bostaReturns.count ?? 0;
   const returns = {
     amount: bostaReturns.amount ?? 0,
@@ -971,6 +1344,7 @@ async function buildDashboardMoney(range) {
     paymobReceived,
     codCollected,
     leftToCollect,
+    moneyCollected,
     returns,
     returnRate,
     returnRateBasis: {
@@ -995,24 +1369,41 @@ async function buildDashboardSummary(range, preset) {
 
 async function buildDashboardDetails(range) {
   const orderRange = ordersMetricsRange(range);
-  const [dailyBreakdown, topProducts, orderMix, returnsAnalytics, warehouseByKind] = await Promise.all([
-    orderRange.empty ? Promise.resolve([]) : dailyBreakdownForRange(orderRange),
-    orderRange.empty ? Promise.resolve([]) : topProductsForRange(orderRange),
-    orderRange.empty
-      ? Promise.resolve({
-          payment: { codPercent: 0, onlinePercent: 0 },
-          channel: { chatPercent: 0, onlineStorePercent: 0 },
-        })
-      : orderMixForRange(orderRange),
-    returnsAnalyticsForRange(range),
-    warehouseConfirmsByKind(range),
-  ]);
+  const emptyRange = Boolean(orderRange.empty);
+  const [dailyBreakdown, topProducts, orderMix, returnsAnalytics, warehouseByKind, refundsDetail, exchangeStats] =
+    await Promise.all([
+      emptyRange ? Promise.resolve([]) : dailyBreakdownForRange(orderRange),
+      emptyRange ? Promise.resolve([]) : topProductsForRange(orderRange),
+      emptyRange
+        ? Promise.resolve({
+            payment: { codPercent: 0, onlinePercent: 0 },
+            channel: { chatPercent: 0, onlineStorePercent: 0 },
+          })
+        : orderMixForRange(orderRange),
+      returnsAnalyticsForRange(range),
+      warehouseConfirmsByKind(range),
+      emptyRange
+        ? Promise.resolve({
+            count: 0,
+            amount: 0,
+            gender: { total: 0 },
+            reason: { total: 0 },
+            daysAfterDelivery: { avg: null, median: null, sampleSize: 0, buckets: [] },
+            rows: [],
+          })
+        : refundsDetailForRange(orderRange),
+      emptyRange
+        ? Promise.resolve({ exchangeOrderCount: 0, linesCollected: 0, topSkus: [], topSizes: [] })
+        : exchangeSkuStatsForRange(orderRange),
+    ]);
 
   return {
     dailyBreakdown,
     orderMix,
     returnsAnalytics,
     warehouseByKind,
+    refundsDetail,
+    exchangeStats,
     returns: {
       amount: returnsAnalytics.amount ?? 0,
       count: returnsAnalytics.count ?? 0,
