@@ -1440,7 +1440,8 @@ async function buildDashboardMoney(range) {
     codLeftToCollect(range),
     bostaReturnCountForRange(range),
     deliveredCountForRange(range),
-    gazelleReturnCountForRange(range),
+    // Warehouse confirms split by kind — covers both Bosta AND local shipping returns
+    warehouseConfirmsByKind(range),
   ]);
 
   const [
@@ -1449,17 +1450,16 @@ async function buildDashboardMoney(range) {
     leftToCollect,
     bostaReturns,
     deliveredInRange,
-    gazelleReturnCount,
+    warehouseByKind,
   ] = settled.map((r, idx) => {
     if (r.status === 'fulfilled') return r.value;
     logger.warn({ err: r.reason?.message || r.reason, idx }, 'Dashboard money provider failed');
-    // Safe defaults so the whole endpoint never fails.
     if (idx === 0) return { amount: 0, count: 0, source: 'paymob', real: false };
     if (idx === 1) return { amount: 0, count: 0, source: 'bosta_cod', real: false };
     if (idx === 2) return { amount: 0, count: 0, source: 'oms_open_cod_in_range', real: false };
     if (idx === 3) return { count: 0, accountCount: 0, amount: 0, linkedCount: 0, linkedRtoCount: 0, source: 'bosta' };
     if (idx === 4) return 0;
-    return 0;
+    return { total: 0, refund: 0, refused: 0, exchange: 0 };
   });
 
   const moneyCollected = await moneyCollectedVsExpectedForRange(range, {
@@ -1467,19 +1467,30 @@ async function buildDashboardMoney(range) {
     codCollected,
   });
 
-  const returnCount = bostaReturns.count ?? 0;
+  // Refund count = warehouse-confirmed returns that are pure refunds or refused-at-door.
+  // Excludes exchanges — they are tracked separately in the exchanges analytics page.
+  // Uses warehouseConfirmsByKind which covers BOTH Bosta and local shipping channels.
+  const refundCount = (warehouseByKind.refund ?? 0) + (warehouseByKind.refused ?? 0);
+  const exchangeConfirmedCount = warehouseByKind.exchange ?? 0;
+  const totalWarehouseConfirms = warehouseByKind.total ?? (refundCount + exchangeConfirmedCount);
+
   const returns = {
     amount: bostaReturns.amount ?? 0,
-    count: returnCount,
-    bostaCount: returnCount,
-    accountCount: bostaReturns.accountCount ?? returnCount,
+    count: totalWarehouseConfirms,
+    refundCount,
+    exchangeCount: exchangeConfirmedCount,
+    bostaCount: bostaReturns.count ?? 0,
+    accountCount: bostaReturns.accountCount ?? bostaReturns.count ?? 0,
     bostaAmount: bostaReturns.amount ?? 0,
     byType: {},
-    gazelleCount: gazelleReturnCount,
   };
 
-  const returnRate =
-    deliveredInRange > 0 ? pct(returnCount, deliveredInRange) : null;
+  // Refund rate = confirmed refunds (not exchanges) ÷ delivered.
+  const refundRate =
+    deliveredInRange > 0 ? pct(refundCount, deliveredInRange) : null;
+
+  // Legacy alias so existing consumers that read returnRate don't break.
+  const returnRate = refundRate;
 
   return {
     paymobReceived,
@@ -1488,13 +1499,15 @@ async function buildDashboardMoney(range) {
     moneyCollected,
     returns,
     returnRate,
+    refundRate,
     returnRateBasis: {
-      returns: returnCount,
+      refunds: refundCount,
+      exchanges: exchangeConfirmedCount,
+      warehouseTotal: totalWarehouseConfirms,
       orders: deliveredInRange,
       delivered: deliveredInRange,
-      accountReturns: bostaReturns.accountCount ?? returnCount,
-      warehouseConfirms: gazelleReturnCount,
-      source: 'bosta_linked',
+      bostaLinked: bostaReturns.count ?? 0,
+      source: 'warehouse_confirms',
       real: true,
     },
   };
