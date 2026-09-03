@@ -679,7 +679,15 @@ function daysBetween(from, to) {
  * Success = delivered ÷ (delivered + failed + refused/RTO returns).
  */
 async function deliveryPerformanceForRange({ from, to }) {
-  const [delivered, failed, refusedReturns, transitOrders] = await Promise.all([
+  const [
+    delivered,
+    failed,
+    refusedReturns,
+    transitOrders,
+    deliveredByZone,
+    failedByZone,
+    refusedByZone,
+  ] = await Promise.all([
     Order.countDocuments({
       internalStatus: 'delivered',
       deliveredAt: { $gte: from, $lte: to },
@@ -704,10 +712,87 @@ async function deliveryPerformanceForRange({ from, to }) {
     })
       .select('placedAt deliveredAt')
       .lean(),
+    Order.aggregate([
+      {
+        $match: {
+          internalStatus: 'delivered',
+          deliveredAt: { $gte: from, $lte: to },
+        },
+      },
+      {
+        $group: {
+          _id: { $ifNull: ['$shippingAddress.zone', '—'] },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+    Order.aggregate([
+      {
+        $match: {
+          internalStatus: 'failed_delivery',
+          lastStatusUpdateAt: { $gte: from, $lte: to },
+        },
+      },
+      {
+        $group: {
+          _id: { $ifNull: ['$shippingAddress.zone', '—'] },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+    Order.aggregate([
+      {
+        $match: {
+          isExchangeOrder: { $ne: true },
+          isReturnOrder: { $ne: true },
+          deliveredAt: { $exists: false },
+          internalStatus: {
+            $in: ['returning_to_origin', 'returned_awaiting_receipt', 'returned_to_stock', 'back_from_local_shipping'],
+          },
+          lastStatusUpdateAt: { $gte: from, $lte: to },
+        },
+      },
+      {
+        $group: {
+          _id: { $ifNull: ['$shippingAddress.zone', '—'] },
+          count: { $sum: 1 },
+        },
+      },
+    ]),
   ]);
 
   const attempted = delivered + failed + refusedReturns;
   const successRate = attempted > 0 ? pct(delivered, attempted) : null;
+
+  const byZoneMap = new Map();
+  for (const row of deliveredByZone || []) {
+    const zone = row?._id || '—';
+    byZoneMap.set(zone, { zone, delivered: row.count || 0, failed: 0, refused: 0 });
+  }
+  for (const row of failedByZone || []) {
+    const zone = row?._id || '—';
+    const cur = byZoneMap.get(zone) || { zone, delivered: 0, failed: 0, refused: 0 };
+    cur.failed = row.count || 0;
+    byZoneMap.set(zone, cur);
+  }
+  for (const row of refusedByZone || []) {
+    const zone = row?._id || '—';
+    const cur = byZoneMap.get(zone) || { zone, delivered: 0, failed: 0, refused: 0 };
+    cur.refused = row.count || 0;
+    byZoneMap.set(zone, cur);
+  }
+
+  const byZone = [...byZoneMap.values()]
+    .map((z) => {
+      const attempt = z.delivered + z.failed + z.refused;
+      return {
+        ...z,
+        attempted: attempt,
+        successRate: attempt > 0 ? pct(z.delivered, attempt) : null,
+      };
+    })
+    .sort((a, b) => b.attempted - a.attempted)
+    .slice(0, 10);
 
   const hours = transitOrders
     .map((o) => hoursBetween(o.placedAt, o.deliveredAt))
@@ -735,6 +820,7 @@ async function deliveryPerformanceForRange({ from, to }) {
       medianDays: medianHours == null ? null : round1(medianHours / 24),
       sampleSize: hours.length,
     },
+    byZone,
   };
 }
 
@@ -847,13 +933,33 @@ async function refundsDetailForRange({ from, to }) {
     ? await Order.find({ _id: { $in: ids } })
         .populate('customerId', 'fullName gender')
         .select(
-          'shopifyOrderName shopifyOrderId paymentMethod totalSellingPrice shippingFee customerId shippingAddress isExchangeOrder isReturnOrder deliveredAt cancellationReason placedAt'
+          'shopifyOrderName shopifyOrderId paymentMethod totalSellingPrice shippingFee customerId shippingAddress isExchangeOrder isReturnOrder deliveredAt cancellationReason placedAt returnReason returnReasonNote'
         )
         .lean()
     : [];
 
   const gender = { male: 0, female: 0, unknown: 0 };
   const reason = { refund: 0, refused: 0, exchange: 0 };
+  const returnReasons = {
+    sizing_fit: 0,
+    product_issue: 0,
+    wrong_item: 0,
+    changed_mind: 0,
+    delivery_issue: 0,
+    refused_at_door: 0,
+    other: 0,
+    unclassified: 0,
+  };
+  const RETURN_REASON_LABELS = {
+    sizing_fit: 'Sizing / fit',
+    product_issue: 'Product issue',
+    wrong_item: 'Wrong item',
+    changed_mind: 'Changed mind',
+    delivery_issue: 'Delivery issue',
+    refused_at_door: 'Refused at door',
+    other: 'Other',
+    unclassified: 'Historic / unclassified',
+  };
   const daySamples = [];
   const buckets = {
     'same-day': 0,
@@ -870,6 +976,9 @@ async function refundsDetailForRange({ from, to }) {
     const kind = classifyReturnKind(order);
     reason[kind] = (reason[kind] || 0) + 1;
     amount += Number(order.totalSellingPrice) || 0;
+
+    const rrKey = order.returnReason && RETURN_REASON_LABELS[order.returnReason] ? order.returnReason : 'unclassified';
+    returnReasons[rrKey] = (returnReasons[rrKey] || 0) + 1;
 
     const name = order.customerId?.fullName || order.shippingAddress?.fullName || '';
     const g = resolveGender(order.customerId?.gender, name);
@@ -898,6 +1007,8 @@ async function refundsDetailForRange({ from, to }) {
       orderName: order.shopifyOrderName || order.shopifyOrderId || String(order._id),
       gender: g,
       reason: kind,
+      returnReason: rrKey,
+      returnReasonLabel: RETURN_REASON_LABELS[rrKey],
       reasonLabel:
         kind === 'exchange'
           ? 'Exchange'
@@ -906,7 +1017,7 @@ async function refundsDetailForRange({ from, to }) {
             : 'Refused / failed (never delivered)',
       daysAfterDelivery: daysAfter == null ? null : round1(daysAfter),
       amount: Number(order.totalSellingPrice) || 0,
-      note: order.cancellationReason || null,
+      note: order.returnReasonNote || order.cancellationReason || null,
       deliveredAt: order.deliveredAt || null,
       returnedAt: refundAt,
     });
@@ -915,6 +1026,7 @@ async function refundsDetailForRange({ from, to }) {
   daySamples.sort((a, b) => a - b);
   const genderMix = mixFromCounts(gender);
   const reasonMix = mixFromCounts(reason);
+  const returnReasonMix = mixFromCounts(returnReasons);
 
   return {
     count: orders.length,
@@ -930,6 +1042,11 @@ async function refundsDetailForRange({ from, to }) {
       refundPercent: reasonMix.refund?.percent ?? 0,
       refusedPercent: reasonMix.refused?.percent ?? 0,
       exchangePercent: reasonMix.exchange?.percent ?? 0,
+    },
+    returnReasons: {
+      ...returnReasonMix,
+      // convenient mirrors for common UI labels
+      sizingFitPercent: returnReasonMix.sizing_fit?.percent ?? 0,
     },
     daysAfterDelivery: {
       avg: daySamples.length
@@ -991,12 +1108,18 @@ async function exchangeSkuStatsForRange({ from, to }) {
     }
   }
 
-  const topSkus = [...bySku.values()].sort((a, b) => b.quantity - a.quantity).slice(0, 20);
-  const topSizes = [...bySize.values()].sort((a, b) => b.quantity - a.quantity).slice(0, 12);
+  const allSkus = [...bySku.values()];
+  const allSizes = [...bySize.values()];
+
+  // `linesCollected` must include every exchange line, not only the top rows we display.
+  const linesCollected = allSkus.reduce((s, r) => s + (Number(r.quantity) || 0), 0);
+
+  const topSkus = allSkus.sort((a, b) => b.quantity - a.quantity).slice(0, 20);
+  const topSizes = allSizes.sort((a, b) => b.quantity - a.quantity).slice(0, 12);
 
   return {
     exchangeOrderCount: exchanges.length,
-    linesCollected: topSkus.reduce((s, r) => s + r.quantity, 0),
+    linesCollected,
     topSkus,
     topSizes,
   };
@@ -1311,15 +1434,33 @@ async function buildDashboardCore(range, preset) {
 }
 
 async function buildDashboardMoney(range) {
-  const [paymobReceived, codCollected, leftToCollect, bostaReturns, deliveredInRange, gazelleReturnCount] =
-    await Promise.all([
-      paymobReceivedForRange(range),
-      codCollectedForRange(range),
-      codLeftToCollect(range),
-      bostaReturnCountForRange(range),
-      deliveredCountForRange(range),
-      gazelleReturnCountForRange(range),
-    ]);
+  const settled = await Promise.allSettled([
+    paymobReceivedForRange(range),
+    codCollectedForRange(range),
+    codLeftToCollect(range),
+    bostaReturnCountForRange(range),
+    deliveredCountForRange(range),
+    gazelleReturnCountForRange(range),
+  ]);
+
+  const [
+    paymobReceived,
+    codCollected,
+    leftToCollect,
+    bostaReturns,
+    deliveredInRange,
+    gazelleReturnCount,
+  ] = settled.map((r, idx) => {
+    if (r.status === 'fulfilled') return r.value;
+    logger.warn({ err: r.reason?.message || r.reason, idx }, 'Dashboard money provider failed');
+    // Safe defaults so the whole endpoint never fails.
+    if (idx === 0) return { amount: 0, count: 0, source: 'paymob', real: false };
+    if (idx === 1) return { amount: 0, count: 0, source: 'bosta_cod', real: false };
+    if (idx === 2) return { amount: 0, count: 0, source: 'oms_open_cod_in_range', real: false };
+    if (idx === 3) return { count: 0, accountCount: 0, amount: 0, linkedCount: 0, linkedRtoCount: 0, source: 'bosta' };
+    if (idx === 4) return 0;
+    return 0;
+  });
 
   const moneyCollected = await moneyCollectedVsExpectedForRange(range, {
     paymobReceived,
@@ -1370,32 +1511,47 @@ async function buildDashboardSummary(range, preset) {
 async function buildDashboardDetails(range) {
   const orderRange = ordersMetricsRange(range);
   const emptyRange = Boolean(orderRange.empty);
+  const settled = await Promise.allSettled([
+    emptyRange ? Promise.resolve([]) : dailyBreakdownForRange(orderRange),
+    emptyRange ? Promise.resolve([]) : topProductsForRange(orderRange),
+    emptyRange
+      ? Promise.resolve({
+          payment: { codPercent: 0, onlinePercent: 0 },
+          channel: { chatPercent: 0, onlineStorePercent: 0 },
+        })
+      : orderMixForRange(orderRange),
+    returnsAnalyticsForRange(range),
+    warehouseConfirmsByKind(range),
+    emptyRange
+      ? Promise.resolve({
+          count: 0,
+          amount: 0,
+          gender: { total: 0 },
+          reason: { total: 0 },
+          daysAfterDelivery: { avg: null, median: null, sampleSize: 0, buckets: [] },
+          rows: [],
+        })
+      : refundsDetailForRange(orderRange),
+    emptyRange
+      ? Promise.resolve({ exchangeOrderCount: 0, linesCollected: 0, topSkus: [], topSizes: [] })
+      : exchangeSkuStatsForRange(orderRange),
+  ]);
+
   const [dailyBreakdown, topProducts, orderMix, returnsAnalytics, warehouseByKind, refundsDetail, exchangeStats] =
-    await Promise.all([
-      emptyRange ? Promise.resolve([]) : dailyBreakdownForRange(orderRange),
-      emptyRange ? Promise.resolve([]) : topProductsForRange(orderRange),
-      emptyRange
-        ? Promise.resolve({
-            payment: { codPercent: 0, onlinePercent: 0 },
-            channel: { chatPercent: 0, onlineStorePercent: 0 },
-          })
-        : orderMixForRange(orderRange),
-      returnsAnalyticsForRange(range),
-      warehouseConfirmsByKind(range),
-      emptyRange
-        ? Promise.resolve({
-            count: 0,
-            amount: 0,
-            gender: { total: 0 },
-            reason: { total: 0 },
-            daysAfterDelivery: { avg: null, median: null, sampleSize: 0, buckets: [] },
-            rows: [],
-          })
-        : refundsDetailForRange(orderRange),
-      emptyRange
-        ? Promise.resolve({ exchangeOrderCount: 0, linesCollected: 0, topSkus: [], topSizes: [] })
-        : exchangeSkuStatsForRange(orderRange),
-    ]);
+    settled.map((r, idx) => {
+      if (r.status === 'fulfilled') return r.value;
+      logger.warn({ err: r.reason?.message || r.reason, idx }, 'Dashboard details provider failed');
+      if (idx === 0) return [];
+      if (idx === 1) return [];
+      if (idx === 2)
+        return { payment: { codPercent: 0, onlinePercent: 0 }, channel: { chatPercent: 0, onlineStorePercent: 0 } };
+      if (idx === 3)
+        return { count: 0, amount: 0, source: 'none', payment: { cod: { count: 0, percent: 0 }, online: { count: 0, percent: 0 } }, gender: { male: { count: 0, percent: 0 }, female: { count: 0, percent: 0 }, unknown: { count: 0, percent: 0 } }, byType: {} };
+      if (idx === 4) return { total: 0, refused: 0, exchange: 0, refund: 0 };
+      if (idx === 5)
+        return { count: 0, amount: 0, gender: { total: 0 }, reason: { total: 0 }, daysAfterDelivery: { avg: null, median: null, sampleSize: 0, buckets: [] }, rows: [] };
+      return { exchangeOrderCount: 0, linesCollected: 0, topSkus: [], topSizes: [] };
+    });
 
   return {
     dailyBreakdown,

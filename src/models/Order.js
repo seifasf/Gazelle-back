@@ -115,6 +115,25 @@ const orderSchema = new mongoose.Schema(
     discountAmount: { type: Number, min: 0, default: 0 },
     totalCogsSnapshot: { type: Number, min: 0 },
     cancellationReason: String,
+    /**
+     * Structured reason captured when a customer return/refund is confirmed into warehouse.
+     * Used by OMS analytics (return reason distribution). Historic data may be undefined.
+     */
+    returnReason: {
+      type: String,
+      enum: [
+        'sizing_fit',
+        'product_issue',
+        'wrong_item',
+        'changed_mind',
+        'delivery_issue',
+        'refused_at_door',
+        'other',
+      ],
+      default: null,
+      index: true,
+    },
+    returnReasonNote: { type: String, maxlength: 500 },
     isCreatorOrder: { type: Boolean, default: false },
     /** Manual exchange shipment against a previous order — Bosta type EXCHANGE. */
     isExchangeOrder: { type: Boolean, default: false, index: true },

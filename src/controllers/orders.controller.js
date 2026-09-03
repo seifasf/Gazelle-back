@@ -181,10 +181,30 @@ export async function cancelOrder(req, res, next) {
 
 export async function confirmReturn(req, res, next) {
   try {
+    const { returnReason, returnReasonNote } = req.body || {};
+    const allowed = new Set([
+      'sizing_fit',
+      'product_issue',
+      'wrong_item',
+      'changed_mind',
+      'delivery_issue',
+      'refused_at_door',
+      'other',
+    ]);
+    if (!returnReason || typeof returnReason !== 'string' || !allowed.has(returnReason)) {
+      const err = new Error('A valid returnReason is required');
+      err.statusCode = 400;
+      throw err;
+    }
+    const note = req.body.note;
     const order = await orderService.confirmReturnedToStock(
       req.params.id,
       req.user._id,
-      req.body.note
+      {
+        note,
+        returnReason,
+        returnReasonNote,
+      }
     );
     res.json({ data: order });
   } catch (err) {

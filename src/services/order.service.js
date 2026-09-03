@@ -1071,7 +1071,11 @@ export async function returnLocalShippingToStock(orderId, actorUserId, { note, i
   });
 }
 
-export async function confirmReturnedToStock(orderId, actorUserId, note) {
+export async function confirmReturnedToStock(
+  orderId,
+  actorUserId,
+  { note, returnReason, returnReasonNote } = {}
+) {
   const result = await withTransaction(async (session) => {
     const order = await Order.findById(orderId).session(session);
     if (!order) {
@@ -1086,6 +1090,12 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
       );
       err.statusCode = 400;
       throw err;
+    }
+
+    // Persist the structured reason for analytics.
+    if (returnReason) order.returnReason = returnReason;
+    if (typeof returnReasonNote === 'string') {
+      order.returnReasonNote = returnReasonNote.trim().slice(0, 500);
     }
 
     /**
@@ -1150,7 +1160,7 @@ export async function confirmReturnedToStock(orderId, actorUserId, note) {
 
       if (skipCollectRestock) {
         confirmNote =
-          note ||
+      note ||
           `Exception: factory-broken collect not restocked (${fmtLines(collectLines)})`;
       } else if (actions.applyCollectPlusReal && (actions.applyOutboundHold || actions.applyOutboundRestock)) {
         confirmNote =
