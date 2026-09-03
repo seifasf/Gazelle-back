@@ -1381,7 +1381,7 @@ async function buildDashboardCore(range, preset) {
   };
 
   const cutoff = ordersPlacedCutoff();
-  const [ordersByStatus, deliveredLifetime, totalClosed, payment, warehouseReturns, deliveryPerformance] =
+  const [ordersByStatus, deliveredLifetime, totalClosed, payment, warehouseReturns, deliveryPerformance, localShipping] =
     await Promise.all([
       Order.aggregate([
         { $match: { placedAt: { $gte: cutoff } } },
@@ -1401,6 +1401,63 @@ async function buildDashboardCore(range, preset) {
             transit: { avgHours: null, medianHours: null, p90Hours: null, avgDays: null, medianDays: null, sampleSize: 0 },
           })
         : deliveryPerformanceForRange(orderRange),
+      orderRange.empty
+        ? Promise.resolve({ total: 0, delivered: 0, returned: 0, active: 0 })
+        : Order.aggregate([
+            {
+              $match: {
+                shippingMethod: 'local_shipping',
+                placedAt: { $gte: orderRange.from, $lte: orderRange.to },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                total: { $sum: 1 },
+                delivered: {
+                  $sum: { $cond: [{ $eq: ['$internalStatus', 'delivered'] }, 1, 0] },
+                },
+                returned: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $in: [
+                          '$internalStatus',
+                          [
+                            'returning_to_origin',
+                            'returned_awaiting_receipt',
+                            'returned_to_stock',
+                            'back_from_local_shipping',
+                          ],
+                        ],
+                      },
+                      1,
+                      0,
+                    ],
+                  },
+                },
+                active: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $in: [
+                          '$internalStatus',
+                          [
+                            'awaiting_bosta_pickup',
+                            'picked_up_by_bosta',
+                            'local_shipping',
+                            'in_transit',
+                          ],
+                        ],
+                      },
+                      1,
+                      0,
+                    ],
+                  },
+                },
+              },
+            },
+          ]).then(([row]) => row || { total: 0, delivered: 0, returned: 0, active: 0 }),
     ]);
 
   const statusMap = Object.fromEntries(ordersByStatus.map((s) => [s._id, s.count]));
@@ -1430,6 +1487,7 @@ async function buildDashboardCore(range, preset) {
     revenueToday: revenueExclShipping,
     revenueCustom: revenueExclShipping,
     warehouseReturns,
+    localShipping,
   };
 }
 
