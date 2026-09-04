@@ -605,6 +605,7 @@ async function topProductsForRange({ from, to, limit = 8 }) {
       $group: {
         _id: '$items.sku',
         sku: { $first: '$items.sku' },
+        name: { $first: { $ifNull: ['$items.title', '$items.sku'] } },
         revenue: { $sum: { $multiply: ['$items.unitSellingPrice', '$items.quantity'] } },
         cogs: { $sum: { $multiply: ['$unitCogsSafe', '$items.quantity'] } },
         quantity: { $sum: '$items.quantity' },
@@ -616,7 +617,12 @@ async function topProductsForRange({ from, to, limit = 8 }) {
   ];
 
   const rows = await Order.aggregate(pipeline);
-  return rows;
+  return rows.map((row) => ({
+    ...row,
+    revenue: roundMoney(row.revenue),
+    cogs: roundMoney(row.cogs),
+    margin: roundMoney(row.margin),
+  }));
 }
 
 async function employeeKpisForRange({ from, to, limit = 10 }) {
@@ -940,6 +946,11 @@ async function refundsDetailForRange({ from, to }) {
 
   const gender = { male: 0, female: 0, unknown: 0 };
   const reason = { refund: 0, refused: 0, exchange: 0 };
+  const kindTotals = {
+    refund: { count: 0, amount: 0 },
+    refused: { count: 0, amount: 0 },
+    exchange: { count: 0, amount: 0 },
+  };
   const returnReasons = {
     sizing_fit: 0,
     product_issue: 0,
@@ -975,7 +986,10 @@ async function refundsDetailForRange({ from, to }) {
   for (const order of orders) {
     const kind = classifyReturnKind(order);
     reason[kind] = (reason[kind] || 0) + 1;
-    amount += Number(order.totalSellingPrice) || 0;
+    const orderAmount = Number(order.totalSellingPrice) || 0;
+    amount += orderAmount;
+    kindTotals[kind].count += 1;
+    kindTotals[kind].amount += orderAmount;
 
     const rrKey = order.returnReason && RETURN_REASON_LABELS[order.returnReason] ? order.returnReason : 'unclassified';
     returnReasons[rrKey] = (returnReasons[rrKey] || 0) + 1;
@@ -1042,6 +1056,11 @@ async function refundsDetailForRange({ from, to }) {
       refundPercent: reasonMix.refund?.percent ?? 0,
       refusedPercent: reasonMix.refused?.percent ?? 0,
       exchangePercent: reasonMix.exchange?.percent ?? 0,
+    },
+    kindTotals: {
+      refund: { ...kindTotals.refund, amount: roundMoney(kindTotals.refund.amount) },
+      refused: { ...kindTotals.refused, amount: roundMoney(kindTotals.refused.amount) },
+      exchange: { ...kindTotals.exchange, amount: roundMoney(kindTotals.exchange.amount) },
     },
     returnReasons: {
       ...returnReasonMix,
@@ -1381,7 +1400,7 @@ async function buildDashboardCore(range, preset) {
   };
 
   const cutoff = ordersPlacedCutoff();
-  const [ordersByStatus, deliveredLifetime, totalClosed, payment, warehouseReturns, deliveryPerformance, localShipping] =
+  const [ordersByStatus, deliveredLifetime, totalClosed, payment, warehouseReturns, deliveryPerformance, localShipping, commercialPipeline] =
     await Promise.all([
       Order.aggregate([
         { $match: { placedAt: { $gte: cutoff } } },
@@ -1458,6 +1477,113 @@ async function buildDashboardCore(range, preset) {
               },
             },
           ]).then(([row]) => row || { total: 0, delivered: 0, returned: 0, active: 0 }),
+      orderRange.empty
+        ? Promise.resolve({
+            shopifyBooked: { count: 0, amount: 0 },
+            verifiedAndShipped: { count: 0, amount: 0 },
+            delivered: { count: 0, amount: 0 },
+          })
+        : Order.aggregate([
+            // Cohort = OMS orders placed in the selected range (not Shopify dashboard totals).
+            { $match: { placedAt: { $gte: orderRange.from, $lte: orderRange.to } } },
+            {
+              $addFields: {
+                orderValue: {
+                  $add: [
+                    { $ifNull: ['$totalSellingPrice', 0] },
+                    { $ifNull: ['$shippingFee', 0] },
+                  ],
+                },
+                merchandiseValue: { $ifNull: ['$totalSellingPrice', 0] },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                shopifyBookedCount: {
+                  $sum: { $cond: [{ $eq: ['$orderSource', 'shopify'] }, 1, 0] },
+                },
+                shopifyBookedAmount: {
+                  $sum: { $cond: [{ $eq: ['$orderSource', 'shopify'] }, '$orderValue', 0] },
+                },
+                // Verified + shipped (or beyond): left pending and actually entered fulfillment/shipping.
+                // Includes delivered / RTO so historical custom ranges stay correct.
+                verifiedAndShippedCount: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $in: [
+                          '$internalStatus',
+                          [
+                            'verified_ready_for_shipping',
+                            'awaiting_bosta_pickup',
+                            'picked_up_by_bosta',
+                            'local_shipping',
+                            'in_transit',
+                            'delivered',
+                            'failed_delivery',
+                            'returning_to_origin',
+                            'returned_awaiting_receipt',
+                            'returned_to_stock',
+                            'back_from_local_shipping',
+                          ],
+                        ],
+                      },
+                      1,
+                      0,
+                    ],
+                  },
+                },
+                verifiedAndShippedAmount: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $in: [
+                          '$internalStatus',
+                          [
+                            'verified_ready_for_shipping',
+                            'awaiting_bosta_pickup',
+                            'picked_up_by_bosta',
+                            'local_shipping',
+                            'in_transit',
+                            'delivered',
+                            'failed_delivery',
+                            'returning_to_origin',
+                            'returned_awaiting_receipt',
+                            'returned_to_stock',
+                            'back_from_local_shipping',
+                          ],
+                        ],
+                      },
+                      '$orderValue',
+                      0,
+                    ],
+                  },
+                },
+                deliveredCount: {
+                  $sum: { $cond: [{ $eq: ['$internalStatus', 'delivered'] }, 1, 0] },
+                },
+                deliveredAmount: {
+                  $sum: {
+                    $cond: [{ $eq: ['$internalStatus', 'delivered'] }, '$merchandiseValue', 0],
+                  },
+                },
+              },
+            },
+          ]).then(([row]) => ({
+            shopifyBooked: {
+              count: row?.shopifyBookedCount ?? 0,
+              amount: roundMoney(row?.shopifyBookedAmount ?? 0),
+            },
+            verifiedAndShipped: {
+              count: row?.verifiedAndShippedCount ?? 0,
+              amount: roundMoney(row?.verifiedAndShippedAmount ?? 0),
+            },
+            delivered: {
+              count: row?.deliveredCount ?? 0,
+              amount: roundMoney(row?.deliveredAmount ?? 0),
+            },
+          })),
     ]);
 
   const statusMap = Object.fromEntries(ordersByStatus.map((s) => [s._id, s.count]));
@@ -1488,6 +1614,7 @@ async function buildDashboardCore(range, preset) {
     revenueCustom: revenueExclShipping,
     warehouseReturns,
     localShipping,
+    commercialPipeline,
   };
 }
 
