@@ -356,6 +356,16 @@ export async function processBostaStatusUpdate({ deliveryId, state, payload, not
         await order.save();
       }
     }
+
+    try {
+      const { parseBostaFeeBreakdownFromDelivery } = await import('./pricing.service.js');
+      const feeBreakdown = parseBostaFeeBreakdownFromDelivery(payload);
+      if (feeBreakdown?.total > 0) {
+        order.bostaFeeBreakdown = feeBreakdown;
+        order.bostaCourierFee = feeBreakdown.total;
+        await order.save();
+      }
+    } catch (_) {}
   }
 
   if (order.internalStatus === internalStatus) {

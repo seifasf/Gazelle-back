@@ -16,6 +16,7 @@ import {
   mapShopifyShippingFee,
   applyShopifyMoneyFields,
   isShopifyOrderPaid,
+  isShopifyOrderPickup,
 } from '../integrations/shopify/orderMoney.js';
 import { isCodFeeLine, shopifyMerchandiseTotal } from '../utils/shopifyPaymentIncentives.js';
 import {
@@ -28,19 +29,24 @@ import {
   isPlaceholderStreet,
 } from '../utils/shopifyShippingAddress.js';
 
-export { mapShopifyPaymentMethod, mapShopifyShippingFee };
+export { mapShopifyPaymentMethod, mapShopifyShippingFee, isShopifyOrderPickup };
 
 /**
  * Webhooks on Basic/unapproved apps often omit PII. After switching to an
  * approved Partner app token, Admin GraphQL can still return name/phone/street
  * — backfill placeholders so OMS does not stay on "Address not available".
+ * Also enriches fulfillmentOrders so pickup method can be detected reliably.
  */
 async function enrichContactFromShopifyGraphql(payload, shippingAddress) {
   const needsName = isPlaceholderCustomerName(shippingAddress?.fullName);
   const needsPhone = isPlaceholderPhone(shippingAddress?.phone);
   const needsStreet = isPlaceholderStreet(shippingAddress?.line1);
   const needsCity = !String(shippingAddress?.city || '').trim() || shippingAddress?.city === 'Unknown';
-  if (!needsName && !needsPhone && !needsStreet && !needsCity) return shippingAddress;
+  const hasPickupHint = isShopifyOrderPickup(payload);
+
+  if (!needsName && !needsPhone && !needsStreet && !needsCity && hasPickupHint) {
+    return { shippingAddress, fulfillmentOrders: [] };
+  }
 
   try {
     const { shopifyGraphQL } = await import('../integrations/shopify/client.js');
@@ -59,12 +65,19 @@ async function enrichContactFromShopifyGraphql(payload, shippingAddress) {
             address1 address2 city province country zip
           }
           customer { firstName lastName phone email }
+          fulfillmentOrders(first: 5) {
+            nodes {
+              deliveryMethod {
+                methodType
+              }
+            }
+          }
         }
       }`,
       { id: gid }
     );
     const order = res?.order;
-    if (!order) return shippingAddress;
+    if (!order) return { shippingAddress, fulfillmentOrders: [] };
 
     const ship = order.shippingAddress || {};
     const bill = order.billingAddress || {};
@@ -107,14 +120,17 @@ async function enrichContactFromShopifyGraphql(payload, shippingAddress) {
       next.zone = ship.province || bill.province || next.zone;
     }
 
-    return next;
+    return {
+      shippingAddress: next,
+      fulfillmentOrders: order.fulfillmentOrders?.nodes || [],
+    };
   } catch (err) {
     logger.warn(
       { err: err?.message || err, shopifyOrderId: payload?.id },
-      'Shopify contact enrich skipped'
+      'Shopify contact / fulfillment enrich skipped'
     );
   }
-  return shippingAddress;
+  return { shippingAddress, fulfillmentOrders: [] };
 }
 
 async function resolveVariant(lineItem) {
@@ -167,7 +183,9 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
 
   const customerPayload = payload.customer || {};
   let shippingAddress = mapShopifyShippingAddress(payload);
-  shippingAddress = await enrichContactFromShopifyGraphql(payload, shippingAddress);
+  const enriched = await enrichContactFromShopifyGraphql(payload, shippingAddress);
+  shippingAddress = enriched?.shippingAddress || enriched;
+  const fulfillmentOrders = enriched?.fulfillmentOrders || [];
 
   let customer;
   try {
@@ -231,8 +249,11 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
     internalStatus === 'delivered'
       ? new Date(payload.updated_at || payload.closed_at || payload.created_at || Date.now())
       : undefined;
+
+  const isPickup = isShopifyOrderPickup(payload, fulfillmentOrders);
+  const shippingMethod = isPickup ? 'pickup' : 'bosta';
+  const shippingFee = isPickup ? 0 : mapShopifyShippingFee(payload);
   const paymentMethod = mapShopifyPaymentMethod(payload);
-  const shippingFee = mapShopifyShippingFee(payload);
   const onlinePaid = paymentMethod === 'online' && isShopifyOrderPaid(payload);
 
   let order;
@@ -248,7 +269,7 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
             : {}),
           customerId: customer._id,
           shippingAddress,
-          shippingMethod: 'bosta',
+          shippingMethod,
           paymentMethod,
           shippingFee,
           ...(onlinePaid
@@ -306,7 +327,7 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
         : {}),
       customerId: customer._id,
       shippingAddress,
-      shippingMethod: 'bosta',
+      shippingMethod,
       paymentMethod,
       shippingFee: Number.isFinite(Number(shippingFee)) ? shippingFee : 0,
       internalStatus: 'pending_verification',
@@ -318,6 +339,21 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
   }
 
   await syncShopifySellableAfterLedger(order.ledgerDocs);
+
+  // If order was made as pickup on website, ensure Shopify shipping is set to 0.00
+  if (isPickup) {
+    try {
+      const { zeroShopifyShippingForPickup } = await import(
+        '../integrations/shopify/zeroPickupShipping.service.js'
+      );
+      await zeroShopifyShippingForPickup(order.order);
+    } catch (zeroErr) {
+      logger.warn(
+        { err: zeroErr?.message || zeroErr, shopifyOrderId },
+        'Background zeroShopifyShippingForPickup on create failed'
+      );
+    }
+  }
 
   // Only alert on genuine real-time orders — bulk imports must not spam the feed.
   if (source === 'shopify_webhook' && internalStatus === 'pending_verification') {
@@ -369,8 +405,18 @@ export async function handleOrdersUpdated(payload) {
     order.shopifyOrderName = name;
   }
 
+  const isPickup = isShopifyOrderPickup(payload);
+  if (isPickup) {
+    order.shippingMethod = 'pickup';
+    order.shippingFee = 0;
+  }
+
   // Sync shipping fee from Shopify (city / zone rates) + paid → online (Bosta COD = 0).
   applyShopifyMoneyFields(order, payload);
+
+  if (order.shippingMethod === 'pickup') {
+    order.shippingFee = 0;
+  }
 
   const shipping = payload.shipping_address;
   if (shipping) {
@@ -392,10 +438,29 @@ export async function handleOrdersUpdated(payload) {
     isPlaceholderPhone(current.phone) ||
     isPlaceholderStreet(current.line1)
   ) {
-    order.shippingAddress = await enrichContactFromShopifyGraphql(payload, current);
+    const enriched = await enrichContactFromShopifyGraphql(payload, current);
+    order.shippingAddress = enriched?.shippingAddress || enriched;
+  }
+
+  if (order.shippingMethod === 'pickup') {
+    order.shippingFee = 0;
   }
 
   await order.save();
+
+  if (order.shippingMethod === 'pickup') {
+    try {
+      const { zeroShopifyShippingForPickup } = await import(
+        '../integrations/shopify/zeroPickupShipping.service.js'
+      );
+      await zeroShopifyShippingForPickup(order);
+    } catch (zeroErr) {
+      logger.warn(
+        { err: zeroErr?.message || zeroErr, shopifyOrderId },
+        'zeroShopifyShippingForPickup on order update failed'
+      );
+    }
+  }
 
   // Do NOT map Shopify "fulfilled" → OMS delivered.
   // Shopify fulfillment is verify cleanup only (markShopifyOrderFulfilled on confirm).

@@ -1,4 +1,5 @@
 import Order from '../models/Order.js';
+import User from '../models/User.js';
 import OrderStatusHistory from '../models/OrderStatusHistory.js';
 import Variant from '../models/Variant.js';
 import Customer from '../models/Customer.js';
@@ -1217,12 +1218,53 @@ export async function confirmReturnedToStock(
     }
 
     const localIntent = order.shippingMethod === 'local_shipping' ? order.localReturnIntent : null;
-    const nextStatus =
-      localIntent === 'cancel'
-        ? 'cancelled'
-        : localIntent === 'exchange'
-          ? 'pending_verification'
-          : 'returned_to_stock';
+    let nextStatus = 'returned_to_stock';
+
+    if (localIntent === 'cancel') {
+      nextStatus = 'cancelled';
+    } else if (localIntent === 'exchange') {
+      nextStatus = 'pending_verification';
+    } else {
+      let priorPaymentMethod = null;
+      let priorDoc = null;
+      if (order.returnFromOrderId || order.exchangeFromOrderId) {
+        const priorId = order.returnFromOrderId || order.exchangeFromOrderId;
+        priorDoc = await Order.findById(priorId).session(session);
+        priorPaymentMethod = priorDoc?.paymentMethod;
+      }
+      const isCod = order.paymentMethod === 'cod' || priorPaymentMethod === 'cod';
+      const isRefundOrder = Boolean(order.isReturnOrder);
+      const isExchangeWithCredit = Boolean(
+        order.isExchangeOrder &&
+        (Number(order.exchangeCreditAmount) > 0 || Number(order.refundAmount) > 0)
+      );
+
+      if ((isRefundOrder || isExchangeWithCredit) && isCod && !order.refundPaid) {
+        nextStatus = 'pending_refund';
+        if (!order.refundAmount || order.refundAmount === 0) {
+          if (isExchangeWithCredit) {
+            order.refundAmount = Number(order.exchangeCreditAmount) || 0;
+          } else if (isRefundOrder) {
+            let sumVal = (order.bostaReturnItems || []).reduce(
+              (s, i) => s + (Number(i.unitSellingPrice) || 0) * (Number(i.quantity) || 1),
+              0
+            );
+            if (!sumVal && priorDoc) {
+              const returnVariantIds = new Set(
+                (order.bostaReturnItems || []).map((i) => String(i.variantId)).filter(Boolean)
+              );
+              for (const pi of priorDoc.items || []) {
+                if (returnVariantIds.has(String(pi.variantId))) {
+                  sumVal += (pi.unitSellingPrice || 0) * (pi.quantity || 1);
+                }
+              }
+              if (!sumVal) sumVal = priorDoc.totalSellingPrice || 0;
+            }
+            order.refundAmount = sumVal;
+          }
+        }
+      }
+    }
 
     await transitionOrder(
       order,
@@ -1235,7 +1277,9 @@ export async function confirmReturnedToStock(
             ? `${confirmNote} — cancelled after warehouse scan`
             : nextStatus === 'pending_verification'
               ? `${confirmNote} — scanned back, ready to exchange`
-              : confirmNote,
+              : nextStatus === 'pending_refund'
+                ? `${confirmNote} — scanned into warehouse stock; awaiting admin refund payout confirmation`
+                : confirmNote,
       },
       session
     );
@@ -1885,6 +1929,9 @@ export async function createManualOrder({
   bostaReturnItems = null,
   delayedUntil: delayedUntilInput = null,
   delayNote: delayNoteInput = null,
+  returnReason = null,
+  returnReasonNote = null,
+  refundAmount = null,
 }) {
   const exchange = Boolean(isExchangeOrder);
   const customerReturn = Boolean(isReturnOrder);
@@ -2150,6 +2197,31 @@ export async function createManualOrder({
       }));
     }
 
+    let calcRefundAmount = 0;
+    if (customerReturn) {
+      if (Array.isArray(bostaReturnItems) && bostaReturnItems.length) {
+        calcRefundAmount = bostaReturnItems.reduce(
+          (sum, i) => sum + (Number(i.unitSellingPrice) || 0) * (Number(i.quantity) || 1),
+          0
+        );
+      }
+      if (!calcRefundAmount && priorOrder) {
+        const returnVariantIds = new Set(
+          (bostaReturnItems || []).map((i) => String(i.variantId)).filter(Boolean)
+        );
+        for (const pi of priorOrder.items || []) {
+          if (returnVariantIds.has(String(pi.variantId))) {
+            calcRefundAmount += (pi.unitSellingPrice || 0) * (pi.quantity || 1);
+          }
+        }
+        if (!calcRefundAmount) {
+          calcRefundAmount = priorOrder.totalSellingPrice || 0;
+        }
+      }
+    } else if (exchange && exchangeCreditAmount > 0) {
+      calcRefundAmount = exchangeCreditAmount;
+    }
+
     const [order] = await Order.create(
       [{
         shopifyOrderId: ref,
@@ -2157,7 +2229,7 @@ export async function createManualOrder({
         orderSource: 'manual',
         manualSource,
         shippingMethod: method,
-        paymentMethod: customerReturn ? 'cod' : (paymentMethod || 'cod'),
+        paymentMethod: customerReturn ? (priorOrder?.paymentMethod || 'cod') : (paymentMethod || 'cod'),
         shippingFee: finalShippingFee,
         onlinePaymentReference: paymentMethod === 'online' && !customerReturn ? ref : undefined,
         customerId: customerDoc._id,
@@ -2173,6 +2245,15 @@ export async function createManualOrder({
         skipCollectRestock: exchange ? Boolean(priorOrder.skipCollectRestock) : false,
         isReturnOrder: customerReturn,
         returnFromOrderId: customerReturn ? priorOrder._id : undefined,
+        returnReason: exchange || customerReturn ? (returnReason || 'other') : undefined,
+        returnReasonNote:
+          (exchange || customerReturn) && returnReasonNote
+            ? String(returnReasonNote).trim().slice(0, 500)
+            : undefined,
+        refundAmount:
+          refundAmount != null && Number(refundAmount) >= 0
+            ? Number(refundAmount)
+            : calcRefundAmount,
         bostaReturnItems: normalizedReturnItems,
         totalSellingPrice: total,
         totalCogsSnapshot: orderItems.reduce((s, i) => s + (i.unitCogs || 0) * i.quantity, 0),
@@ -2186,6 +2267,15 @@ export async function createManualOrder({
             }
           : {}),
         verificationLog: [
+          ...(returnReasonNote
+            ? [
+                {
+                  outcome: 'confirmed',
+                  note: `${customerReturn ? 'Refund' : 'Exchange'} reason note: ${String(returnReasonNote).trim()}`,
+                  actorUserId,
+                },
+              ]
+            : []),
           ...(note ? [{ outcome: 'confirmed', note, actorUserId }] : []),
           ...(linkNote
             ? [{ outcome: 'confirmed', note: linkNote, actorUserId }]
@@ -2855,6 +2945,80 @@ export async function bulkVerifyOrders(orderIds, actorUserId, { outcome, note, s
   return results;
 }
 
+export async function confirmRefundPaid(
+  orderId,
+  actorUserId,
+  { paid = true, amount, paymentMethod = 'instapay', reference = '', note = '' } = {}
+) {
+  const result = await withTransaction(async (session) => {
+    const order = await Order.findById(orderId).session(session);
+    if (!order) {
+      const err = new Error('Order not found');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    if (order.internalStatus !== 'pending_refund') {
+      const err = new Error(
+        `Order is not in pending_refund status (current status: ${order.internalStatus})`
+      );
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const actor = await User.findById(actorUserId).session(session);
+    const actorName = actor?.name || 'Admin';
+
+    if (paid) {
+      order.refundPaid = true;
+      order.refundPaidAt = new Date();
+      order.refundPaidBy = actorUserId;
+      order.refundPaymentMethod = paymentMethod;
+      order.refundPaymentReference = reference ? String(reference).trim() : undefined;
+      order.refundAdminNote = note ? String(note).trim() : undefined;
+      if (amount != null && Number(amount) >= 0) {
+        order.refundAmount = Number(amount);
+      }
+
+      const payNote = `Refund of EGP ${order.refundAmount ?? 0} confirmed paid to customer by ${actorName} via ${paymentMethod}${
+        reference ? ` (Ref: ${reference})` : ''
+      }${note ? ` — ${note}` : ''}`;
+
+      await transitionOrder(
+        order,
+        'returned_to_stock',
+        {
+          source: 'user_action',
+          actorUserId,
+          note: payNote,
+        },
+        session
+      );
+    } else {
+      order.refundPaid = false;
+      order.refundAdminNote = note ? String(note).trim() : 'Admin marked refund as not paid';
+
+      const rejectNote = `Refund marked NOT PAID by ${actorName}${note ? `: ${note}` : ''}`;
+
+      await transitionOrder(
+        order,
+        'returned_to_stock',
+        {
+          source: 'user_action',
+          actorUserId,
+          note: rejectNote,
+        },
+        session
+      );
+    }
+
+    await order.save({ session });
+    return Order.findById(orderId).session(session);
+  });
+
+  return result;
+}
+
 export default {
   verifyOrder,
   bulkVerifyOrders,
@@ -2864,6 +3028,7 @@ export default {
   partialLocalDelivery,
   returnLocalShippingToStock,
   confirmReturnedToStock,
+  confirmRefundPaid,
   transitionOrderStatus,
   reserveStockForOrder,
   ensureOrderStockHeld,

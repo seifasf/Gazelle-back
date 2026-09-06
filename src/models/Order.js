@@ -134,6 +134,21 @@ const orderSchema = new mongoose.Schema(
       index: true,
     },
     returnReasonNote: { type: String, maxlength: 500 },
+    /**
+     * Cash refund tracking for COD returns and exchanges with customer credit.
+     * When package is received in warehouse, COD orders move to pending_refund.
+     * Admin confirms payout before order moves to returned_to_stock.
+     */
+    refundAmount: { type: Number, min: 0, default: 0 },
+    refundPaid: { type: Boolean, default: false, index: true },
+    refundPaidAt: Date,
+    refundPaidBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    refundPaymentMethod: {
+      type: String,
+      enum: ['instapay', 'vodafone_cash', 'bank_transfer', 'cash', 'other'],
+    },
+    refundPaymentReference: String,
+    refundAdminNote: { type: String, maxlength: 500 },
     isCreatorOrder: { type: Boolean, default: false },
     /** Manual exchange shipment against a previous order — Bosta type EXCHANGE. */
     isExchangeOrder: { type: Boolean, default: false, index: true },

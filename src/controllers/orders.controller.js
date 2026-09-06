@@ -212,6 +212,22 @@ export async function confirmReturn(req, res, next) {
   }
 }
 
+export async function confirmRefundPaid(req, res, next) {
+  try {
+    const { paid, amount, paymentMethod, reference, note } = req.body || {};
+    const order = await orderService.confirmRefundPaid(req.params.id, req.user._id, {
+      paid,
+      amount,
+      paymentMethod,
+      reference,
+      note,
+    });
+    res.json({ data: order });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function getStatusHistory(req, res, next) {
   try {
     const history = await orderService.getOrderStatusHistory(req.params.id);
@@ -506,6 +522,7 @@ export default {
   bulkVerifyOrders,
   cancelOrder,
   confirmReturn,
+  confirmRefundPaid,
   getStatusHistory,
   claimOrder,
   exchangeItem,

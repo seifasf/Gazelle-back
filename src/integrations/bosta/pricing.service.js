@@ -18,6 +18,12 @@ function readAmount(source, keys) {
     for (const part of parts) {
       cur = cur?.[part];
     }
+    if (cur && typeof cur === 'object') {
+      if ('amount' in cur) cur = cur.amount;
+      else if ('value' in cur) cur = cur.value;
+      else if ('fee' in cur) cur = cur.fee;
+      else if ('cost' in cur) cur = cur.cost;
+    }
     const n = Number(cur);
     if (Number.isFinite(n) && n >= 0) return roundEgp(n);
   }
@@ -91,6 +97,10 @@ export function parseBostaFeeBreakdown(raw, source = 'calculator') {
     ]) ?? 0;
   const openPackageFee =
     readAmount(root, [
+      'openingPackageFee',
+      'opening_package_fee',
+      'opening_package_fees',
+      'openingPackageFees',
       'openPackageFees',
       'openPackageFee',
       'open_package_fees',
@@ -99,28 +109,46 @@ export function parseBostaFeeBreakdown(raw, source = 'calculator') {
     ]) ?? 0;
   const nextDayTransferFee =
     readAmount(root, [
+      'expediteFee',
+      'expedite_fee',
+      'expedite_fees',
+      'expediteFees',
       'nextDayTransferFees',
       'nextDayTransferFee',
       'next_day_transfer_fees',
       'nextDayFees',
       'transferFees',
     ]) ?? 0;
-  const vat =
+  let vat =
     readAmount(root, ['vat', 'vatFees', 'vatFee', 'vatAmount', 'tax', 'taxes']) ?? 0;
   const insuranceFee =
-    readAmount(root, ['insuranceFees', 'insuranceFee', 'insurance', 'insuranceAmount']) ?? 0;
+    readAmount(root, [
+      'insuranceFee',
+      'insurance_fee',
+      'insurance_fees',
+      'insuranceFees',
+      'insurance',
+      'insuranceAmount',
+    ]) ?? 0;
 
   let total =
     readAmount(root, [
+      'bosta_fees',
+      'bostaFees',
       'total',
       'totalFees',
       'totalBostaFees',
+      'priceAfterVat',
       'totalPrice',
       'price',
-      'bostaFees',
-      'bosta_fees',
       'amount',
     ]) ?? 0;
+
+  if (vat > 0 && vat <= 1 && root.priceBeforeVat) {
+    vat = roundEgp(
+      root.priceAfterVat ? root.priceAfterVat - root.priceBeforeVat : root.priceBeforeVat * vat
+    );
+  }
 
   if (!total) {
     total = roundEgp(shippingFee + openPackageFee + nextDayTransferFee + vat + insuranceFee);
@@ -144,6 +172,9 @@ export function parseBostaFeeBreakdownFromDelivery(delivery) {
   if (!delivery || typeof delivery !== 'object') return null;
 
   const candidates = [
+    delivery.wallet?.cashCycle,
+    delivery.data?.wallet?.cashCycle,
+    delivery.wallet?.cashout,
     delivery.pricing,
     delivery.pricingDetails,
     delivery.shipmentFees,
@@ -163,6 +194,12 @@ export function parseBostaFeeBreakdownFromDelivery(delivery) {
   return null;
 }
 
+function mapCalculatorType(type) {
+  if (type === 25 || type === 'CUSTOMER_RETURN_PICKUP') return 'CUSTOMER_RETURN_PICKUP';
+  if (type === 30 || type === 'EXCHANGE') return 'EXCHANGE';
+  return 'SEND';
+}
+
 export function buildCalculatorParamsForOrder(order) {
   if (!order || order.shippingMethod !== 'bosta') return null;
 
@@ -173,7 +210,7 @@ export function buildCalculatorParamsForOrder(order) {
     pickupCity: process.env.BOSTA_PICKUP_CITY || 'Cairo',
     dropOffCity,
     cod: bostaCodAmountForOrder(order),
-    size: 'MEDIUM',
+    size: 'Normal',
     allowToOpenPackage: true,
     type: bostaDeliveryTypeForOrder(order),
     goodsValue: Math.max(0, Number(order.totalSellingPrice) || 0),
@@ -185,9 +222,9 @@ export async function calculateShipmentFees(params) {
     pickupCity: params.pickupCity || 'Cairo',
     dropOffCity: params.dropOffCity,
     cod: params.cod ?? 0,
-    size: params.size || 'MEDIUM',
+    size: params.size === 'MEDIUM' ? 'Normal' : params.size || 'Normal',
     allowToOpenPackage: params.allowToOpenPackage !== false,
-    type: params.type ?? 10,
+    type: mapCalculatorType(params.type),
   };
   if (params.goodsValue > 0) query.goodsValue = params.goodsValue;
 

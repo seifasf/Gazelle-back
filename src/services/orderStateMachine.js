@@ -57,10 +57,12 @@ export const ORDER_TRANSITIONS = {
     'returned_to_stock',
   ],
   // Admin confirmed the local courier brought the bag back — warehouse scans on Returns.
-  back_from_local_shipping: ['returned_to_stock', 'pending_verification', 'cancelled'],
+  back_from_local_shipping: ['returned_to_stock', 'pending_verification', 'cancelled', 'pending_refund'],
   // Warehouse can confirm receipt even if Bosta never flipped to "Back at Bosta".
-  returning_to_origin: ['returned_awaiting_receipt', 'returned_to_stock'],
-  returned_awaiting_receipt: ['returned_to_stock'],
+  returning_to_origin: ['returned_awaiting_receipt', 'returned_to_stock', 'pending_refund'],
+  returned_awaiting_receipt: ['returned_to_stock', 'pending_refund'],
+  // Warehouse scanned return — awaiting admin cash refund payout to customer
+  pending_refund: ['returned_to_stock', 'cancelled'],
   // Customer return / RTO after a successful delivery.
   // Also allow Bosta to correct false "delivered" (Shopify fulfill ≠ delivery).
   delivered: [

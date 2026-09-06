@@ -137,11 +137,26 @@ async function operationalPlFromOrders({ from, to }) {
     }
   }
 
-  const orders = await Order.find(match).select('items totalSellingPrice totalCogsSnapshot deliveredAt shippingFee');
+  const orders = await Order.find(match).select(
+    'items totalSellingPrice totalCogsSnapshot deliveredAt shippingFee shippingMethod bostaCourierFee bostaFeeBreakdown bostaTrackingNumber bostaDeliveryId shippingAddress'
+  );
   let revenue = 0;
   let cogs = 0;
   let missingCogsUnits = 0;
   let units = 0;
+
+  const bostaFees = {
+    shippingFee: 0,
+    openPackageFee: 0,
+    nextDayTransferFee: 0,
+    vat: 0,
+    insuranceFee: 0,
+    total: 0,
+    orderCount: 0,
+    avgPerOrder: 0,
+  };
+
+  const { resolveBostaCourierFee } = await import('../constants/shippingZones.js');
 
   for (const order of orders) {
     revenue += order.totalSellingPrice || 0;
@@ -160,7 +175,40 @@ async function operationalPlFromOrders({ from, to }) {
       }
     }
     cogs += orderCogs;
+
+    const isBosta =
+      order.shippingMethod === 'bosta' ||
+      Boolean(order.bostaTrackingNumber) ||
+      Boolean(order.bostaDeliveryId);
+    if (isBosta) {
+      const breakdown = order.bostaFeeBreakdown;
+      if (breakdown && breakdown.total > 0) {
+        bostaFees.shippingFee += Number(breakdown.shippingFee) || 0;
+        bostaFees.openPackageFee += Number(breakdown.openPackageFee) || 0;
+        bostaFees.nextDayTransferFee += Number(breakdown.nextDayTransferFee) || 0;
+        bostaFees.vat += Number(breakdown.vat) || 0;
+        bostaFees.insuranceFee += Number(breakdown.insuranceFee) || 0;
+        bostaFees.total += Number(breakdown.total) || 0;
+        bostaFees.orderCount += 1;
+      } else {
+        const fallback = Number(order.bostaCourierFee) || resolveBostaCourierFee(order) || 50;
+        bostaFees.shippingFee += fallback;
+        bostaFees.total += fallback;
+        bostaFees.orderCount += 1;
+      }
+    }
   }
+
+  bostaFees.shippingFee = Math.round(bostaFees.shippingFee * 100) / 100;
+  bostaFees.openPackageFee = Math.round(bostaFees.openPackageFee * 100) / 100;
+  bostaFees.nextDayTransferFee = Math.round(bostaFees.nextDayTransferFee * 100) / 100;
+  bostaFees.vat = Math.round(bostaFees.vat * 100) / 100;
+  bostaFees.insuranceFee = Math.round(bostaFees.insuranceFee * 100) / 100;
+  bostaFees.total = Math.round(bostaFees.total * 100) / 100;
+  bostaFees.avgPerOrder =
+    bostaFees.orderCount > 0
+      ? Math.round((bostaFees.total / bostaFees.orderCount) * 100) / 100
+      : 0;
 
   return {
     revenue,
@@ -169,6 +217,7 @@ async function operationalPlFromOrders({ from, to }) {
     deliveredCount: orders.length,
     units,
     missingCogsUnits,
+    bostaFees,
   };
 }
 
@@ -302,7 +351,8 @@ export async function getProfitAndLoss({ from, to } = {}) {
 
   const journalExpenses = byCategory.expense;
   const brandExpenses = brand.total;
-  const expenses = journalExpenses + brandExpenses;
+  const bostaCourierFees = operational.bostaFees?.total || 0;
+  const expenses = journalExpenses + brandExpenses + bostaCourierFees;
 
   // Decision P&L always uses delivered orders (journals are often incomplete).
   const revenue = operational.revenue;
@@ -326,6 +376,7 @@ export async function getProfitAndLoss({ from, to } = {}) {
     { key: 'revenue', label: 'Revenue', amount: revenue },
     { key: 'cogs', label: 'COGS', amount: -cogs },
     { key: 'gross', label: 'Gross profit', amount: grossProfit },
+    { key: 'bosta_fees', label: 'Bosta shipping fees', amount: -bostaCourierFees },
     { key: 'brand_fixed', label: 'Brand fixed', amount: -brand.fixedTotal },
     { key: 'brand_variable', label: 'Brand variable', amount: -brand.variableTotal },
     { key: 'journal', label: 'Journal expenses', amount: -journalExpenses },
@@ -338,6 +389,8 @@ export async function getProfitAndLoss({ from, to } = {}) {
     source: 'orders',
     revenue,
     cogs,
+    bostaFees: operational.bostaFees,
+    bostaCourierFees,
     journalExpenses,
     brandExpenses: {
       fixed: brand.fixedTotal,

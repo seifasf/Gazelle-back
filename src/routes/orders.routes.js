@@ -52,5 +52,10 @@ router.post(
   requireRoles('admin', 'stock_manager'),
   ordersController.confirmReturn
 );
+router.post(
+  '/:id/confirm-refund-paid',
+  requireRoles('admin'),
+  ordersController.confirmRefundPaid
+);
 
 export default router;

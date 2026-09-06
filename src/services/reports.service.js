@@ -1901,7 +1901,9 @@ export async function getProfitabilityReport({ from, to, groupBy = 'product' }) 
     }
   }
 
-  const orders = await Order.find(match).select('items totalSellingPrice totalCogsSnapshot deliveredAt');
+  const orders = await Order.find(match).select(
+    'items totalSellingPrice totalCogsSnapshot deliveredAt shippingMethod bostaCourierFee bostaFeeBreakdown bostaTrackingNumber bostaDeliveryId'
+  );
 
   const rows = [];
   for (const order of orders) {
@@ -1977,6 +1979,21 @@ export async function getProfitabilityReport({ from, to, groupBy = 'product' }) 
     { revenue: 0, cogs: 0, margin: 0, quantity: 0, missingCogsSkus: 0 }
   );
   totals.marginPct = totals.revenue > 0 ? (totals.margin / totals.revenue) * 100 : 0;
+
+  let bostaFeesTotal = 0;
+  for (const order of orders) {
+    if (order.shippingMethod === 'bosta' || order.bostaTrackingNumber) {
+      const fee =
+        Number(order.bostaFeeBreakdown?.total) ||
+        Number(order.bostaCourierFee) ||
+        50;
+      bostaFeesTotal += fee;
+    }
+  }
+  totals.bostaCourierFee = Math.round(bostaFeesTotal * 100) / 100;
+  totals.marginAfterCourier = Math.round((totals.margin - totals.bostaCourierFee) * 100) / 100;
+  totals.marginAfterCourierPct =
+    totals.revenue > 0 ? (totals.marginAfterCourier / totals.revenue) * 100 : 0;
 
   const insights = [];
   if (!products.length) {

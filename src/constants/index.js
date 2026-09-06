@@ -14,11 +14,20 @@ export const ORDER_STATUSES = [
   'failed_delivery',
   'returning_to_origin',
   'returned_awaiting_receipt',
+  'pending_refund',
   'returned_to_stock',
   'cancelled',
 ];
 
 export const TERMINAL_ORDER_STATUSES = ['returned_to_stock', 'cancelled'];
+
+export const REFUND_PAYMENT_METHODS = [
+  'instapay',
+  'vodafone_cash',
+  'bank_transfer',
+  'cash',
+  'other',
+];
 
 export const LEDGER_TYPES = [
   'on_hold_reserve',

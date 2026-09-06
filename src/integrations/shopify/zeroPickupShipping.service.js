@@ -26,6 +26,25 @@ export async function zeroShopifyShippingForPickup(order) {
   if (!gid || !restId) return { skipped: true, reason: 'no-shopify-id' };
 
   try {
+    // Fast path: if shipping is already 0 EGP on Shopify, avoid an unnecessary order edit mutation.
+    const check = await shopifyGraphQL(
+      `query CheckShipping($id: ID!) {
+        order(id: $id) {
+          totalShippingPriceSet {
+            shopMoney {
+              amount
+            }
+          }
+        }
+      }`,
+      { id: gid }
+    );
+    const existingAmount = parseFloat(check?.order?.totalShippingPriceSet?.shopMoney?.amount);
+    if (Number.isFinite(existingAmount) && existingAmount === 0) {
+      logger.info({ shopifyOrderId: restId }, 'Shopify shipping already 0 for pickup order');
+      return { ok: true, alreadyZero: true };
+    }
+
     const begin = await shopifyGraphQL(
       `mutation Begin($id: ID!) {
         orderEditBegin(id: $id) {
@@ -87,7 +106,7 @@ export async function zeroShopifyShippingForPickup(order) {
 
     const commit = await shopifyGraphQL(
       `mutation Commit($id: ID!) {
-        orderEditCommit(id: $id, notifyCustomer: false, staffNote: "Gazelle: warehouse pickup ù shipping EGP 0") {
+        orderEditCommit(id: $id, notifyCustomer: false, staffNote: "Gazelle: warehouse pickup ‚Äî shipping EGP 0") {
           userErrors { field message }
         }
       }`,
@@ -101,7 +120,7 @@ export async function zeroShopifyShippingForPickup(order) {
   } catch (err) {
     logger.warn(
       { err: err.message, shopifyOrderId: restId },
-      'GraphQL pickup shipping zero failed ù trying REST'
+      'GraphQL pickup shipping zero failed ‚Äî trying REST'
     );
     try {
       const data = await shopifyRest(`/orders/${restId}.json`);

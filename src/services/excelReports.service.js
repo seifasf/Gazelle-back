@@ -38,6 +38,17 @@ export async function exportProfitabilityExcel({ from, to, groupBy = 'product' }
     margin: totals.margin,
     marginPct: totals.marginPct,
   });
+  if (totals.bostaCourierFee > 0) {
+    sheet.addRow({
+      sku: 'BOSTA COURIER FEES',
+      margin: -totals.bostaCourierFee,
+    });
+    sheet.addRow({
+      sku: 'MARGIN AFTER COURIER',
+      margin: totals.marginAfterCourier,
+      marginPct: totals.marginAfterCourierPct,
+    });
+  }
   styleHeaderRow(sheet);
   const buffer = await workbookBuffer(workbook);
   return { buffer, filename: `profitability-${dateSuffix(from, to)}.xlsx` };
@@ -52,10 +63,17 @@ export async function exportPlExcel({ from, to } = {}) {
     { header: 'Line', key: 'line', width: 28 },
     { header: 'Amount (EGP)', key: 'amount', width: 16 },
   ];
+  const bosta = r.bostaFees || {};
   const lines = [
     ['Revenue', r.revenue],
     ['COGS', r.cogs],
     ['Gross profit', r.grossProfit],
+    ['Total Bosta courier fees', bosta.total ?? r.bostaCourierFees ?? 0],
+    ['  - Shipping Fees', bosta.shippingFee ?? 0],
+    ['  - Open package Fees', bosta.openPackageFee ?? 0],
+    ['  - Next Day Transfer Fees', bosta.nextDayTransferFee ?? 0],
+    ['  - VAT 14%', bosta.vat ?? 0],
+    ['  - Insurance Fees', bosta.insuranceFee ?? 0],
     ['Journal expenses', r.journalExpenses ?? 0],
     ['Brand fixed expenses', r.brandExpenses?.fixed ?? 0],
     ['Brand variable expenses', r.brandExpenses?.variable ?? 0],

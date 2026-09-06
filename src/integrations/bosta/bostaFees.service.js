@@ -60,11 +60,45 @@ export async function syncBostaFeesForOrder(order, { force = false } = {}) {
   }
 
   if (breakdown?.total > 0) {
-    await Order.updateOne({ _id: order._id }, { $set: { bostaFeeBreakdown: breakdown } });
+    await Order.updateOne(
+      { _id: order._id },
+      { $set: { bostaFeeBreakdown: breakdown, bostaCourierFee: breakdown.total } }
+    );
+    if (order && typeof order === 'object') {
+      order.bostaFeeBreakdown = breakdown;
+      order.bostaCourierFee = breakdown.total;
+    }
     return breakdown;
   }
 
   return existing || null;
+}
+
+/**
+ * Concurrently sync Bosta fee breakdowns for an array of orders.
+ */
+export async function syncBostaFeesForOrders(orders, { concurrency = 5, force = false } = {}) {
+  if (!Array.isArray(orders) || !orders.length) return [];
+  const results = [];
+  const queue = [...orders];
+
+  async function worker() {
+    while (queue.length > 0) {
+      const order = queue.shift();
+      if (!order) break;
+      try {
+        const res = await syncBostaFeesForOrder(order, { force });
+        results.push({ orderId: order._id, breakdown: res });
+      } catch (err) {
+        logger.debug({ orderId: order._id, err: err.message }, 'Batch Bosta fee sync failed');
+        results.push({ orderId: order._id, breakdown: null, error: err.message });
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, orders.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
 }
 
 /** Attach live Bosta fee breakdown + total on order API payloads. */
@@ -87,6 +121,7 @@ export async function enrichBostaFeeFields(order, { refresh = true } = {}) {
 
 export default {
   syncBostaFeesForOrder,
+  syncBostaFeesForOrders,
   enrichBostaFeeFields,
   resolveBostaCourierFeeForOrder,
 };
