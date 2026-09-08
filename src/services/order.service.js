@@ -2276,6 +2276,15 @@ export async function createManualOrder({
                 },
               ]
             : []),
+          ...(exchange && normalizedReturnItems?.length
+            ? [
+                {
+                  outcome: 'confirmed',
+                  note: `Exchange directions · DELIVER: ${orderItems.map((i) => `${i.sku} (x${i.quantity})`).join(', ')} · COLLECT FROM CUSTOMER: ${normalizedReturnItems.map((c) => `${c.sku} (Size ${c.size || ''})`).join(', ')}`,
+                  actorUserId,
+                },
+              ]
+            : []),
           ...(note ? [{ outcome: 'confirmed', note, actorUserId }] : []),
           ...(linkNote
             ? [{ outcome: 'confirmed', note: linkNote, actorUserId }]
