@@ -1948,6 +1948,22 @@ export async function createManualOrder({
     throw err;
   }
 
+  if ((exchange || customerReturn) && !String(returnReasonNote || '').trim()) {
+    const err = new Error(
+      customerReturn
+        ? 'Order manager must leave a note explaining why the customer requested this refund'
+        : 'Order manager must leave a note explaining why the customer requested this exchange'
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if ((exchange || customerReturn) && String(returnReasonNote || '').trim().length < 5) {
+    const err = new Error('Reason note must be at least 5 characters');
+    err.statusCode = 400;
+    throw err;
+  }
+
   if (exchange && (!Array.isArray(bostaReturnItems) || bostaReturnItems.length < 1)) {
     const err = new Error('Select the items to collect from the customer for this exchange');
     err.statusCode = 400;
