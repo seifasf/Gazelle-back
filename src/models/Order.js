@@ -181,6 +181,8 @@ const orderSchema = new mongoose.Schema(
         title: String,
         color: String,
         size: String,
+        /** Original selling price of the piece being returned (used for refund payout). */
+        unitSellingPrice: { type: Number, min: 0 },
       },
     ],
     items: { type: [orderItemSchema], required: true, validate: [(v) => v.length > 0, 'Order must have items'] },
