@@ -11,6 +11,8 @@ const brandExpenseSchema = new mongoose.Schema(
     amountMax: { type: Number, min: 0 },
     currency: { type: String, enum: ['EGP', 'USD'], default: 'EGP' },
     sortOrder: { type: Number, default: 0 },
+    /** Filled from orders (e.g. shipping loss) — not manual month entry. */
+    autoComputed: { type: Boolean, default: false },
     isActive: { type: Boolean, default: true },
     deletedAt: { type: Date },
   },

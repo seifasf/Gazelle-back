@@ -41,6 +41,16 @@ export const BRAND_EXPENSE_SEED = [
   },
   { key: 'flyers', name: 'Flyers', kind: 'variable', amount: 7000, currency: 'EGP', sortOrder: 140 },
   { key: 'freight-in', name: 'Freight In', kind: 'variable', amount: 5000, currency: 'EGP', sortOrder: 150 },
+  // Auto: Bosta shipping loss for the month (customer shipping − Bosta). Not manual.
+  {
+    key: 'shipping-loss',
+    name: 'Shipping loss',
+    kind: 'variable',
+    amount: 0,
+    currency: 'EGP',
+    sortOrder: 160,
+    autoComputed: true,
+  },
 ];
 
 /** @deprecated kept for any residual FX helpers */
@@ -60,6 +70,14 @@ export async function ensureBrandExpenses() {
 
     // One-time migrations only — do not overwrite admin-edited amounts every boot.
     let dirty = false;
+    if (row.key === 'shipping-loss' && !existing.autoComputed) {
+      existing.autoComputed = true;
+      existing.name = row.name;
+      existing.kind = 'variable';
+      existing.sortOrder = row.sortOrder;
+      dirty = true;
+    }
+    // If admin created "Shipping loss" under another key, leave it; seed creates canonical key.
     if (row.key === 'website' && (existing.kind !== 'variable' || existing.currency !== 'EGP')) {
       if (existing.currency === 'USD') {
         existing.amount = Math.round((Number(existing.amount) || 0) * DEFAULT_USD_TO_EGP);

@@ -138,7 +138,7 @@ async function operationalPlFromOrders({ from, to }) {
   }
 
   const orders = await Order.find(match).select(
-    'items totalSellingPrice totalCogsSnapshot deliveredAt shippingFee shippingMethod orderSource manualSource bostaCourierFee bostaFeeBreakdown bostaTrackingNumber bostaDeliveryId shippingAddress paymentMethod isReturnOrder isExchangeOrder isCreatorOrder'
+    'items totalSellingPrice totalCogsSnapshot deliveredAt shippingFee shippingMethod orderSource manualSource bostaCourierFee bostaFeeBreakdown bostaTrackingNumber bostaDeliveryId shippingAddress paymentMethod onlinePaymentStatus onlinePaidAt isReturnOrder isExchangeOrder isCreatorOrder'
   );
   let revenue = 0;
   let cogs = 0;
@@ -155,6 +155,14 @@ async function operationalPlFromOrders({ from, to }) {
     local: { revenue: 0, count: 0 },
     pickup: { revenue: 0, count: 0 },
   };
+
+  const byPayment = {
+    cod: { count: 0, revenue: 0 },
+    online: { count: 0, revenue: 0 },
+  };
+
+  /** COD fee EGP 25 — COD orders only (never online / return / exchange). */
+  const codFees = { total: 0, orderCount: 0, perOrder: 25 };
 
   const bostaFees = {
     shippingFee: 0,
@@ -174,6 +182,7 @@ async function operationalPlFromOrders({ from, to }) {
   let sepBostaCount = 0;
 
   const { resolveBostaCourierFee } = await import('../constants/shippingZones.js');
+  const { omsCodFeeEgp } = await import('../utils/omsCod.js');
   const {
     computeShippingEconomics,
     shippingLossAppliesToRange,
@@ -208,6 +217,16 @@ async function operationalPlFromOrders({ from, to }) {
     bySource[sourceKey].count += 1;
     bySource[sourceKey].customerShipping += Number(order.shippingFee) || 0;
 
+    const payKey = order.paymentMethod === 'online' ? 'online' : 'cod';
+    byPayment[payKey].count += 1;
+    byPayment[payKey].revenue += orderRevenue;
+
+    const fee25 = omsCodFeeEgp(order);
+    if (fee25 > 0) {
+      codFees.total += fee25;
+      codFees.orderCount += 1;
+    }
+
     const shippingKey =
       order.shippingMethod === 'local_shipping'
         ? 'local'
@@ -218,12 +237,8 @@ async function operationalPlFromOrders({ from, to }) {
     byShipping[shippingKey].count += 1;
 
     // Shipping loss cohort = Bosta deliveries only (same as "Bosta fees · N shipments").
-    const isBosta =
-      shippingKey === 'bosta' ||
-      order.shippingMethod === 'bosta' ||
-      Boolean(order.bostaTrackingNumber) ||
-      Boolean(order.bostaDeliveryId);
-    if (isBosta && shippingKey === 'bosta') {
+    const isBosta = shippingKey === 'bosta';
+    if (isBosta) {
       let fee = 0;
       const breakdown = order.bostaFeeBreakdown;
       if (breakdown && breakdown.total > 0) {
@@ -300,6 +315,16 @@ async function operationalPlFromOrders({ from, to }) {
         : 0;
   }
 
+  for (const key of Object.keys(byPayment)) {
+    byPayment[key].revenue = Math.round(byPayment[key].revenue * 100) / 100;
+    byPayment[key].percent =
+      deliveredTotal > 0
+        ? Math.round((byPayment[key].count / deliveredTotal) * 1000) / 10
+        : 0;
+  }
+
+  codFees.total = Math.round(codFees.total * 100) / 100;
+
   return {
     revenue,
     cogs,
@@ -308,8 +333,10 @@ async function operationalPlFromOrders({ from, to }) {
     units,
     missingCogsUnits,
     bostaFees,
+    codFees,
     bySource,
     byShipping,
+    byPayment,
     shippingEconomics: {
       ...shippingEconomics,
       appliesFrom: SHIPPING_LOSS_START_YMD,
@@ -452,6 +479,7 @@ export async function getProfitAndLoss({ from, to } = {}) {
   const brandExpenses = brand.total;
   const bostaCourierFees = operational.bostaFees?.total || 0;
   const shippingEconomics = operational.shippingEconomics || {};
+  const codFees = operational.codFees || { total: 0, orderCount: 0, perOrder: 25 };
   const expenses = journalExpenses + brandExpenses + bostaCourierFees;
 
   // Decision P&L always uses delivered orders (journals are often incomplete).
@@ -459,14 +487,18 @@ export async function getProfitAndLoss({ from, to } = {}) {
   const cogs = operational.cogs;
   const grossProfit = revenue - cogs;
 
-  // From Sep 2026: credit customer shipping (not in merchandise revenue) so net
-  // reflects Left after Bosta = customer shipping − Bosta fees.
-  // EGP 25 is already in order totals — do not deduct it again here.
-  // Shipping loss (when Left after Bosta < 0) is embedded via −Bosta + customer shipping.
+  // Brand money layers (do not mix):
+  // 1) Merchandise revenue (goods) − COGS
+  // 2) Shipping: credit customer shipping, deduct Bosta → Left after Bosta / shipping loss
+  // 3) COD fee EGP 25: COD orders only — not on online, never × Bosta shipment count
   let netIncome = grossProfit - expenses;
   if (shippingEconomics.enabled) {
     const shipAdj = Number(shippingEconomics.customerShipping) || 0;
     netIncome = Math.round((netIncome + shipAdj) * 100) / 100;
+  }
+  // COD fee is OMS collect income, not in totalSellingPrice — add COD-only fees.
+  if (codFees.total > 0) {
+    netIncome = Math.round((netIncome + Number(codFees.total)) * 100) / 100;
   }
 
   const { insights, ratios } = buildDecisionInsights({
@@ -482,7 +514,7 @@ export async function getProfitAndLoss({ from, to } = {}) {
   });
 
   const waterfall = [
-    { key: 'revenue', label: 'Revenue', amount: revenue },
+    { key: 'revenue', label: 'Merchandise revenue', amount: revenue },
     { key: 'cogs', label: 'COGS', amount: -cogs },
     { key: 'gross', label: 'Gross profit', amount: grossProfit },
     { key: 'bosta_fees', label: 'Bosta shipping fees', amount: -bostaCourierFees },
@@ -500,11 +532,16 @@ export async function getProfitAndLoss({ from, to } = {}) {
           },
           {
             key: 'shipping_loss',
-            label: 'Shipping loss (subtracted in net)',
+            label: 'Shipping loss',
             amount: -(Number(shippingEconomics.shippingLoss) || 0),
           },
         ]
       : []),
+    {
+      key: 'cod_fees',
+      label: `COD fee EGP 25 × ${codFees.orderCount || 0} COD orders`,
+      amount: Number(codFees.total) || 0,
+    },
     { key: 'brand_fixed', label: 'Brand fixed', amount: -brand.fixedTotal },
     { key: 'brand_variable', label: 'Brand variable', amount: -brand.variableTotal },
     { key: 'journal', label: 'Journal expenses', amount: -journalExpenses },
@@ -520,8 +557,10 @@ export async function getProfitAndLoss({ from, to } = {}) {
     bostaFees: operational.bostaFees,
     bostaCourierFees,
     shippingEconomics,
+    codFees,
     bySource: operational.bySource || null,
     byShipping: operational.byShipping || null,
+    byPayment: operational.byPayment || null,
     journalExpenses,
     brandExpenses: {
       fixed: brand.fixedTotal,

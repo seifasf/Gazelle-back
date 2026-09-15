@@ -3,6 +3,89 @@ import MonthlyExpense from '../models/MonthlyExpense.js';
 import { DEFAULT_USD_TO_EGP } from './brandExpenses.seed.js';
 import { config } from '../config/index.js';
 
+/** Brand expense keys filled from OMS data (not manual month entry). */
+export const AUTO_COMPUTED_EXPENSE_KEYS = new Set(['shipping-loss']);
+
+function isAutoComputedExpense(template) {
+  if (!template) return false;
+  if (template.autoComputed) return true;
+  if (AUTO_COMPUTED_EXPENSE_KEYS.has(template.key)) return true;
+  const name = String(template.name || '').trim().toLowerCase();
+  return name === 'shipping loss' || name === 'shippingloss';
+}
+
+/**
+ * Month shipping loss = max(0, Bosta fees − customer shipping) on delivered Bosta orders.
+ * EGP 25 COD fee is not included. Before Sep 2026 → 0.
+ */
+async function computeMonthShippingLoss(yearMonth) {
+  const {
+    computeShippingEconomics,
+    shippingLossAppliesToRange,
+    SHIPPING_LOSS_START_YMD,
+  } = await import('../utils/shippingEconomics.js');
+  const { resolveBostaCourierFee } = await import('../constants/shippingZones.js');
+
+  const [y, m] = String(yearMonth).split('-').map(Number);
+  if (!y || !m) {
+    return computeShippingEconomics({ customerShipping: 0, bostaFees: 0, orderCount: 0 });
+  }
+
+  // Egypt calendar month bounds (same idea as dashboard business days).
+  const fromYmd = `${yearMonth}-01`;
+  const lastDay = new Date(y, m, 0).getDate();
+  const toYmd = `${yearMonth}-${String(lastDay).padStart(2, '0')}`;
+  if (!shippingLossAppliesToRange({ from: fromYmd, to: toYmd })) {
+    return {
+      ...computeShippingEconomics({ customerShipping: 0, bostaFees: 0, orderCount: 0 }),
+      enabled: false,
+    };
+  }
+
+  const Order = (await import('../models/Order.js')).default;
+  const shippingStart = new Date(`${SHIPPING_LOSS_START_YMD}T00:00:00.000Z`);
+  const from = new Date(`${fromYmd}T00:00:00+03:00`);
+  const to = new Date(`${toYmd}T23:59:59.999+03:00`);
+
+  const orders = await Order.find({
+    internalStatus: 'delivered',
+    deliveredAt: { $gte: from, $lte: to },
+  }).select(
+    'deliveredAt shippingFee shippingMethod bostaCourierFee bostaFeeBreakdown bostaTrackingNumber bostaDeliveryId shippingAddress'
+  );
+
+  let customerShipping = 0;
+  let bostaFees = 0;
+  let orderCount = 0;
+
+  for (const order of orders) {
+    const deliveredAt = order.deliveredAt ? new Date(order.deliveredAt) : null;
+    if (!deliveredAt || deliveredAt < shippingStart) continue;
+    const method = order.shippingMethod;
+    if (method === 'local_shipping' || method === 'pickup') continue;
+    const isBosta =
+      method === 'bosta' ||
+      method == null ||
+      Boolean(order.bostaTrackingNumber) ||
+      Boolean(order.bostaDeliveryId);
+    if (!isBosta && method && method !== 'bosta') continue;
+
+    orderCount += 1;
+    customerShipping += Number(order.shippingFee) || 0;
+    const breakdown = order.bostaFeeBreakdown;
+    if (breakdown && breakdown.total > 0) {
+      bostaFees += Number(breakdown.total) || 0;
+    } else {
+      bostaFees += Number(order.bostaCourierFee) || resolveBostaCourierFee(order) || 50;
+    }
+  }
+
+  return {
+    ...computeShippingEconomics({ customerShipping, bostaFees, orderCount }),
+    enabled: true,
+  };
+}
+
 function usdToEgpRate() {
   const rate = Number(config.USD_TO_EGP);
   return Number.isFinite(rate) && rate > 0 ? rate : DEFAULT_USD_TO_EGP;
@@ -150,7 +233,32 @@ export async function getMonthExpenseBreakdown(yearMonth) {
   const entries = await MonthlyExpense.find({ yearMonth });
   const byKey = Object.fromEntries(entries.map((e) => [e.expenseKey, e]));
 
+  const shippingEco = await computeMonthShippingLoss(yearMonth);
+  const autoShippingLoss = Number(shippingEco.shippingLoss) || 0;
+
   const lines = templates.map((t) => {
+    const auto = isAutoComputedExpense(t);
+    if (auto) {
+      return {
+        id: t._id,
+        key: t.key,
+        name: t.name,
+        kind: t.kind,
+        amount: autoShippingLoss,
+        currency: 'EGP',
+        amountEgp: autoShippingLoss,
+        amountMin: t.amountMin,
+        amountMax: t.amountMax,
+        defaultAmount: t.amount,
+        hasEntry: true,
+        autoComputed: true,
+        note:
+          shippingEco.enabled === false
+            ? 'Auto · shipping loss applies from Sep 2026'
+            : `Auto · ${shippingEco.orderCount || 0} Bosta deliveries · Left after Bosta ${shippingEco.leftAfterBosta ?? 0}`,
+      };
+    }
+
     const override = byKey[t.key];
     const isFixed = t.kind === 'fixed';
     const amount = override
@@ -177,6 +285,7 @@ export async function getMonthExpenseBreakdown(yearMonth) {
       amountMax: t.amountMax,
       defaultAmount: t.amount,
       hasEntry: Boolean(override),
+      autoComputed: false,
       note: override?.note || '',
     };
   });
@@ -204,12 +313,21 @@ export async function getMonthExpenseBreakdown(yearMonth) {
 
   const expenseRatio = revenue > 0 ? Math.round((total / revenue) * 1000) / 10 : null;
   const insights = [];
-  const missingVariable = lines.filter((l) => l.kind === 'variable' && !l.hasEntry).length;
+  const missingVariable = lines.filter(
+    (l) => l.kind === 'variable' && !l.hasEntry && !l.autoComputed
+  ).length;
   if (missingVariable > 0) {
     insights.push({
       tone: 'warning',
       title: `${missingVariable} variable costs not entered`,
       detail: `Fill actuals for ${yearMonth} so P&L net income is complete.`,
+    });
+  }
+  if (autoShippingLoss > 0) {
+    insights.push({
+      tone: 'info',
+      title: `Shipping loss auto ${autoShippingLoss.toLocaleString('en-EG')} EGP`,
+      detail: 'From Bosta deliveries this month (customer shipping − Bosta fees). Already reflected in P&L shipping.',
     });
   }
   if (expenseRatio != null && expenseRatio > 40) {
@@ -240,6 +358,8 @@ export async function getMonthExpenseBreakdown(yearMonth) {
     fixedTotal,
     variableTotal,
     total,
+    shippingLoss: autoShippingLoss,
+    shippingEconomics: shippingEco,
     context: { revenue, deliveredCount, expenseRatio },
     insights,
   };
@@ -263,6 +383,8 @@ export async function saveMonthExpenses(yearMonth, items, userId) {
       err.statusCode = 400;
       throw err;
     }
+    // Shipping loss (and other auto lines) are computed from orders — ignore manual saves.
+    if (isAutoComputedExpense(template)) continue;
 
     const amount = Number(item.amount);
     if (!Number.isFinite(amount) || amount < 0) {
@@ -327,7 +449,12 @@ export async function getBrandExpensesForRange({ from, to } = {}) {
     const fraction = Math.min(1, inclusiveDays / daysInMonth);
 
     fixedTotal += month.fixedTotal * fraction;
-    variableTotal += month.variableTotal * fraction;
+    // Shipping loss is already applied in P&L via Bosta − customer shipping.
+    // Keep it on the expenses page for visibility, but do not double-count in OpEx.
+    const variableForPl = month.lines
+      .filter((l) => l.kind === 'variable' && !l.autoComputed && !AUTO_COMPUTED_EXPENSE_KEYS.has(l.key))
+      .reduce((s, l) => s + (Number(l.amountEgp) || 0), 0);
+    variableTotal += variableForPl * fraction;
   }
 
   return {
