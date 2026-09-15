@@ -150,6 +150,12 @@ async function operationalPlFromOrders({ from, to }) {
     manual: { revenue: 0, cogs: 0, count: 0, customerShipping: 0 },
   };
 
+  const byShipping = {
+    bosta: { revenue: 0, count: 0 },
+    local: { revenue: 0, count: 0 },
+    pickup: { revenue: 0, count: 0 },
+  };
+
   const bostaFees = {
     shippingFee: 0,
     openPackageFee: 0,
@@ -163,6 +169,9 @@ async function operationalPlFromOrders({ from, to }) {
 
   let customerShippingCollected = 0;
   let shippingEconomicsOrderCount = 0;
+  let sepCustomerShipping = 0;
+  let sepBostaFees = 0;
+  let sepBostaCount = 0;
 
   const { resolveBostaCourierFee } = await import('../constants/shippingZones.js');
   const {
@@ -199,11 +208,23 @@ async function operationalPlFromOrders({ from, to }) {
     bySource[sourceKey].count += 1;
     bySource[sourceKey].customerShipping += Number(order.shippingFee) || 0;
 
+    const shippingKey =
+      order.shippingMethod === 'local_shipping'
+        ? 'local'
+        : order.shippingMethod === 'pickup'
+          ? 'pickup'
+          : 'bosta';
+    byShipping[shippingKey].revenue += orderRevenue;
+    byShipping[shippingKey].count += 1;
+
+    // Shipping loss cohort = Bosta deliveries only (same as "Bosta fees · N shipments").
     const isBosta =
+      shippingKey === 'bosta' ||
       order.shippingMethod === 'bosta' ||
       Boolean(order.bostaTrackingNumber) ||
       Boolean(order.bostaDeliveryId);
-    if (isBosta) {
+    if (isBosta && shippingKey === 'bosta') {
+      let fee = 0;
       const breakdown = order.bostaFeeBreakdown;
       if (breakdown && breakdown.total > 0) {
         bostaFees.shippingFee += Number(breakdown.shippingFee) || 0;
@@ -211,13 +232,23 @@ async function operationalPlFromOrders({ from, to }) {
         bostaFees.nextDayTransferFee += Number(breakdown.nextDayTransferFee) || 0;
         bostaFees.vat += Number(breakdown.vat) || 0;
         bostaFees.insuranceFee += Number(breakdown.insuranceFee) || 0;
-        bostaFees.total += Number(breakdown.total) || 0;
+        fee = Number(breakdown.total) || 0;
+        bostaFees.total += fee;
         bostaFees.orderCount += 1;
       } else {
-        const fallback = Number(order.bostaCourierFee) || resolveBostaCourierFee(order) || 50;
-        bostaFees.shippingFee += fallback;
-        bostaFees.total += fallback;
+        fee = Number(order.bostaCourierFee) || resolveBostaCourierFee(order) || 50;
+        bostaFees.shippingFee += fee;
+        bostaFees.total += fee;
         bostaFees.orderCount += 1;
+      }
+
+      const deliveredAt = order.deliveredAt ? new Date(order.deliveredAt) : null;
+      const inShippingLossWindow =
+        applyShippingEconomics && deliveredAt && deliveredAt >= shippingStart;
+      if (inShippingLossWindow) {
+        sepCustomerShipping += Number(order.shippingFee) || 0;
+        sepBostaFees += fee;
+        sepBostaCount += 1;
       }
     }
   }
@@ -233,6 +264,7 @@ async function operationalPlFromOrders({ from, to }) {
       ? Math.round((bostaFees.total / bostaFees.orderCount) * 100) / 100
       : 0;
 
+  // Shipping loss uses the same Bosta fee total / shipment count shown on the card.
   let shippingEconomics = computeShippingEconomics({
     customerShipping: 0,
     bostaFees: 0,
@@ -241,32 +273,15 @@ async function operationalPlFromOrders({ from, to }) {
   });
 
   if (applyShippingEconomics) {
-    let sepCustomerShipping = 0;
-    let sepBostaFees = 0;
-    let sepCount = 0;
-    for (const order of orders) {
-      const deliveredAt = order.deliveredAt ? new Date(order.deliveredAt) : null;
-      if (!deliveredAt || deliveredAt < shippingStart) continue;
-      const isBosta =
-        order.shippingMethod === 'bosta' ||
-        Boolean(order.bostaTrackingNumber) ||
-        Boolean(order.bostaDeliveryId);
-      if (!isBosta) continue;
-      sepCustomerShipping += Number(order.shippingFee) || 0;
-      sepCount += 1;
-      const breakdown = order.bostaFeeBreakdown;
-      if (breakdown && breakdown.total > 0) {
-        sepBostaFees += Number(breakdown.total) || 0;
-      } else {
-        sepBostaFees += Number(order.bostaCourierFee) || resolveBostaCourierFee(order) || 50;
-      }
-    }
     customerShippingCollected = sepCustomerShipping;
-    shippingEconomicsOrderCount = sepCount;
+    shippingEconomicsOrderCount = sepBostaCount;
+    // When the whole range is on/after Sep, sep totals match bostaFees card exactly.
+    const useCardTotals =
+      sepBostaCount === bostaFees.orderCount && sepBostaCount > 0;
     shippingEconomics = computeShippingEconomics({
       customerShipping: sepCustomerShipping,
-      bostaFees: sepBostaFees,
-      orderCount: sepCount,
+      bostaFees: useCardTotals ? bostaFees.total : sepBostaFees,
+      orderCount: useCardTotals ? bostaFees.orderCount : sepBostaCount,
       applyEgp25: true,
     });
   }
@@ -278,6 +293,15 @@ async function operationalPlFromOrders({ from, to }) {
     bySource[key].customerShipping = Math.round(bySource[key].customerShipping * 100) / 100;
   }
 
+  const deliveredTotal = orders.length || 0;
+  for (const key of Object.keys(byShipping)) {
+    byShipping[key].revenue = Math.round(byShipping[key].revenue * 100) / 100;
+    byShipping[key].percent =
+      deliveredTotal > 0
+        ? Math.round((byShipping[key].count / deliveredTotal) * 1000) / 10
+        : 0;
+  }
+
   return {
     revenue,
     cogs,
@@ -287,6 +311,7 @@ async function operationalPlFromOrders({ from, to }) {
     missingCogsUnits,
     bostaFees,
     bySource,
+    byShipping,
     shippingEconomics: {
       ...shippingEconomics,
       appliesFrom: SHIPPING_LOSS_START_YMD,
@@ -504,6 +529,7 @@ export async function getProfitAndLoss({ from, to } = {}) {
     bostaCourierFees,
     shippingEconomics,
     bySource: operational.bySource || null,
+    byShipping: operational.byShipping || null,
     journalExpenses,
     brandExpenses: {
       fixed: brand.fixedTotal,

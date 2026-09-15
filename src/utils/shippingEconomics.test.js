@@ -7,30 +7,31 @@ import {
 } from './shippingEconomics.js';
 
 describe('computeShippingEconomics', () => {
-  it('Left after Bosta - EGP 25: loss when brand pays more than collects', () => {
-    // 10 orders x 50 ship collected = 500; Bosta 600; left = -100; -250 = -350 loss
+  it('Left after Bosta: loss when Bosta fees exceed customer shipping', () => {
+    // 10 orders x 50 ship collected = 500; Bosta 600; left = -100 loss
     const r = computeShippingEconomics({
       customerShipping: 500,
       bostaFees: 600,
       orderCount: 10,
     });
     assert.equal(r.leftAfterBosta, -100);
-    assert.equal(r.egp25Total, 250);
-    assert.equal(r.shippingResult, -350);
-    assert.equal(r.shippingLoss, 350);
+    assert.equal(r.egp25Total, 0);
+    assert.equal(r.shippingResult, -100);
+    assert.equal(r.shippingLoss, 100);
     assert.equal(r.shippingGain, 0);
   });
 
-  it('positive result when customer shipping covers Bosta + 25', () => {
+  it('positive result when customer shipping covers Bosta (no EGP 25)', () => {
     const r = computeShippingEconomics({
       customerShipping: 1000,
       bostaFees: 500,
       orderCount: 10,
     });
     assert.equal(r.leftAfterBosta, 500);
-    assert.equal(r.shippingResult, 250);
+    assert.equal(r.shippingResult, 500);
     assert.equal(r.shippingLoss, 0);
-    assert.equal(r.shippingGain, 250);
+    assert.equal(r.shippingGain, 500);
+    assert.equal(r.egp25Total, 0);
   });
 });
 

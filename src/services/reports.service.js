@@ -1485,6 +1485,12 @@ async function buildDashboardCore(range, preset) {
             delivered: { count: 0, amount: 0 },
             deliveredShopify: { count: 0, amount: 0 },
             deliveredManual: { count: 0, amount: 0 },
+            shippingMix: {
+              bosta: { count: 0, percent: 0 },
+              local: { count: 0, percent: 0 },
+              pickup: { count: 0, percent: 0 },
+              total: 0,
+            },
           })
         : Order.aggregate([
             // Cohort = OMS orders placed in the selected range (not Shopify dashboard totals).
@@ -1499,6 +1505,8 @@ async function buildDashboardCore(range, preset) {
                 },
                 merchandiseValue: { $ifNull: ['$totalSellingPrice', 0] },
                 isShopify: { $eq: ['$orderSource', 'shopify'] },
+                isLocal: { $eq: ['$shippingMethod', 'local_shipping'] },
+                isPickup: { $eq: ['$shippingMethod', 'pickup'] },
               },
             },
             {
@@ -1624,9 +1632,34 @@ async function buildDashboardCore(range, preset) {
                     ],
                   },
                 },
+                bookedBostaCount: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $ne: ['$shippingMethod', 'local_shipping'] },
+                          { $ne: ['$shippingMethod', 'pickup'] },
+                        ],
+                      },
+                      1,
+                      0,
+                    ],
+                  },
+                },
+                bookedLocalCount: {
+                  $sum: { $cond: ['$isLocal', 1, 0] },
+                },
+                bookedPickupCount: {
+                  $sum: { $cond: ['$isPickup', 1, 0] },
+                },
               },
             },
-          ]).then(([row]) => ({
+          ]).then(([row]) => {
+            const bookedTotal =
+              (row?.shopifyBookedCount ?? 0) + (row?.manualBookedCount ?? 0);
+            const pct = (n) =>
+              bookedTotal > 0 ? Math.round((n / bookedTotal) * 1000) / 10 : 0;
+            return {
             shopifyBooked: {
               count: row?.shopifyBookedCount ?? 0,
               amount: roundMoney(row?.shopifyBookedAmount ?? 0),
@@ -1651,7 +1684,23 @@ async function buildDashboardCore(range, preset) {
               count: row?.deliveredManualCount ?? 0,
               amount: roundMoney(row?.deliveredManualAmount ?? 0),
             },
-          })),
+            shippingMix: {
+              bosta: {
+                count: row?.bookedBostaCount ?? 0,
+                percent: pct(row?.bookedBostaCount ?? 0),
+              },
+              local: {
+                count: row?.bookedLocalCount ?? 0,
+                percent: pct(row?.bookedLocalCount ?? 0),
+              },
+              pickup: {
+                count: row?.bookedPickupCount ?? 0,
+                percent: pct(row?.bookedPickupCount ?? 0),
+              },
+              total: bookedTotal,
+            },
+          };
+          }),
     ]);
 
   const statusMap = Object.fromEntries(ordersByStatus.map((s) => [s._id, s.count]));
