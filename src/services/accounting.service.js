@@ -269,7 +269,6 @@ async function operationalPlFromOrders({ from, to }) {
     customerShipping: 0,
     bostaFees: 0,
     orderCount: 0,
-    applyEgp25: false,
   });
 
   if (applyShippingEconomics) {
@@ -282,7 +281,6 @@ async function operationalPlFromOrders({ from, to }) {
       customerShipping: sepCustomerShipping,
       bostaFees: useCardTotals ? bostaFees.total : sepBostaFees,
       orderCount: useCardTotals ? bostaFees.orderCount : sepBostaCount,
-      applyEgp25: true,
     });
   }
 
@@ -461,14 +459,13 @@ export async function getProfitAndLoss({ from, to } = {}) {
   const cogs = operational.cogs;
   const grossProfit = revenue - cogs;
 
-  // From Sep 2026: shipping P&L = Left after Bosta − EGP 25.
-  // Current net already deducts full Bosta fees; add customer shipping collected and
-  // subtract EGP 25 × Bosta deliveries so net reflects real brand shipping loss/gain.
+  // From Sep 2026: credit customer shipping (not in merchandise revenue) so net
+  // reflects Left after Bosta = customer shipping − Bosta fees.
+  // EGP 25 is already in order totals — do not deduct it again here.
+  // Shipping loss (when Left after Bosta < 0) is embedded via −Bosta + customer shipping.
   let netIncome = grossProfit - expenses;
   if (shippingEconomics.enabled) {
-    const shipAdj =
-      (Number(shippingEconomics.customerShipping) || 0) -
-      (Number(shippingEconomics.egp25Total) || 0);
+    const shipAdj = Number(shippingEconomics.customerShipping) || 0;
     netIncome = Math.round((netIncome + shipAdj) * 100) / 100;
   }
 
@@ -502,14 +499,9 @@ export async function getProfitAndLoss({ from, to } = {}) {
             amount: Number(shippingEconomics.leftAfterBosta) || 0,
           },
           {
-            key: 'egp25',
-            label: `EGP 25 × ${shippingEconomics.orderCount || 0} shipments`,
-            amount: -(Number(shippingEconomics.egp25Total) || 0),
-          },
-          {
-            key: 'shipping_result',
-            label: 'Shipping result (Left after Bosta − EGP 25)',
-            amount: Number(shippingEconomics.shippingResult) || 0,
+            key: 'shipping_loss',
+            label: 'Shipping loss (subtracted in net)',
+            amount: -(Number(shippingEconomics.shippingLoss) || 0),
           },
         ]
       : []),
