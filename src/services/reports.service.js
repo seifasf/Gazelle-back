@@ -1480,8 +1480,11 @@ async function buildDashboardCore(range, preset) {
       orderRange.empty
         ? Promise.resolve({
             shopifyBooked: { count: 0, amount: 0 },
+            manualBooked: { count: 0, amount: 0 },
             verifiedAndShipped: { count: 0, amount: 0 },
             delivered: { count: 0, amount: 0 },
+            deliveredShopify: { count: 0, amount: 0 },
+            deliveredManual: { count: 0, amount: 0 },
           })
         : Order.aggregate([
             // Cohort = OMS orders placed in the selected range (not Shopify dashboard totals).
@@ -1495,16 +1498,23 @@ async function buildDashboardCore(range, preset) {
                   ],
                 },
                 merchandiseValue: { $ifNull: ['$totalSellingPrice', 0] },
+                isShopify: { $eq: ['$orderSource', 'shopify'] },
               },
             },
             {
               $group: {
                 _id: null,
                 shopifyBookedCount: {
-                  $sum: { $cond: [{ $eq: ['$orderSource', 'shopify'] }, 1, 0] },
+                  $sum: { $cond: ['$isShopify', 1, 0] },
                 },
                 shopifyBookedAmount: {
-                  $sum: { $cond: [{ $eq: ['$orderSource', 'shopify'] }, '$orderValue', 0] },
+                  $sum: { $cond: ['$isShopify', '$orderValue', 0] },
+                },
+                manualBookedCount: {
+                  $sum: { $cond: ['$isShopify', 0, 1] },
+                },
+                manualBookedAmount: {
+                  $sum: { $cond: ['$isShopify', 0, '$orderValue'] },
                 },
                 // Verified + shipped (or beyond): left pending and actually entered fulfillment/shipping.
                 // Includes delivered / RTO so historical custom ranges stay correct.
@@ -1568,12 +1578,62 @@ async function buildDashboardCore(range, preset) {
                     $cond: [{ $eq: ['$internalStatus', 'delivered'] }, '$merchandiseValue', 0],
                   },
                 },
+                deliveredShopifyCount: {
+                  $sum: {
+                    $cond: [
+                      { $and: ['$isShopify', { $eq: ['$internalStatus', 'delivered'] }] },
+                      1,
+                      0,
+                    ],
+                  },
+                },
+                deliveredShopifyAmount: {
+                  $sum: {
+                    $cond: [
+                      { $and: ['$isShopify', { $eq: ['$internalStatus', 'delivered'] }] },
+                      '$merchandiseValue',
+                      0,
+                    ],
+                  },
+                },
+                deliveredManualCount: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $not: ['$isShopify'] },
+                          { $eq: ['$internalStatus', 'delivered'] },
+                        ],
+                      },
+                      1,
+                      0,
+                    ],
+                  },
+                },
+                deliveredManualAmount: {
+                  $sum: {
+                    $cond: [
+                      {
+                        $and: [
+                          { $not: ['$isShopify'] },
+                          { $eq: ['$internalStatus', 'delivered'] },
+                        ],
+                      },
+                      '$merchandiseValue',
+                      0,
+                    ],
+                  },
+                },
               },
             },
           ]).then(([row]) => ({
             shopifyBooked: {
               count: row?.shopifyBookedCount ?? 0,
               amount: roundMoney(row?.shopifyBookedAmount ?? 0),
+            },
+            manualBooked: {
+              count: row?.manualBookedCount ?? 0,
+              amount: roundMoney(row?.manualBookedAmount ?? 0),
             },
             verifiedAndShipped: {
               count: row?.verifiedAndShippedCount ?? 0,
@@ -1582,6 +1642,14 @@ async function buildDashboardCore(range, preset) {
             delivered: {
               count: row?.deliveredCount ?? 0,
               amount: roundMoney(row?.deliveredAmount ?? 0),
+            },
+            deliveredShopify: {
+              count: row?.deliveredShopifyCount ?? 0,
+              amount: roundMoney(row?.deliveredShopifyAmount ?? 0),
+            },
+            deliveredManual: {
+              count: row?.deliveredManualCount ?? 0,
+              amount: roundMoney(row?.deliveredManualAmount ?? 0),
             },
           })),
     ]);
