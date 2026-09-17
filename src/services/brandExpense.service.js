@@ -6,6 +6,10 @@ import { config } from '../config/index.js';
 /** Brand expense keys filled from OMS data (not manual month entry). */
 export const AUTO_COMPUTED_EXPENSE_KEYS = new Set(['shipping-loss']);
 
+function formatEgp(n) {
+  return `${Math.round((Number(n) || 0) * 100) / 100} EGP`;
+}
+
 function isAutoComputedExpense(template) {
   if (!template) return false;
   if (template.autoComputed) return true;
@@ -15,75 +19,29 @@ function isAutoComputedExpense(template) {
 }
 
 /**
- * Month shipping loss = max(0, Bosta fees − customer shipping) on delivered Bosta orders.
- * EGP 25 COD fee is not included. Before Sep 2026 → 0.
+ * Month shipping loss from real Bosta fees (delivered + failed/RTO).
+ * Failed/refused: customer shipping not collected; Bosta fee still counts.
  */
 async function computeMonthShippingLoss(yearMonth) {
-  const {
-    computeShippingEconomics,
-    shippingLossAppliesToRange,
-    SHIPPING_LOSS_START_YMD,
-  } = await import('../utils/shippingEconomics.js');
-  const { resolveBostaCourierFee } = await import('../constants/shippingZones.js');
+  const { loadShippingEconomicsForRange, computeShippingEconomics } = await import(
+    '../utils/shippingEconomics.js'
+  );
 
   const [y, m] = String(yearMonth).split('-').map(Number);
   if (!y || !m) {
-    return computeShippingEconomics({ customerShipping: 0, bostaFees: 0, orderCount: 0 });
+    return computeShippingEconomics({});
   }
 
-  // Egypt calendar month bounds (same idea as dashboard business days).
   const fromYmd = `${yearMonth}-01`;
   const lastDay = new Date(y, m, 0).getDate();
   const toYmd = `${yearMonth}-${String(lastDay).padStart(2, '0')}`;
-  if (!shippingLossAppliesToRange({ from: fromYmd, to: toYmd })) {
-    return {
-      ...computeShippingEconomics({ customerShipping: 0, bostaFees: 0, orderCount: 0 }),
-      enabled: false,
-    };
-  }
-
   const Order = (await import('../models/Order.js')).default;
-  const shippingStart = new Date(`${SHIPPING_LOSS_START_YMD}T00:00:00.000Z`);
-  const from = new Date(`${fromYmd}T00:00:00+03:00`);
-  const to = new Date(`${toYmd}T23:59:59.999+03:00`);
 
-  const orders = await Order.find({
-    internalStatus: 'delivered',
-    deliveredAt: { $gte: from, $lte: to },
-  }).select(
-    'deliveredAt shippingFee shippingMethod bostaCourierFee bostaFeeBreakdown bostaTrackingNumber bostaDeliveryId shippingAddress'
-  );
-
-  let customerShipping = 0;
-  let bostaFees = 0;
-  let orderCount = 0;
-
-  for (const order of orders) {
-    const deliveredAt = order.deliveredAt ? new Date(order.deliveredAt) : null;
-    if (!deliveredAt || deliveredAt < shippingStart) continue;
-    const method = order.shippingMethod;
-    if (method === 'local_shipping' || method === 'pickup') continue;
-    const isBosta =
-      method === 'bosta' ||
-      method == null ||
-      Boolean(order.bostaTrackingNumber) ||
-      Boolean(order.bostaDeliveryId);
-    if (!isBosta && method && method !== 'bosta') continue;
-
-    orderCount += 1;
-    customerShipping += Number(order.shippingFee) || 0;
-    const breakdown = order.bostaFeeBreakdown;
-    if (breakdown && breakdown.total > 0) {
-      bostaFees += Number(breakdown.total) || 0;
-    } else {
-      bostaFees += Number(order.bostaCourierFee) || resolveBostaCourierFee(order) || 50;
-    }
-  }
-
-  return {
-    ...computeShippingEconomics({ customerShipping, bostaFees, orderCount }),
-    enabled: true,
-  };
+  return loadShippingEconomicsForRange({
+    from: `${fromYmd}T00:00:00+03:00`,
+    to: `${toYmd}T23:59:59.999+03:00`,
+    Order,
+  });
 }
 
 function usdToEgpRate() {
@@ -252,10 +210,10 @@ export async function getMonthExpenseBreakdown(yearMonth) {
         defaultAmount: t.amount,
         hasEntry: true,
         autoComputed: true,
-        note:
-          shippingEco.enabled === false
-            ? 'Auto · shipping loss applies from Sep 2026'
-            : `Auto · ${shippingEco.orderCount || 0} Bosta deliveries · Left after Bosta ${shippingEco.leftAfterBosta ?? 0}`,
+            note:
+              shippingEco.enabled === false
+                ? 'Auto from Sep 2026'
+                : `Auto from Bosta API · ${formatEgp(autoShippingLoss)} loss · ${shippingEco.delivered?.count ?? 0} delivered + ${shippingEco.failedRto?.count ?? 0} failed/RTO`,
       };
     }
 

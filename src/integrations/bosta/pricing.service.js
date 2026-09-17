@@ -171,27 +171,82 @@ export function parseBostaFeeBreakdown(raw, source = 'calculator') {
 export function parseBostaFeeBreakdownFromDelivery(delivery) {
   if (!delivery || typeof delivery !== 'object') return null;
 
-  const candidates = [
+  const root =
+    delivery.data && typeof delivery.data === 'object' && !Array.isArray(delivery.data)
+      ? delivery.data
+      : delivery;
+
+  // Prefer rich wallet / fee objects (full invoice lines).
+  const richCandidates = [
+    root.wallet?.cashCycle,
     delivery.wallet?.cashCycle,
-    delivery.data?.wallet?.cashCycle,
-    delivery.wallet?.cashout,
-    delivery.pricing,
-    delivery.pricingDetails,
-    delivery.shipmentFees,
-    delivery.fees,
-    delivery.wallet?.pricing,
-    delivery.wallet?.fees,
-    delivery.wallet?.feeBreakdown,
-    delivery.wallet?.shipmentFees,
-    delivery.wallet,
-    delivery,
+    root.wallet?.feeBreakdown,
+    root.wallet?.pricing,
+    root.pricingDetails,
+    root.fees,
+    root.breakdown,
+    root.feeBreakdown,
   ];
 
-  for (const candidate of candidates) {
+  let best = null;
+  for (const candidate of richCandidates) {
     const parsed = parseBostaFeeBreakdown(candidate, 'delivery');
-    if (parsed?.total > 0) return parsed;
+    if (!parsed?.total) continue;
+    // Prefer a breakdown that includes courier shipping, not insurance-only.
+    if (parsed.shippingFee > 0 || parsed.openPackageFee > 0 || parsed.nextDayTransferFee > 0) {
+      return parsed;
+    }
+    if (!best || parsed.total > best.total) best = parsed;
   }
-  return null;
+
+  // Live deliveries often expose the main courier charge as root.shipmentFees,
+  // while pricing only has insuranceFee — merge them.
+  const shipmentFees = Number(root.shipmentFees ?? delivery.shipmentFees);
+  const fromPricing = parseBostaFeeBreakdown(root.pricing || delivery.pricing, 'delivery');
+  const fromRoot = parseBostaFeeBreakdown(root, 'delivery');
+
+  let shippingFee = 0;
+  let openPackageFee = 0;
+  let nextDayTransferFee = 0;
+  let vat = 0;
+  let insuranceFee = 0;
+
+  if (Number.isFinite(shipmentFees) && shipmentFees > 0) {
+    shippingFee = roundEgp(shipmentFees);
+  } else {
+    shippingFee =
+      fromPricing?.shippingFee ||
+      fromRoot?.shippingFee ||
+      best?.shippingFee ||
+      0;
+  }
+
+  openPackageFee =
+    fromPricing?.openPackageFee || fromRoot?.openPackageFee || best?.openPackageFee || 0;
+  nextDayTransferFee =
+    fromPricing?.nextDayTransferFee ||
+    fromRoot?.nextDayTransferFee ||
+    best?.nextDayTransferFee ||
+    0;
+  vat = fromPricing?.vat || fromRoot?.vat || best?.vat || 0;
+  insuranceFee =
+    fromPricing?.insuranceFee || fromRoot?.insuranceFee || best?.insuranceFee || 0;
+
+  const total = roundEgp(
+    shippingFee + openPackageFee + nextDayTransferFee + vat + insuranceFee
+  );
+  if (!(total > 0)) return best;
+
+  return {
+    shippingFee: roundEgp(shippingFee),
+    openPackageFee: roundEgp(openPackageFee),
+    nextDayTransferFee: roundEgp(nextDayTransferFee),
+    vat: roundEgp(vat),
+    insuranceFee: roundEgp(insuranceFee),
+    total,
+    source: 'delivery',
+    fetchedAt: new Date(),
+  };
 }
 
 function mapCalculatorType(type) {
@@ -201,7 +256,14 @@ function mapCalculatorType(type) {
 }
 
 export function buildCalculatorParamsForOrder(order) {
-  if (!order || order.shippingMethod !== 'bosta') return null;
+  if (!order) return null;
+  const method = order.shippingMethod;
+  if (method === 'local_shipping' || method === 'pickup') return null;
+  const isBosta =
+    method === 'bosta' ||
+    Boolean(order.bostaTrackingNumber) ||
+    Boolean(order.bostaDeliveryId);
+  if (!isBosta) return null;
 
   const dropOffCity = String(order.shippingAddress?.city || '').trim();
   if (!dropOffCity) return null;

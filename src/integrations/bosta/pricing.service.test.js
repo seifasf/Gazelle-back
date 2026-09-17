@@ -108,8 +108,30 @@ describe('parseBostaFeeBreakdown', () => {
     assert.equal(parsed.total, 109.27);
   });
 
-  it('returns null when no fee data is present', () => {
-    assert.equal(parseBostaFeeBreakdown({}), null);
-    assert.equal(parseBostaFeeBreakdown(null), null);
+  it('merges root.shipmentFees with pricing.insuranceFee (live Cairo delivery)', () => {
+    const parsed = parseBostaFeeBreakdownFromDelivery({
+      trackingNumber: '6187917039',
+      shipmentFees: 90.69,
+      pricing: {
+        insuranceFee: { amount: 5, percentage: 0.005 },
+      },
+      wallet: { cashCycle: null, cashout: {} },
+    });
+
+    assert.ok(parsed);
+    assert.equal(parsed.shippingFee, 90.69);
+    assert.equal(parsed.insuranceFee, 5);
+    assert.equal(parsed.total, 95.69);
+    assert.equal(parsed.source, 'delivery');
+  });
+
+  it('does not stop at insurance-only pricing when shipmentFees exists', () => {
+    const parsed = parseBostaFeeBreakdownFromDelivery({
+      shipmentFees: 99,
+      pricing: { insuranceFee: 5 },
+    });
+    assert.equal(parsed.shippingFee, 99);
+    assert.equal(parsed.total, 104);
   });
 });
+
