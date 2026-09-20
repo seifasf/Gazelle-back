@@ -65,9 +65,11 @@ export const ORDER_TRANSITIONS = {
   pending_refund: ['returned_to_stock', 'cancelled'],
   // Customer return / RTO after a successful delivery.
   // Also allow Bosta to correct false "delivered" (Shopify fulfill ≠ delivery).
+  // Local exchange/refund: after delivery, collect bag can still enter Back from local for scan.
   delivered: [
     'returning_to_origin',
     'returned_awaiting_receipt',
+    'back_from_local_shipping',
     'failed_delivery',
     'in_transit',
   ],

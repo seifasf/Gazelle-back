@@ -19,12 +19,13 @@ export async function syncCatalogFromShopify() {
 
   const shopifyProducts = await fetchAllProducts();
   let variantCount = 0;
-  const activeShopifyIds = new Set();
+  const knownShopifyIds = new Set();
 
   for (const sp of shopifyProducts) {
-    // Read-only: only mirror live (ACTIVE) products in OMS — never write back to Shopify.
-    if (sp.status !== 'ACTIVE') continue;
-    activeShopifyIds.add(sp.id);
+    // Read-only: mirror ACTIVE + DRAFT into OMS (draft SKUs still needed for stock/returns).
+    // Never write back to Shopify. Skip ARCHIVED.
+    if (sp.status === 'ARCHIVED') continue;
+    knownShopifyIds.add(sp.id);
 
     const product = await Product.findOneAndUpdate(
       { shopifyProductId: sp.id },
@@ -37,7 +38,8 @@ export async function syncCatalogFromShopify() {
           productType: sp.productType,
           imageUrl: sp.featuredImageUrl || sp.featuredImage?.url,
           tags: sp.tagsList || sp.tags || [],
-          status: mapShopifyStatus(sp.status),
+          // Keep draft Shopify products searchable in OMS stock tools.
+          status: sp.status === 'DRAFT' ? 'active' : mapShopifyStatus(sp.status),
           lastSyncedAt: new Date(),
         },
       },
@@ -79,13 +81,9 @@ export async function syncCatalogFromShopify() {
     }
   }
 
-  // Remove draft/archived products from OMS only (Shopify is untouched).
+  // Drop OMS rows only when the Shopify product is gone (or archived) — not merely draft.
   const staleProducts = await Product.find({
-    shopifyProductId: { $exists: true, $ne: '' },
-    $or: [
-      { status: { $ne: 'active' } },
-      { shopifyProductId: { $nin: [...activeShopifyIds] } },
-    ],
+    shopifyProductId: { $exists: true, $nin: ['', ...knownShopifyIds] },
   }).select('_id shopifyProductId title status');
 
   if (staleProducts.length) {
@@ -94,7 +92,7 @@ export async function syncCatalogFromShopify() {
     await Product.deleteMany({ _id: { $in: staleIds } });
     logger.info(
       { products: staleProducts.length, variants: removedVariants.deletedCount },
-      'Removed non-active products from OMS (Shopify unchanged)'
+      'Removed products no longer on Shopify (Shopify unchanged)'
     );
   }
 
@@ -108,8 +106,8 @@ export async function syncCatalogFromShopify() {
     { upsert: true }
   );
 
-  logger.info({ products: activeShopifyIds.size, variants: variantCount }, 'Shopify active catalog synced');
-  return { products: activeShopifyIds.size, variants: variantCount, mode: 'admin' };
+  logger.info({ products: knownShopifyIds.size, variants: variantCount }, 'Shopify active+draft catalog synced');
+  return { products: knownShopifyIds.size, variants: variantCount, mode: 'admin' };
 }
 
 export async function syncCatalog({ preferStorefront = false } = {}) {

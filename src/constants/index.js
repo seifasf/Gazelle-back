@@ -83,8 +83,8 @@ export const DEFAULT_BOSTA_SHIPPING_FEE = 95;
 
 /**
  * OMS order cutover (Cairo calendar day).
- * Order lists + order-based dashboard tiles only include orders placed on/after this day.
- * Money KPIs (COD, Paymob, Bosta returns) keep the admin-selected full date range.
+ * Order queues / lists (no search) only include orders placed on/after this day.
+ * Explicit search still finds older orders. Money KPIs keep the admin-selected full date range.
  */
 export const ORDERS_PLACED_FROM_YMD = '2026-07-20';
 

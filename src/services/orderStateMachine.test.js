@@ -1,12 +1,16 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { canTransition, assertTransition, isTerminalStatus } from './orderStateMachine.js';
+import { canTransition, isTerminalStatus } from './orderStateMachine.js';
 
 describe('orderStateMachine pending_refund', () => {
   it('allows transition from returning_to_origin and returned_awaiting_receipt to pending_refund', () => {
     assert.equal(canTransition('returning_to_origin', 'pending_refund'), true);
     assert.equal(canTransition('returned_awaiting_receipt', 'pending_refund'), true);
     assert.equal(canTransition('back_from_local_shipping', 'pending_refund'), true);
+  });
+
+  it('allows delivered local exchange/refund to move to back_from_local_shipping', () => {
+    assert.equal(canTransition('delivered', 'back_from_local_shipping'), true);
   });
 
   it('allows transition from pending_refund to returned_to_stock when paid', () => {

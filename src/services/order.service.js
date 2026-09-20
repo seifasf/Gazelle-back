@@ -1040,16 +1040,20 @@ export async function returnLocalShippingToStock(orderId, actorUserId, { note, i
       throw err;
     }
     const allowed = ['local_shipping', 'failed_delivery'];
-    if (!allowed.includes(order.internalStatus)) {
+    // Post-delivery local exchange / refund: collect bag comes back after the new pair was delivered.
+    const deliveredCollectBack =
+      order.internalStatus === 'delivered'
+      && (order.isExchangeOrder || order.isReturnOrder);
+    if (!allowed.includes(order.internalStatus) && !deliveredCollectBack) {
       const err = new Error(
-        'Order must be in Local shipping or Failed delivery to mark back from local shipping'
+        'Order must be in Local shipping, Failed delivery, or a delivered local exchange/refund to mark back from local shipping'
       );
       err.statusCode = 400;
       throw err;
     }
 
-    const kind = ['cancel', 'exchange', 'failed'].includes(intent) ? intent : 'failed';
-    order.localReturnIntent = kind;
+    const kind = ['cancel', 'exchange', 'failed', 'refund'].includes(intent) ? intent : 'failed';
+    order.localReturnIntent = kind === 'refund' ? 'failed' : kind;
     if (kind === 'cancel' && reason) order.cancellationReason = reason;
     await order.save({ session });
 
@@ -1059,7 +1063,9 @@ export async function returnLocalShippingToStock(orderId, actorUserId, { note, i
         ? 'Cancel — package back from local shipping, scan on Returns'
         : kind === 'exchange'
           ? 'Exchange — package back from local shipping, scan on Returns'
-          : 'Admin confirmed package is back from local shipping — scan on Returns');
+          : deliveredCollectBack || order.isReturnOrder
+            ? 'Collect / refund bag back from local shipping — scan on Returns'
+            : 'Admin confirmed package is back from local shipping — scan on Returns');
 
     await transitionOrder(
       order,
@@ -2163,6 +2169,18 @@ export async function createManualOrder({
       throw err;
     }
 
+    if (customerReturn && method === 'pickup') {
+      const err = new Error('Return / refund cannot use customer pickup — choose Bosta or Local shipping');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (customerReturn && method !== 'bosta' && method !== 'local_shipping') {
+      const err = new Error('Return / refund must use Bosta or Local shipping');
+      err.statusCode = 400;
+      throw err;
+    }
+
     let shipDelay = null;
     if (delayedUntilInput && !customerReturn) {
       shipDelay = parseCairoDelayDate(delayedUntilInput);
@@ -2171,14 +2189,16 @@ export async function createManualOrder({
       typeof delayNoteInput === 'string' ? delayNoteInput.trim().slice(0, 500) : '';
 
     const isPickup = method === 'pickup' && !exchange && !customerReturn;
+    const localReturnPickup = customerReturn && method === 'local_shipping';
     const now = new Date();
 
     // Manual orders skip call-center verify:
     // - normal / exchange / local / bosta / customer pickup → Ready to ship
-    // - refund / return → Returning to Warehouse (track inbound)
+    // - Bosta refund / return → Returning to Warehouse (CRP inbound)
+    // - Local refund / return → Ready to ship (local courier pickup, then Back from local)
     // - optional ship-after date → still Ready (stock held) but hidden from pick until that day
     let initialStatus = 'verified_ready_for_shipping';
-    if (customerReturn) initialStatus = 'returning_to_origin';
+    if (customerReturn && !localReturnPickup) initialStatus = 'returning_to_origin';
 
     // Enrich collect lines with SKU/title/price from variants + prior order so refund payout is accurate.
     let normalizedReturnItems = [];
@@ -2316,7 +2336,9 @@ export async function createManualOrder({
           {
             outcome: 'confirmed',
             note: customerReturn
-              ? 'Return / refund auto-verified · Returning to Warehouse · Bosta CRP · COD 0'
+              ? localReturnPickup
+                ? 'Return / refund auto-verified · Ready to ship · Local courier pickup · COD 0'
+                : 'Return / refund auto-verified · Returning to Warehouse · Bosta CRP · COD 0'
               : isPickup
                 ? 'Pickup auto-verified · Ready to ship · print Gazelle policy on Fulfillment'
                 : exchange
@@ -2349,7 +2371,9 @@ export async function createManualOrder({
         source: 'user_action',
         actorUserId,
         note: customerReturn
-          ? `Return pickup from ${manualSource} (for ${priorLabel}) · Returning to Warehouse · COD 0`
+          ? localReturnPickup
+            ? `Return pickup from ${manualSource} (for ${priorLabel}) · Local courier · Ready to ship · COD 0`
+            : `Return pickup from ${manualSource} (for ${priorLabel}) · Returning to Warehouse · COD 0`
           : isPickup
             ? `Pickup from ${manualSource} · Ready to ship`
             : exchange
@@ -2386,10 +2410,22 @@ export async function createManualOrder({
       /* non-blocking */
     }
   }
+  // Local return pickups are Ready to ship — notify stock like other ready orders.
+  if (
+    manualOrder.isReturnOrder
+    && manualOrder.shippingMethod === 'local_shipping'
+    && manualOrder.internalStatus === 'verified_ready_for_shipping'
+  ) {
+    try {
+      await notifyOrderVerified(manualOrder);
+    } catch {
+      /* non-blocking */
+    }
+  }
 
-  // Refund / return pickups: create Bosta CRP (type 25, COD 0) immediately.
-  // Status stays Returning to Warehouse — do not move to awaiting_bosta_pickup.
-  if (manualOrder.isReturnOrder) {
+  // Bosta refund pickups only: create CRP (type 25, COD 0) immediately.
+  // Local returns skip Bosta — courier pickup then Back from local shipping → scan.
+  if (manualOrder.isReturnOrder && manualOrder.shippingMethod !== 'local_shipping') {
     try {
       const { ensureBostaDeliveryForOrder } = await import('./fulfillment.service.js');
       await ensureBostaDeliveryForOrder(manualOrder._id, actorUserId);
@@ -2592,10 +2628,12 @@ export async function listOrders({
   skip = 0,
   sort = { placedAt: -1 },
 }) {
-  const filter = {
-    // Hide pre-cutover orders from queues / lists; money KPIs still use full ranges.
-    placedAt: { $gte: ordersPlacedFromCutoff() },
-  };
+  const searchTerm = search != null ? String(search).trim() : '';
+  // Hide pre-cutover orders from queues / lists; money KPIs still use full ranges.
+  // Explicit search (order #, phone, name) must still find older orders like #43694.
+  const filter = searchTerm
+    ? {}
+    : { placedAt: { $gte: ordersPlacedFromCutoff() } };
   if (status) {
     const statuses = typeof status === 'string' && status.includes(',')
       ? status.split(',').map((s) => s.trim())
@@ -2683,54 +2721,52 @@ export async function listOrders({
   if (readyOnly) {
     filter.$and = [...(filter.$and || []), shipAfterNotDueFilter()];
   }
-  if (search) {
-    const term = String(search).trim();
-    if (term) {
-      const regex = { $regex: escapeRegex(term), $options: 'i' };
-      // Match customer name/phone/email too — UI shows customerId.fullName,
-      // and pickup/manual orders often have no searchable shippingAddress.
-      const matchingCustomers = await Customer.find({
-        $or: [
-          { fullName: regex },
-          { phone: regex },
-          { email: regex },
-          ...phoneMatchRegexes(term).map((re) => ({ phone: { $regex: re } })),
-        ],
-      })
-        .select('_id')
-        .lean();
-      const customerIds = matchingCustomers.map((c) => c._id);
+  if (searchTerm) {
+    const term = searchTerm;
+    const regex = { $regex: escapeRegex(term), $options: 'i' };
+    // Match customer name/phone/email too — UI shows customerId.fullName,
+    // and pickup/manual orders often have no searchable shippingAddress.
+    const matchingCustomers = await Customer.find({
+      $or: [
+        { fullName: regex },
+        { phone: regex },
+        { email: regex },
+        ...phoneMatchRegexes(term).map((re) => ({ phone: { $regex: re } })),
+      ],
+    })
+      .select('_id')
+      .lean();
+    const customerIds = matchingCustomers.map((c) => c._id);
 
-      const digits = term.replace(/^#/, '').trim();
-      const withHash = digits.startsWith('#') ? digits : `#${digits}`;
-      const digitsRegex = digits ? { $regex: escapeRegex(digits), $options: 'i' } : null;
-      const hashRegex = digits ? { $regex: escapeRegex(withHash), $options: 'i' } : null;
-      const phoneRes = phoneMatchRegexes(term);
+    const digits = term.replace(/^#/, '').trim();
+    const withHash = digits.startsWith('#') ? digits : `#${digits}`;
+    const digitsRegex = digits ? { $regex: escapeRegex(digits), $options: 'i' } : null;
+    const hashRegex = digits ? { $regex: escapeRegex(withHash), $options: 'i' } : null;
+    const phoneRes = phoneMatchRegexes(term);
 
-      filter.$or = [
-        { shopifyOrderId: regex },
-        { shopifyOrderName: regex },
-        { bostaTrackingNumber: regex },
-        { bostaDeliveryId: regex },
-        { 'shippingAddress.fullName': regex },
-        { 'shippingAddress.phone': regex },
-        { 'shippingAddress.city': regex },
-        { 'items.sku': regex },
-        ...phoneRes.map((re) => ({ 'shippingAddress.phone': { $regex: re } })),
-        ...(customerIds.length ? [{ customerId: { $in: customerIds } }] : []),
-      ];
+    filter.$or = [
+      { shopifyOrderId: regex },
+      { shopifyOrderName: regex },
+      { bostaTrackingNumber: regex },
+      { bostaDeliveryId: regex },
+      { 'shippingAddress.fullName': regex },
+      { 'shippingAddress.phone': regex },
+      { 'shippingAddress.city': regex },
+      { 'items.sku': regex },
+      ...phoneRes.map((re) => ({ 'shippingAddress.phone': { $regex: re } })),
+      ...(customerIds.length ? [{ customerId: { $in: customerIds } }] : []),
+    ];
 
-      // Order # as shown in UI (#44004) — match with/without hash on name + id.
-      if (digits && digitsRegex) {
-        filter.$or.push(
-          { shopifyOrderId: digitsRegex },
-          { shopifyOrderName: digitsRegex },
-          { shopifyOrderName: hashRegex },
-          { bostaTrackingNumber: digitsRegex },
-          { bostaDeliveryId: digitsRegex },
-          { 'items.sku': digitsRegex }
-        );
-      }
+    // Order # as shown in UI (#44004) — match with/without hash on name + id.
+    if (digits && digitsRegex) {
+      filter.$or.push(
+        { shopifyOrderId: digitsRegex },
+        { shopifyOrderName: digitsRegex },
+        { shopifyOrderName: hashRegex },
+        { bostaTrackingNumber: digitsRegex },
+        { bostaDeliveryId: digitsRegex },
+        { 'items.sku': digitsRegex }
+      );
     }
   }
   const [orders, total] = await Promise.all([

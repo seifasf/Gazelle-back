@@ -159,7 +159,7 @@ const orderSchema = new mongoose.Schema(
      */
     exchangeCreditAmount: { type: Number, min: 0, default: 0 },
     /**
-     * Manual customer-return pickup (refund/return) — Bosta type CRP, COD always 0.
+     * Manual customer-return pickup (refund/return) — Bosta CRP or local courier, COD always 0.
      * Courier picks items up; no cash to the customer.
      */
     isReturnOrder: { type: Boolean, default: false, index: true },

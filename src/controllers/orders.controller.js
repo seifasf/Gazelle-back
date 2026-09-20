@@ -311,8 +311,11 @@ export async function updateShippingAddress(req, res, next) {
       if (order.isExchangeOrder && shippingMethod === 'pickup') {
         return res.status(400).json({ error: 'Exchange orders cannot use pickup' });
       }
-      if (order.isReturnOrder && shippingMethod !== 'bosta') {
-        return res.status(400).json({ error: 'Return pickups must use Bosta' });
+      if (order.isReturnOrder && shippingMethod === 'pickup') {
+        return res.status(400).json({ error: 'Return / refund cannot use pickup — choose Bosta or Local shipping' });
+      }
+      if (order.isReturnOrder && shippingMethod !== 'bosta' && shippingMethod !== 'local_shipping') {
+        return res.status(400).json({ error: 'Return pickups must use Bosta or Local shipping' });
       }
       order.shippingMethod = shippingMethod;
       if (shippingMethod === 'local_shipping') {
