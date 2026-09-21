@@ -451,10 +451,14 @@ export async function transitionStatus(req, res, next) {
         || (
           fromStatus === 'awaiting_bosta_pickup'
           && ['verified_ready_for_shipping', 'out_of_stock', 'pending_verification'].includes(toStatus)
+        )
+        || (
+          fromStatus === 'local_shipping'
+          && toStatus === 'verified_ready_for_shipping'
         );
       if (!allowed) {
         return res.status(403).json({
-          error: 'Stock managers can move Ready ↔ Out of stock, or pull Awaiting Bosta pickup back to Ready / Out of stock / Pending',
+          error: 'Stock managers can move Ready ↔ Out of stock, pull Awaiting Bosta pickup back to Ready / Out of stock / Pending, or pull Local shipping back to Ready',
         });
       }
     }

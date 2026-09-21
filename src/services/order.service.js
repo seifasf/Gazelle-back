@@ -75,6 +75,9 @@ async function transitionOrder(order, toStatus, meta, session) {
     if (fromStatus === 'out_of_stock') {
       $set.returnedFromOutOfStockAt = new Date();
     }
+    if (fromStatus === 'local_shipping' || fromStatus === 'awaiting_bosta_pickup') {
+      $unset.localShippingMarkedAt = 1;
+    }
   }
   if (
     fromStatus === 'verified_ready_for_shipping'

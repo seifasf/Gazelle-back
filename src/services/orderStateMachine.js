@@ -36,11 +36,12 @@ export const ORDER_TRANSITIONS = {
     'pending_verification',
     'cancelled',
   ],
-  // Local courier has the package — confirm delivery, cancel, fail→stock, or pull back to Pending.
+  // Local courier has the package — confirm delivery, cancel, fail→stock, or pull back to Ready / Pending.
   local_shipping: [
     'delivered',
     'cancelled',
     'pending_verification',
+    'verified_ready_for_shipping',
     'in_transit',
     'failed_delivery',
     'returning_to_origin',
