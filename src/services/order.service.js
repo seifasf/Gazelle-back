@@ -7,6 +7,7 @@ import InventoryLedger from '../models/InventoryLedger.js';
 import mongoose from 'mongoose';
 import { withTransaction } from '../utils/transaction.js';
 import { isManualOrderRef } from '../utils/orderRefs.js';
+import { assertCollectFromPriorOrder, healCollectToPriorOrder } from '../utils/assertCollectFromPriorOrder.js';
 import Settings from '../models/Settings.js';
 import { assertTransition, isTerminalStatus } from './orderStateMachine.js';
 import {
@@ -1107,6 +1108,39 @@ export async function confirmReturnedToStock(
       throw err;
     }
 
+    // Critical: collect must be what the customer already has on the original order.
+    // Heal wrong sizes (deliver SKU saved as collect) before restocking.
+    const priorId = order.exchangeFromOrderId || order.returnFromOrderId;
+    if (priorId && (order.isExchangeOrder || order.isReturnOrder)) {
+      const prior = await Order.findById(priorId).session(session);
+      if (prior) {
+        const rawCollect =
+          Array.isArray(order.bostaReturnItems) && order.bostaReturnItems.length
+            ? order.bostaReturnItems
+            : order.isReturnOrder
+              ? order.items
+              : [];
+        if (rawCollect.length) {
+          const { items: healed, changed, fixes } = healCollectToPriorOrder(rawCollect, prior);
+          assertCollectFromPriorOrder(healed, prior, {
+            kind: order.isReturnOrder ? 'return' : 'exchange',
+          });
+          if (changed) {
+            order.bostaReturnItems = healed;
+            order.verificationLog = order.verificationLog || [];
+            order.verificationLog.push({
+              outcome: 'confirmed',
+              note: `Auto-fixed collect to original order sizes: ${fixes
+                .map((f) => `${f.from}→${f.to}`)
+                .join(', ')}`,
+              actorUserId,
+              createdAt: new Date(),
+            });
+          }
+        }
+      }
+    }
+
     // Persist the structured reason for analytics.
     // Never wipe an order-manager note with an empty warehouse note.
     if (returnReason) order.returnReason = returnReason;
@@ -2008,6 +2042,11 @@ export async function createManualOrder({
         err.statusCode = 404;
         throw err;
       }
+      if (exchange || customerReturn) {
+        assertCollectFromPriorOrder(bostaReturnItems, priorOrder, {
+          kind: customerReturn ? 'return' : 'exchange',
+        });
+      }
     }
 
     let customerDoc = await Customer.findOne({ phone: customer.phone }).session(session);
@@ -2903,6 +2942,43 @@ export async function getOrderById(orderId) {
     });
 
   if (!order) return null;
+
+  // Heal bad exchange/return collect SKUs before warehouse sees the receive sheet.
+  const priorIdForCollect = order.exchangeFromOrderId || order.returnFromOrderId;
+  if (
+    priorIdForCollect &&
+    (order.isExchangeOrder || order.isReturnOrder) &&
+    Array.isArray(order.bostaReturnItems) &&
+    order.bostaReturnItems.length
+  ) {
+    const prior = await Order.findById(priorIdForCollect).select('items shopifyOrderName shopifyOrderId');
+    if (prior) {
+      const { items: healed, changed, fixes } = healCollectToPriorOrder(order.bostaReturnItems, prior);
+      if (changed) {
+        order.bostaReturnItems = healed;
+        await Order.updateOne(
+          { _id: order._id },
+          {
+            $set: { bostaReturnItems: healed },
+            $push: {
+              verificationLog: {
+                outcome: 'confirmed',
+                note: `Auto-fixed collect to original order sizes: ${fixes
+                  .map((f) => `${f.from}→${f.to}`)
+                  .join(', ')}`,
+                createdAt: new Date(),
+              },
+            },
+          }
+        );
+        await order.populate({
+          path: 'bostaReturnItems.variantId',
+          select: 'title color size imageUrl sku barcode productId',
+          populate: { path: 'productId', select: 'title imageUrl' },
+        });
+      }
+    }
+  }
 
   // Ensure pending refunds always expose the amount owed to the customer.
   if (
