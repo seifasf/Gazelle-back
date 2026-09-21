@@ -49,7 +49,9 @@ export async function syncCatalogFromShopify() {
     for (const { node: sv } of sp.variants.edges) {
       const sku = String(sv.sku || '').trim();
       if (!sku) continue;
-      const existing = await Variant.findOne({ shopifyVariantId: sv.id });
+      const existing =
+        (await Variant.findOne({ shopifyVariantId: sv.id })) ||
+        (sku ? await Variant.findOne({ sku: new RegExp(`^${sku.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }) } : null);
       const { color, size } = parseVariantOptions(sv.selectedOptions, sp.options);
       const update = {
         productId: product._id,
@@ -73,7 +75,7 @@ export async function syncCatalogFromShopify() {
       }
 
       await Variant.findOneAndUpdate(
-        { shopifyVariantId: sv.id },
+        existing ? { _id: existing._id } : { shopifyVariantId: sv.id },
         { $set: update },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );

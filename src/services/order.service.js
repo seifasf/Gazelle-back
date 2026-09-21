@@ -2043,9 +2043,11 @@ export async function createManualOrder({
     const orderItems = [];
     let outboundGoodsValue = 0;
     for (const item of outboundItemsInput || []) {
-      const variant = await Variant.findById(item.variantId).session(session);
+      const variant = await resolveVariantForLine(item, session);
       if (!variant) {
-        const err = new Error(`Variant not found: ${item.variantId}`);
+        const err = new Error(
+          `Variant not found for ${item.sku || item.variantId || 'line'} — re-sync catalog or pick the size again`
+        );
         err.statusCode = 404;
         throw err;
       }
@@ -2076,24 +2078,33 @@ export async function createManualOrder({
     if (exchange && Array.isArray(bostaReturnItems)) {
       const priorLines = (priorOrder?.items || []).map((pi) => ({
         vid: String(pi.variantId?._id || pi.variantId || ''),
+        sku: String(pi.sku || '').toUpperCase(),
         unit: Number(pi.unitSellingPrice) || 0,
         remaining: Number(pi.quantity) || 0,
       }));
       for (const r of bostaReturnItems) {
-        const vid = String(r.variantId || '');
         const qty = Number(r.quantity) || 0;
-        if (!vid || qty < 1) continue;
+        if (qty < 1) continue;
+        const variant = await resolveVariantForLine(r, session);
+        const vid = variant ? String(variant._id) : String(r.variantId || '');
+        if (!vid) continue;
         const payloadUnit = Number(r.unitSellingPrice);
         let unit = Number.isFinite(payloadUnit) && payloadUnit > 0 ? payloadUnit : null;
         if (unit == null) {
-          const line = priorLines.find((p) => p.vid === vid && p.remaining > 0);
+          const line =
+            priorLines.find((p) => p.vid === vid && p.remaining > 0) ||
+            priorLines.find(
+              (p) =>
+                p.sku
+                && p.sku === String(r.sku || variant?.sku || '').toUpperCase()
+                && p.remaining > 0
+            );
           if (line) {
             unit = line.unit;
             line.remaining = Math.max(0, line.remaining - qty);
           }
         }
         if (unit == null) {
-          const variant = await Variant.findById(vid).session(session);
           unit = Number(variant?.sellingPrice) || 0;
         }
         returnGoodsValue += unit * qty;
@@ -2210,9 +2221,11 @@ export async function createManualOrder({
         remaining: Number(pi.quantity) || 0,
       }));
       for (const r of bostaReturnItems) {
-        const variant = await Variant.findById(r.variantId).session(session);
+        const variant = await resolveVariantForLine(r, session);
         if (!variant) {
-          const err = new Error(`Return variant not found: ${r.variantId}`);
+          const err = new Error(
+            `Return variant not found for ${r.sku || r.variantId || 'line'} — re-sync catalog or pick the size again`
+          );
           err.statusCode = 404;
           throw err;
         }
@@ -2465,10 +2478,11 @@ export async function findOrderForExchange(query) {
   async function populateOrder(docOrId) {
     const id = docOrId?._id || docOrId;
     if (!id) return null;
-    return Order.findById(id)
+    const order = await Order.findById(id)
       .populate('customerId', 'fullName phone email')
       .populate('items.variantId', 'title color size imageUrl sku sellingPrice productId')
       .lean();
+    return healMissingOrderVariants(order);
   }
 
   // Shopify path: any numeric / #order entered → search Shopify live.
@@ -2510,11 +2524,93 @@ export async function findOrderForExchange(query) {
     throw err;
   }
 
-  return local;
+  return healMissingOrderVariants(local);
 }
 
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isValidObjectId(value) {
+  return mongoose.Types.ObjectId.isValid(value) && String(new mongoose.Types.ObjectId(value)) === String(value);
+}
+
+/**
+ * Resolve a variant from a line's variantId and/or SKU.
+ * Heals stale order lines whose variantId was deleted after a catalog re-sync.
+ */
+async function resolveVariantForLine(line, session = null) {
+  const rawId = line?.variantId?._id || line?.variantId;
+  const idStr = rawId != null ? String(rawId) : '';
+  const sku = String(line?.sku || line?.variantId?.sku || '').trim();
+
+  let q = Variant.findById(idStr);
+  if (session) q = q.session(session);
+  if (isValidObjectId(idStr)) {
+    const byId = await q;
+    if (byId) return byId;
+  }
+
+  if (sku) {
+    let bySku = Variant.findOne({ sku: new RegExp(`^${escapeRegex(sku)}$`, 'i') });
+    if (session) bySku = bySku.session(session);
+    const hit = await bySku;
+    if (hit) return hit;
+  }
+
+  return null;
+}
+
+/**
+ * After populate, replace null/missing item.variantId with the live Variant for that SKU
+ * and persist the repair so future loads stay linked.
+ */
+async function healMissingOrderVariants(order) {
+  if (!order?.items?.length) return order;
+  let changed = false;
+  const nextItems = [];
+  for (const item of order.items) {
+    const populated = item.variantId && typeof item.variantId === 'object' && item.variantId._id;
+    if (populated) {
+      nextItems.push(item);
+      continue;
+    }
+    const resolved = await resolveVariantForLine(item);
+    if (!resolved) {
+      nextItems.push(item);
+      continue;
+    }
+    changed = true;
+    nextItems.push({
+      ...item,
+      variantId: {
+        _id: resolved._id,
+        title: resolved.title,
+        color: resolved.color,
+        size: resolved.size,
+        imageUrl: resolved.imageUrl,
+        sku: resolved.sku,
+        sellingPrice: resolved.sellingPrice,
+        productId: resolved.productId,
+      },
+      sku: item.sku || resolved.sku,
+    });
+  }
+  if (!changed || !order._id) {
+    return { ...order, items: nextItems };
+  }
+  await Order.updateOne(
+    { _id: order._id },
+    {
+      $set: {
+        items: nextItems.map((it) => ({
+          ...it,
+          variantId: it.variantId?._id || it.variantId,
+        })),
+      },
+    }
+  );
+  return { ...order, items: nextItems };
 }
 
 /**
