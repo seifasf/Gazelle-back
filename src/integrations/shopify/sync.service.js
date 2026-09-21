@@ -49,9 +49,13 @@ export async function syncCatalogFromShopify() {
     for (const { node: sv } of sp.variants.edges) {
       const sku = String(sv.sku || '').trim();
       if (!sku) continue;
+      const skuExact = new RegExp(
+        '^' + sku.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$',
+        'i'
+      );
       const existing =
         (await Variant.findOne({ shopifyVariantId: sv.id })) ||
-        (sku ? await Variant.findOne({ sku: new RegExp(`^${sku.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }) } : null);
+        (await Variant.findOne({ sku: skuExact }));
       const { color, size } = parseVariantOptions(sv.selectedOptions, sp.options);
       const update = {
         productId: product._id,
