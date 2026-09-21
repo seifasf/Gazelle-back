@@ -8,6 +8,7 @@ const STOCK_MANAGER_ORDER_STATUSES = new Set([
   'picked_up_by_bosta',
   'local_shipping',
   'back_from_local_shipping',
+  'back_from_pickup',
   'in_transit',
   'returning_to_origin',
   'returned_awaiting_receipt',
@@ -309,13 +310,11 @@ export async function updateShippingAddress(req, res, next) {
         return res.status(400).json({ error: 'Invalid shipping method' });
       }
       if (order.isExchangeOrder && shippingMethod === 'pickup') {
-        return res.status(400).json({ error: 'Exchange orders cannot use pickup' });
-      }
-      if (order.isReturnOrder && shippingMethod === 'pickup') {
-        return res.status(400).json({ error: 'Return / refund cannot use pickup — choose Bosta or Local shipping' });
-      }
-      if (order.isReturnOrder && shippingMethod !== 'bosta' && shippingMethod !== 'local_shipping') {
-        return res.status(400).json({ error: 'Return pickups must use Bosta or Local shipping' });
+        // Store pickup exchange allowed
+      } else if (order.isReturnOrder && shippingMethod === 'pickup') {
+        // Store pickup refund allowed
+      } else if (order.isReturnOrder && shippingMethod !== 'bosta' && shippingMethod !== 'local_shipping') {
+        return res.status(400).json({ error: 'Return pickups must use Bosta, Local shipping, or Pickup' });
       }
       order.shippingMethod = shippingMethod;
       if (shippingMethod === 'local_shipping') {
@@ -514,6 +513,19 @@ export async function returnLocalShippingToStock(req, res, next) {
   }
 }
 
+export async function returnPickupToStock(req, res, next) {
+  try {
+    const order = await orderService.returnPickupToStock(
+      req.params.id,
+      req.user._id,
+      req.body || {}
+    );
+    res.json({ data: order });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export default {
   listOrders,
   getStateCounts,
@@ -528,13 +540,14 @@ export default {
   confirmRefundPaid,
   getStatusHistory,
   claimOrder,
+  delayOrder,
+  transitionStatus,
   exchangeItem,
   removeItem,
   addItem,
   updateShippingAddress,
-  transitionStatus,
-  delayOrder,
   applyDiscount,
   partialLocalDelivery,
   returnLocalShippingToStock,
+  returnPickupToStock,
 };

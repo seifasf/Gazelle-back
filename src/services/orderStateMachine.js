@@ -11,11 +11,13 @@ export const ORDER_TRANSITIONS = {
   // Pickup orders can be marked as delivered directly (no courier step).
   // Warehouse can park an order as out_of_stock until inventory is fixed.
   // Bosta: print AWB → awaiting_bosta_pickup; local courier → local_shipping.
+  // Pickup handoff can go delivered, or collect/refund can go straight to Back from pickup.
   verified_ready_for_shipping: [
     'awaiting_bosta_pickup',
     'local_shipping',
     'picked_up_by_bosta',
     'delivered',
+    'back_from_pickup',
     'out_of_stock',
     'cancelled',
   ],
@@ -58,6 +60,8 @@ export const ORDER_TRANSITIONS = {
   ],
   // Admin confirmed the local courier brought the bag back — warehouse scans on Returns.
   back_from_local_shipping: ['returned_to_stock', 'pending_verification', 'cancelled', 'pending_refund'],
+  // Customer left collect / refund items at the store — warehouse scans on Returns.
+  back_from_pickup: ['returned_to_stock', 'pending_verification', 'cancelled', 'pending_refund'],
   // Warehouse can confirm receipt even if Bosta never flipped to "Back at Bosta".
   returning_to_origin: ['returned_awaiting_receipt', 'returned_to_stock', 'pending_refund'],
   returned_awaiting_receipt: ['returned_to_stock', 'pending_refund'],
@@ -66,10 +70,12 @@ export const ORDER_TRANSITIONS = {
   // Customer return / RTO after a successful delivery.
   // Also allow Bosta to correct false "delivered" (Shopify fulfill ≠ delivery).
   // Local exchange/refund: after delivery, collect bag can still enter Back from local for scan.
+  // Pickup exchange/refund: after handoff, collect can enter Back from pickup for scan.
   delivered: [
     'returning_to_origin',
     'returned_awaiting_receipt',
     'back_from_local_shipping',
+    'back_from_pickup',
     'failed_delivery',
     'in_transit',
   ],

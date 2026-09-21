@@ -59,11 +59,12 @@ describe('confirmReturnStockEffect', () => {
     assert.equal(actions.applyOutboundRestock, false);
   });
 
-  it('only Back at Bosta / Returning statuses are confirmable', () => {
+  it('only Back at Bosta / Returning / back-from statuses are confirmable', () => {
     assert.deepEqual(CONFIRMABLE_RETURN_STATUSES, [
       'returned_awaiting_receipt',
       'returning_to_origin',
       'back_from_local_shipping',
+      'back_from_pickup',
     ]);
   });
 });

@@ -1079,6 +1079,60 @@ export async function returnLocalShippingToStock(orderId, actorUserId, { note, i
   });
 }
 
+/**
+ * Staff confirms the customer left collect / refund items at the store.
+ * Moves to back_from_pickup — warehouse then scans on Returns.
+ */
+export async function returnPickupToStock(orderId, actorUserId, { note, intent } = {}) {
+  return withTransaction(async (session) => {
+    const order = await Order.findById(orderId).session(session);
+    if (!order) {
+      const err = new Error('Order not found');
+      err.statusCode = 404;
+      throw err;
+    }
+    if (order.shippingMethod !== 'pickup') {
+      const err = new Error('Only store pickup orders can return this way');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const readyCollect =
+      order.internalStatus === 'verified_ready_for_shipping'
+      && (order.isReturnOrder || order.isExchangeOrder);
+    const deliveredCollectBack =
+      order.internalStatus === 'delivered'
+      && (order.isExchangeOrder || order.isReturnOrder);
+
+    if (!readyCollect && !deliveredCollectBack) {
+      const err = new Error(
+        'Order must be a Ready pickup return/exchange, or a delivered pickup exchange/refund, to mark Back from pickup'
+      );
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const kind = ['exchange', 'failed', 'refund'].includes(intent) ? intent : 'failed';
+    order.localReturnIntent = kind === 'refund' ? 'failed' : kind;
+    await order.save({ session });
+
+    const staffNote =
+      (typeof note === 'string' && note.trim()) ||
+      (order.isExchangeOrder
+        ? 'Collect left at store — Back from pickup, scan on Returns'
+        : 'Refund items left at store — Back from pickup, scan on Returns');
+
+    await transitionOrder(
+      order,
+      'back_from_pickup',
+      { source: 'user_action', actorUserId, note: staffNote },
+      session
+    );
+
+    return Order.findById(orderId).session(session);
+  });
+}
+
 import { computeCustomerRefundAmount } from '../utils/computeCustomerRefundAmount.js';
 
 /**
@@ -1102,7 +1156,7 @@ export async function confirmReturnedToStock(
 
     if (!CONFIRMABLE_RETURN_STATUSES.includes(order.internalStatus)) {
       const err = new Error(
-        'Only returning / Back at Bosta / back from local shipping orders can be confirmed into warehouse stock'
+        'Only returning / Back at Bosta / back from local shipping / back from pickup orders can be confirmed into warehouse stock'
       );
       err.statusCode = 400;
       throw err;
@@ -1612,6 +1666,7 @@ export async function transitionOrderStatus(orderId, toStatus, meta) {
     toStatus === 'returned_awaiting_receipt'
     || toStatus === 'returning_to_origin'
     || toStatus === 'back_from_local_shipping'
+    || toStatus === 'back_from_pickup'
   ) {
     await notifyReturnToOrigin(updated);
   } else if (toStatus === 'delivered') {
@@ -2214,19 +2269,11 @@ export async function createManualOrder({
         : null;
 
     if (exchange && method === 'pickup') {
-      const err = new Error('Exchange cannot use customer pickup — choose Bosta or Local shipping');
-      err.statusCode = 400;
-      throw err;
-    }
-
-    if (customerReturn && method === 'pickup') {
-      const err = new Error('Return / refund cannot use customer pickup — choose Bosta or Local shipping');
-      err.statusCode = 400;
-      throw err;
-    }
-
-    if (customerReturn && method !== 'bosta' && method !== 'local_shipping') {
-      const err = new Error('Return / refund must use Bosta or Local shipping');
+      // Store pickup exchange is allowed — hand new pair at counter, then Back from pickup for collect scan.
+    } else if (customerReturn && method === 'pickup') {
+      // Store pickup refund — customer brings items; Ready to ship → Back from pickup → scan.
+    } else if (customerReturn && method !== 'bosta' && method !== 'local_shipping') {
+      const err = new Error('Return / refund must use Bosta, Local shipping, or Pickup');
       err.statusCode = 400;
       throw err;
     }
@@ -2240,16 +2287,18 @@ export async function createManualOrder({
 
     const isPickup = method === 'pickup' && !exchange && !customerReturn;
     const localReturnPickup = customerReturn && method === 'local_shipping';
+    const pickupReturnOrExchange = (exchange || customerReturn) && method === 'pickup';
     const now = new Date();
 
     // Manual orders skip call-center verify:
     // - normal / exchange / local / bosta / customer pickup → Ready to ship
     // - Bosta refund / return → Returning to Warehouse (CRP inbound)
-    // - Local refund / return → Ready to ship (local courier pickup, then Back from local)
+    // - Local / Pickup refund → Ready to ship (then Back from local / Back from pickup)
     // - optional ship-after date → still Ready (stock held) but hidden from pick until that day
     let initialStatus = 'verified_ready_for_shipping';
-    if (customerReturn && !localReturnPickup) initialStatus = 'returning_to_origin';
-
+    if (customerReturn && !localReturnPickup && !pickupReturnOrExchange) {
+      initialStatus = 'returning_to_origin';
+    }
     // Enrich collect lines with SKU/title/price from variants + prior order so refund payout is accurate.
     let normalizedReturnItems = [];
     if (Array.isArray(bostaReturnItems) && bostaReturnItems.length) {
@@ -2390,13 +2439,15 @@ export async function createManualOrder({
             note: customerReturn
               ? localReturnPickup
                 ? 'Return / refund auto-verified · Ready to ship · Local courier pickup · COD 0'
-                : 'Return / refund auto-verified · Returning to Warehouse · Bosta CRP · COD 0'
+                : pickupReturnOrExchange
+                  ? 'Return / refund auto-verified · Ready to ship · Store pickup · print Gazelle policy · then Back from pickup'
+                  : 'Return / refund auto-verified · Returning to Warehouse · Bosta CRP · COD 0'
               : isPickup
                 ? 'Pickup auto-verified · Ready to ship · print Gazelle policy on Fulfillment'
                 : exchange
                   ? exchangeCreditAmount > 0
-                    ? `Exchange auto-verified · Ready to ship · customer credit EGP ${exchangeCreditAmount} · shipping EGP ${finalShippingFee} · net COD EGP ${Math.max(0, total + finalShippingFee - exchangeCreditAmount)} · ${method === 'local_shipping' ? 'Local courier' : 'Bosta EXCHANGE'}`
-                    : `Exchange auto-verified · Ready to ship · upgrade EGP ${total} + shipping EGP ${finalShippingFee} · ${method === 'local_shipping' ? 'Local courier' : 'Bosta EXCHANGE'}`
+                    ? `Exchange auto-verified · Ready to ship · customer credit EGP ${exchangeCreditAmount} · shipping EGP ${finalShippingFee} · net COD EGP ${Math.max(0, total + finalShippingFee - exchangeCreditAmount)} · ${method === 'local_shipping' ? 'Local courier' : method === 'pickup' ? 'Store pickup' : 'Bosta EXCHANGE'}`
+                    : `Exchange auto-verified · Ready to ship · upgrade EGP ${total} + shipping EGP ${finalShippingFee} · ${method === 'local_shipping' ? 'Local courier' : method === 'pickup' ? 'Store pickup · print Gazelle policy' : 'Bosta EXCHANGE'}`
                   : shipDelay
                     ? `Manual order auto-verified · Ready to ship after ${shipDelay.ymd}${delayNoteText ? ` — ${delayNoteText}` : ''}`
                     : 'Manual order auto-verified · Ready to ship',
@@ -2425,13 +2476,15 @@ export async function createManualOrder({
         note: customerReturn
           ? localReturnPickup
             ? `Return pickup from ${manualSource} (for ${priorLabel}) · Local courier · Ready to ship · COD 0`
-            : `Return pickup from ${manualSource} (for ${priorLabel}) · Returning to Warehouse · COD 0`
+            : pickupReturnOrExchange
+              ? `Return pickup from ${manualSource} (for ${priorLabel}) · Store pickup · Ready to ship · COD 0`
+              : `Return pickup from ${manualSource} (for ${priorLabel}) · Returning to Warehouse · COD 0`
           : isPickup
             ? `Pickup from ${manualSource} · Ready to ship`
             : exchange
               ? exchangeCreditAmount > 0
-                ? `Exchange from ${manualSource} (for ${priorLabel}) · Ready to ship · credit EGP ${exchangeCreditAmount} · shipping EGP ${finalShippingFee}`
-                : `Exchange from ${manualSource} (for ${priorLabel}) · Ready to ship · upgrade EGP ${total} + shipping EGP ${finalShippingFee}`
+                ? `Exchange from ${manualSource} (for ${priorLabel}) · Ready to ship · credit EGP ${exchangeCreditAmount} · shipping EGP ${finalShippingFee}${method === 'pickup' ? ' · Store pickup' : ''}`
+                : `Exchange from ${manualSource} (for ${priorLabel}) · Ready to ship · upgrade EGP ${total} + shipping EGP ${finalShippingFee}${method === 'pickup' ? ' · Store pickup' : ''}`
               : `Manual order from ${manualSource} · Ready to ship`,
       },
       session
@@ -2462,10 +2515,10 @@ export async function createManualOrder({
       /* non-blocking */
     }
   }
-  // Local return pickups are Ready to ship — notify stock like other ready orders.
+  // Local / pickup return pickups are Ready to ship — notify stock like other ready orders.
   if (
     manualOrder.isReturnOrder
-    && manualOrder.shippingMethod === 'local_shipping'
+    && (manualOrder.shippingMethod === 'local_shipping' || manualOrder.shippingMethod === 'pickup')
     && manualOrder.internalStatus === 'verified_ready_for_shipping'
   ) {
     try {
@@ -2476,8 +2529,12 @@ export async function createManualOrder({
   }
 
   // Bosta refund pickups only: create CRP (type 25, COD 0) immediately.
-  // Local returns skip Bosta — courier pickup then Back from local shipping → scan.
-  if (manualOrder.isReturnOrder && manualOrder.shippingMethod !== 'local_shipping') {
+  // Local / pickup returns skip Bosta — then Back from local / Back from pickup → scan.
+  if (
+    manualOrder.isReturnOrder
+    && manualOrder.shippingMethod !== 'local_shipping'
+    && manualOrder.shippingMethod !== 'pickup'
+  ) {
     try {
       const { ensureBostaDeliveryForOrder } = await import('./fulfillment.service.js');
       await ensureBostaDeliveryForOrder(manualOrder._id, actorUserId);
@@ -3292,6 +3349,7 @@ export default {
   unwindFalseDeliveredSale,
   partialLocalDelivery,
   returnLocalShippingToStock,
+  returnPickupToStock,
   confirmReturnedToStock,
   confirmRefundPaid,
   transitionOrderStatus,

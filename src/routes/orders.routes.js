@@ -41,6 +41,11 @@ router.post(
   requireRoles('admin', 'orders_manager'),
   ordersController.returnLocalShippingToStock
 );
+router.post(
+  '/:id/pickup-return-to-stock',
+  requireRoles('admin', 'orders_manager', 'stock_manager'),
+  ordersController.returnPickupToStock
+);
 router.post('/:id/exchange', requireRoles('admin', 'orders_manager'), ordersController.exchangeItem);
 router.post('/:id/remove-item', requireRoles('admin', 'orders_manager'), ordersController.removeItem);
 router.post('/:id/add-item', requireRoles('admin', 'orders_manager'), ordersController.addItem);

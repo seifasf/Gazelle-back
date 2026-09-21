@@ -409,12 +409,31 @@ export async function pickAndPackOrder(orderId, actorUserId) {
         'Shopify pickup shipping zero failed at handoff'
       );
     }
+
+    // Refund pickup: customer brought items — send straight to Back from pickup for scan.
+    if (order.isReturnOrder) {
+      await orderService.transitionOrderStatus(orderId, 'back_from_pickup', {
+        source: 'user_action',
+        actorUserId,
+        note: 'Store pickup refund — items received at counter, scan on Returns',
+      });
+      return { queued: false, pickup: true, backFromPickup: true, orderId, stockWarnings: [] };
+    }
+
     await orderService.transitionOrderStatus(orderId, 'delivered', {
       source: 'user_action',
       actorUserId,
-      note: 'Customer pickup — scanned & handed over by stock manager',
+      note: order.isExchangeOrder
+        ? 'Store pickup exchange — new items handed over; mark Back from pickup when collect is taken'
+        : 'Customer pickup — scanned & handed over by stock manager',
     });
-    return { queued: false, pickup: true, orderId, stockWarnings: [] };
+    return {
+      queued: false,
+      pickup: true,
+      exchangeNeedsCollect: Boolean(order.isExchangeOrder),
+      orderId,
+      stockWarnings: [],
+    };
   }
 
   if (order.shippingMethod === 'local_shipping') {

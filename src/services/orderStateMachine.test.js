@@ -13,6 +13,12 @@ describe('orderStateMachine pending_refund', () => {
     assert.equal(canTransition('delivered', 'back_from_local_shipping'), true);
   });
 
+  it('allows pickup exchange/refund to move to back_from_pickup', () => {
+    assert.equal(canTransition('delivered', 'back_from_pickup'), true);
+    assert.equal(canTransition('verified_ready_for_shipping', 'back_from_pickup'), true);
+    assert.equal(canTransition('back_from_pickup', 'pending_refund'), true);
+  });
+
   it('allows transition from pending_refund to returned_to_stock when paid', () => {
     assert.equal(canTransition('pending_refund', 'returned_to_stock'), true);
     assert.equal(canTransition('pending_refund', 'cancelled'), true);

@@ -7,6 +7,7 @@ export const ORDER_STATUSES = [
   'picked_up_by_bosta',
   'local_shipping',
   'back_from_local_shipping',
+  'back_from_pickup',
   'in_transit',
   'delivered',
   'out_of_stock',
