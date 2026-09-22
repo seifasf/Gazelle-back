@@ -182,7 +182,7 @@ export async function cancelOrder(req, res, next) {
 
 export async function confirmReturn(req, res, next) {
   try {
-    const { returnReason, returnReasonNote } = req.body || {};
+    const { returnReason, returnReasonNote, note } = req.body || {};
     const allowed = new Set([
       'sizing_fit',
       'product_issue',
@@ -192,18 +192,23 @@ export async function confirmReturn(req, res, next) {
       'refused_at_door',
       'other',
     ]);
-    if (!returnReason || typeof returnReason !== 'string' || !allowed.has(returnReason)) {
-      const err = new Error('A valid returnReason is required');
+    // Warehouse scan only confirms physical receipt — reason is optional here
+    // (order manager already set it on create, or it can stay unset).
+    if (
+      returnReason != null
+      && returnReason !== ''
+      && (typeof returnReason !== 'string' || !allowed.has(returnReason))
+    ) {
+      const err = new Error('Invalid returnReason');
       err.statusCode = 400;
       throw err;
     }
-    const note = req.body.note;
     const order = await orderService.confirmReturnedToStock(
       req.params.id,
       req.user._id,
       {
         note,
-        returnReason,
+        returnReason: returnReason && allowed.has(returnReason) ? returnReason : undefined,
         returnReasonNote,
       }
     );
