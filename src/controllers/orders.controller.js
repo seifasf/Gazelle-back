@@ -445,25 +445,25 @@ export async function transitionStatus(req, res, next) {
     const toStatus = req.body.toStatus;
     const role = req.user.role;
 
-    // Stock: Out of stock ↔ Ready, plus Awaiting Bosta → Ready / OOS / Pending.
+    // Stock may only send an order back to Fulfillment (Ready to ship).
+    // Marking out of stock stays on the Fulfillment pick-pack flow.
     if (role === 'stock_manager') {
+      if (toStatus !== 'verified_ready_for_shipping') {
+        return res.status(403).json({
+          error: 'Stock managers can only send orders back to Fulfillment (Ready to ship)',
+        });
+      }
       const Order = (await import('../models/Order.js')).default;
       const current = await Order.findById(req.params.id).select('internalStatus');
       const fromStatus = current?.internalStatus;
-      const allowed =
-        toStatus === 'verified_ready_for_shipping'
-        || toStatus === 'out_of_stock'
-        || (
-          fromStatus === 'awaiting_bosta_pickup'
-          && ['verified_ready_for_shipping', 'out_of_stock', 'pending_verification'].includes(toStatus)
-        )
-        || (
-          fromStatus === 'local_shipping'
-          && toStatus === 'verified_ready_for_shipping'
-        );
-      if (!allowed) {
+      const allowedFrom = new Set([
+        'awaiting_bosta_pickup',
+        'out_of_stock',
+        'local_shipping',
+      ]);
+      if (!allowedFrom.has(fromStatus)) {
         return res.status(403).json({
-          error: 'Stock managers can move Ready ↔ Out of stock, pull Awaiting Bosta pickup back to Ready / Out of stock / Pending, or pull Local shipping back to Ready',
+          error: 'Only Awaiting Bosta, Out of stock, or Local shipping orders can be sent back to Fulfillment',
         });
       }
     }
@@ -535,6 +535,16 @@ export async function returnPickupToStock(req, res, next) {
   }
 }
 
+export async function exportPendingRefunds(req, res, next) {
+  try {
+    const { sendExcel } = await import('../utils/excelExport.js');
+    const { buffer, filename } = await orderService.exportPendingRefundsExcel();
+    sendExcel(res, { buffer, filename });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export default {
   listOrders,
   getStateCounts,
@@ -559,4 +569,5 @@ export default {
   partialLocalDelivery,
   returnLocalShippingToStock,
   returnPickupToStock,
+  exportPendingRefunds,
 };

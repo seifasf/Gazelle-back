@@ -3344,6 +3344,136 @@ export async function confirmRefundPaid(
   return result;
 }
 
+/**
+ * Pending refund payout queue — Excel for finance / ops (name, phone, note, returned, amount).
+ */
+export async function exportPendingRefundsExcel() {
+  const ExcelJS = (await import('exceljs')).default;
+  const { workbookBuffer, styleHeaderRow } = await import('../utils/excelExport.js');
+  const { ORDERS_PLACED_FROM_YMD } = await import('../constants/index.js');
+  const { computeCustomerRefundAmount } = await import('../utils/computeCustomerRefundAmount.js');
+  const Order = (await import('../models/Order.js')).default;
+
+  const cutoff = new Date(`${ORDERS_PLACED_FROM_YMD}T00:00:00+03:00`);
+  const orders = await Order.find({
+    placedAt: { $gte: cutoff },
+    internalStatus: 'pending_refund',
+  })
+    .select(
+      'shopifyOrderName shopifyOrderId manualOrderNumber isExchangeOrder isReturnOrder deliveredAt refundAmount exchangeCreditAmount totalSellingPrice returnReasonNote verificationLog bostaReturnItems items shippingAddress customerId'
+    )
+    .populate('customerId', 'fullName phone')
+    .populate({
+      path: 'bostaReturnItems.variantId',
+      select: 'sku title color size',
+      populate: { path: 'productId', select: 'title' },
+    })
+    .sort({ placedAt: -1 })
+    .lean();
+
+  function resolveNote(order) {
+    const direct = typeof order.returnReasonNote === 'string' ? order.returnReasonNote.trim() : '';
+    if (direct) return direct;
+    const fromLog = (order.verificationLog || [])
+      .map((entry) => String(entry?.note || '').trim())
+      .filter(Boolean)
+      .find((note) => /^(refund|exchange)\s+reason\s+note:/i.test(note));
+    if (fromLog) {
+      return fromLog.replace(/^(refund|exchange)\s+reason\s+note:\s*/i, '').trim();
+    }
+    return '';
+  }
+
+  function resolveName(order) {
+    const customer = order.customerId && typeof order.customerId === 'object' ? order.customerId : null;
+    const name =
+      order.shippingAddress?.fullName ||
+      customer?.fullName ||
+      '';
+    const trimmed = String(name || '').trim();
+    if (!trimmed || /^unknown$/i.test(trimmed)) return '';
+    return trimmed;
+  }
+
+  function resolvePhone(order) {
+    const customer = order.customerId && typeof order.customerId === 'object' ? order.customerId : null;
+    const raw =
+      order.shippingAddress?.phone ||
+      customer?.phone ||
+      '';
+    const trimmed = String(raw || '').trim();
+    if (!trimmed || /^unknown$/i.test(trimmed) || /^shopify-(cust|order)-/i.test(trimmed)) {
+      return '';
+    }
+    return trimmed;
+  }
+
+  function returnedLabel(order) {
+    const lines =
+      Array.isArray(order.bostaReturnItems) && order.bostaReturnItems.length
+        ? order.bostaReturnItems
+        : order.isReturnOrder
+          ? order.items || []
+          : [];
+    if (!lines.length) return '';
+    return lines
+      .map((line) => {
+        const v = line.variantId && typeof line.variantId === 'object' ? line.variantId : null;
+        const title = v?.productId?.title || v?.title || line.title || line.sku || 'Item';
+        const parts = [title];
+        if (v?.size != null || line.size != null) parts.push(String(v?.size ?? line.size));
+        if (v?.color || line.color) parts.push(String(v?.color || line.color));
+        const base = parts.join(' · ');
+        const qty = Number(line.quantity) || 0;
+        return qty > 1 ? `${base} ×${qty}` : base;
+      })
+      .join('; ');
+  }
+
+  function kindLabel(order) {
+    if (order.isExchangeOrder) return 'Exchange';
+    if (order.isReturnOrder || order.deliveredAt) return 'Refund';
+    return 'Customer refused';
+  }
+
+  function orderLabel(order) {
+    return (
+      order.manualOrderNumber ||
+      order.shopifyOrderName ||
+      (order.shopifyOrderId ? `#${order.shopifyOrderId}` : String(order._id))
+    );
+  }
+
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Pending refunds');
+  sheet.columns = [
+    { header: 'Order', key: 'order', width: 14 },
+    { header: 'Type', key: 'type', width: 12 },
+    { header: 'Name', key: 'name', width: 22 },
+    { header: 'Phone', key: 'phone', width: 16 },
+    { header: 'Note', key: 'note', width: 40 },
+    { header: 'Returned', key: 'returned', width: 48 },
+    { header: 'Refund amount (EGP)', key: 'amount', width: 18 },
+  ];
+  styleHeaderRow(sheet);
+
+  for (const order of orders) {
+    sheet.addRow({
+      order: orderLabel(order),
+      type: kindLabel(order),
+      name: resolveName(order),
+      phone: resolvePhone(order),
+      note: resolveNote(order) || 'No note',
+      returned: returnedLabel(order),
+      amount: computeCustomerRefundAmount(order) || 0,
+    });
+  }
+
+  const stamp = new Date().toISOString().slice(0, 10);
+  const buffer = await workbookBuffer(workbook);
+  return { buffer, filename: `gazelle-pending-refunds-${stamp}.xlsx`, total: orders.length };
+}
+
 export default {
   verifyOrder,
   bulkVerifyOrders,
@@ -3381,4 +3511,5 @@ export default {
   applyShopifyAvailableToWarehouse,
   ingestShopifyAvailableIncrease,
   queueShopifyInventoryIngest,
+  exportPendingRefundsExcel,
 };
