@@ -47,6 +47,7 @@ import {
 } from './notification.service.js';
 import { recordDeliveryJournal } from './accounting.service.js';
 import { recordCustomerCancellation } from './customer.service.js';
+import { annotateOfferItems } from './offerOrder.service.js';
 import logger from '../utils/logger.js';
 import { assertContactReadyToConfirm } from '../utils/shopifyShippingAddress.js';
 
@@ -906,6 +907,9 @@ export async function partialLocalDelivery(orderId, actorUserId, { deliveries = 
           quantity: deliveredQty,
           unitSellingPrice: item.unitSellingPrice,
           unitCogs: item.unitCogs,
+          isOnOffer: item.isOnOffer,
+          offerType: item.offerType,
+          unitCompareAtPrice: item.unitCompareAtPrice,
         });
         deliveredLabels.push(`${item.sku}×${deliveredQty}`);
       }
@@ -2169,6 +2173,8 @@ export async function createManualOrder({
       throw err;
     }
 
+    const isOfferOrder = exchange || customerReturn ? false : await annotateOfferItems(orderItems, session);
+
     // Exchange: signed (new − old). Upgrade → totalSellingPrice; downgrade → exchangeCreditAmount.
     // COD = upgrade + shipping − credit (customer still pays shipping when old is more expensive).
     let returnGoodsValue = 0;
@@ -2387,6 +2393,7 @@ export async function createManualOrder({
         deliveredAt: undefined,
         closedAt: undefined,
         isCreatorOrder: exchange || customerReturn ? false : Boolean(isCreatorOrder),
+        isOfferOrder,
         isExchangeOrder: exchange,
         exchangeFromOrderId: exchange ? priorOrder._id : undefined,
         exchangeCreditAmount: exchange ? exchangeCreditAmount : 0,
@@ -2815,6 +2822,7 @@ export async function listOrders({
   shippingMethod,
   isExchangeOrder,
   isReturnOrder,
+  isOfferOrder,
   returnKind,
   placedFrom,
   placedTo,
@@ -2842,6 +2850,8 @@ export async function listOrders({
   if (isReturnOrder === false || isReturnOrder === 'false') {
     filter.isReturnOrder = { $ne: true };
   }
+  if (isOfferOrder === true || isOfferOrder === 'true') filter.isOfferOrder = true;
+  if (isOfferOrder === false || isOfferOrder === 'false') filter.isOfferOrder = { $ne: true };
   // returnKind: exchange | refund | refused — same rules as frontend getReturnKind()
   if (returnKind === 'exchange') {
     filter.isExchangeOrder = true;

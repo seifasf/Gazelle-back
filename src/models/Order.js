@@ -14,6 +14,10 @@ const orderItemSchema = new mongoose.Schema(
     quantity: { type: Number, required: true, min: 1 },
     unitSellingPrice: { type: Number, required: true, min: 0 },
     unitCogs: { type: Number, min: 0 },
+    /** Snapshot at order time: B1G1-tagged product or sold below compare-at price. */
+    isOnOffer: { type: Boolean, default: false },
+    offerType: { type: String, enum: ['b1g1', 'sale'] },
+    unitCompareAtPrice: { type: Number, min: 0 },
   },
   { _id: true }
 );
@@ -150,6 +154,8 @@ const orderSchema = new mongoose.Schema(
     refundPaymentReference: String,
     refundAdminNote: { type: String, maxlength: 500 },
     isCreatorOrder: { type: Boolean, default: false },
+    /** At least one line was on offer when the order was placed (see items.isOnOffer). */
+    isOfferOrder: { type: Boolean, default: false, index: true },
     /** Manual exchange shipment against a previous order — Bosta type EXCHANGE. */
     isExchangeOrder: { type: Boolean, default: false, index: true },
     exchangeFromOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', index: true },

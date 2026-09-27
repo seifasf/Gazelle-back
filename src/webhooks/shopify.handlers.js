@@ -10,6 +10,7 @@ import { reserveStockForOrder, cancelOrder, syncShopifySellableAfterLedger, queu
 import { notifyNewOrder } from '../services/notification.service.js';
 import OrderStatusHistory from '../models/OrderStatusHistory.js';
 import { reportOnlineStockDrift } from '../services/discrepancy.service.js';
+import { annotateOfferItems } from '../services/offerOrder.service.js';
 import logger from '../utils/logger.js';
 import {
   mapShopifyPaymentMethod,
@@ -241,6 +242,13 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
     );
   }
 
+  let isOfferOrder = false;
+  try {
+    isOfferOrder = await annotateOfferItems(items);
+  } catch (err) {
+    logger.warn({ err: err?.message || err, shopifyOrderId }, 'Offer flag lookup failed — ingesting without it');
+  }
+
   const internalStatus = statusOverride || 'pending_verification';
   // Only hold stock for genuinely-open orders. Historical (delivered/cancelled)
   // imports must not distort warehouse on-hold inventory.
@@ -283,6 +291,7 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
           internalStatus,
           totalSellingPrice: shopifyMerchandiseTotal(payload, shippingFee),
           items,
+          isOfferOrder,
           placedAt: new Date(payload.created_at || Date.now()),
           ...(deliveredAt ? { deliveredAt } : {}),
         },
@@ -333,6 +342,7 @@ export async function handleOrdersCreate(payload, { reserveStock = true, statusO
       internalStatus: 'pending_verification',
       totalSellingPrice: Number(shopifyMerchandiseTotal(payload, shippingFee)) || 0,
       items,
+      isOfferOrder,
       placedAt: new Date(payload.created_at || Date.now()),
     });
     order = { order: stub, ledgerDocs: [] };

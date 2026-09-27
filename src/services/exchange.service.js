@@ -3,6 +3,8 @@ import Variant from '../models/Variant.js';
 import { withTransaction } from '../utils/transaction.js';
 import { applyLedgerEntries } from './inventory.service.js';
 import { syncShopifySellableAfterLedger } from './order.service.js';
+import { refreshOrderOfferFlag } from './offerOrder.service.js';
+import { orderHasOfferItems } from '../utils/offerOrder.js';
 
 const EDITABLE = [
   'pending_verification',
@@ -119,6 +121,7 @@ export async function processExchange(orderId, actorUserId, { fromItemId, toVari
     item.unitCogs = newVariant.cogs;
 
     recalcMerchandiseTotals(order);
+    await refreshOrderOfferFlag(order, [item], session);
 
     order.verificationLog.push({
       outcome: 'customer_requested_changes',
@@ -212,6 +215,7 @@ export async function removeOrderItem(orderId, actorUserId, { itemId, note, quan
     }
 
     recalcMerchandiseTotals(order);
+    order.isOfferOrder = orderHasOfferItems(order.items);
 
     order.verificationLog.push({
       outcome: 'customer_requested_changes',
@@ -306,6 +310,7 @@ export async function addOrderItem(orderId, actorUserId, { variantId, quantity =
     }
 
     recalcMerchandiseTotals(order);
+    await refreshOrderOfferFlag(order, existing ? [] : [order.items.at(-1)], session);
 
     order.verificationLog.push({
       outcome: 'customer_requested_changes',
