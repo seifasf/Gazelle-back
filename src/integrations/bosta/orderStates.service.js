@@ -62,6 +62,7 @@ async function linkAndSyncOrder(order, delivery, note) {
   // jump orders straight to delivered.
   if (
     order.internalStatus === 'verified_ready_for_shipping' ||
+    order.internalStatus === 'repaired_shoe' ||
     order.internalStatus === 'awaiting_bosta_pickup'
   ) {
     const alreadyThis =

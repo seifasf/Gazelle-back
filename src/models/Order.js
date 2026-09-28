@@ -169,6 +169,14 @@ const orderSchema = new mongoose.Schema(
      * Courier picks items up; no cash to the customer.
      */
     isReturnOrder: { type: Boolean, default: false, index: true },
+    /**
+     * Brand repair service: customer's shoe repaired in-house, then picked up or shipped.
+     * No catalog items / stock moves; totalSellingPrice is the all-in amount to collect.
+     * Excluded from sales reports (see ReportOrder).
+     */
+    isRepairOrder: { type: Boolean, default: false, index: true },
+    repairItemName: { type: String, trim: true, maxlength: 200 },
+    repairNote: { type: String, trim: true, maxlength: 500 },
     returnFromOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', index: true },
     /**
      * Exception: warehouse must not +real stock on collect (factory-broken / unsellable).
@@ -191,7 +199,18 @@ const orderSchema = new mongoose.Schema(
         unitSellingPrice: { type: Number, min: 0 },
       },
     ],
-    items: { type: [orderItemSchema], required: true, validate: [(v) => v.length > 0, 'Order must have items'] },
+    items: {
+      type: [orderItemSchema],
+      required() {
+        return !this.isRepairOrder;
+      },
+      validate: [
+        function hasItems(v) {
+          return this.isRepairOrder || v.length > 0;
+        },
+        'Order must have items',
+      ],
+    },
     verificationLog: [verificationLogSchema],
     placedAt: { type: Date, required: true },
     verifiedAt: Date,
@@ -215,4 +234,5 @@ orderSchema.index({ bostaCollectedAt: 1 });
 orderSchema.index({ paymentMethod: 1, onlinePaidAt: 1 });
 orderSchema.index({ onlinePaymentStatus: 1, onlinePaidAt: 1 });
 
+export { orderSchema };
 export default mongoose.model('Order', orderSchema);

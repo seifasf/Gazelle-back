@@ -60,4 +60,11 @@ describe('OMS COD fee (system only, not Shopify)', () => {
     assert.equal(omsCodFeeEgp(order), 0);
     assert.equal(omsCodCollectAmount(order), 0);
   });
+
+  it('repair order collects exactly the entered total (no COD fee, no shipping added)', () => {
+    const order = { paymentMethod: 'cod', isRepairOrder: true, totalSellingPrice: 350, shippingFee: 0 };
+    assert.equal(omsCodFeeEgp(order), 0);
+    assert.equal(omsCodCollectAmount(order), 350);
+    assert.equal(omsCodCollectAmount({ ...order, totalSellingPrice: 0 }), 0);
+  });
 });

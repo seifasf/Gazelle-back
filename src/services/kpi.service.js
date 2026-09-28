@@ -1,7 +1,7 @@
 import OrderStatusHistory from '../models/OrderStatusHistory.js';
 import InventoryLedger from '../models/InventoryLedger.js';
 import DiscrepancyAlert from '../models/DiscrepancyAlert.js';
-import Order from '../models/Order.js';
+import Order from '../models/ReportOrder.js';
 import User from '../models/User.js';
 
 function dateFilter(from, to) {

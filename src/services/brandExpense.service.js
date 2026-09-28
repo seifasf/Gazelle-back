@@ -35,7 +35,7 @@ async function computeMonthShippingLoss(yearMonth) {
   const fromYmd = `${yearMonth}-01`;
   const lastDay = new Date(y, m, 0).getDate();
   const toYmd = `${yearMonth}-${String(lastDay).padStart(2, '0')}`;
-  const Order = (await import('../models/Order.js')).default;
+  const Order = (await import('../models/ReportOrder.js')).default;
 
   return loadShippingEconomicsForRange({
     from: `${fromYmd}T00:00:00+03:00`,
@@ -255,7 +255,7 @@ export async function getMonthExpenseBreakdown(yearMonth) {
   let revenue = 0;
   let deliveredCount = 0;
   try {
-    const Order = (await import('../models/Order.js')).default;
+    const Order = (await import('../models/ReportOrder.js')).default;
     const [y, m] = yearMonth.split('-').map(Number);
     const from = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0));
     const to = new Date(Date.UTC(y, m, 0, 23, 59, 59, 999));

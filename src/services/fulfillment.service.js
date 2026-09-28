@@ -332,10 +332,13 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
  * Ensure Bosta delivery exists, then fetch the AWB (بوليصة) PDF URL.
  * Moves Ready → Awaiting Bosta pickup once the delivery exists.
  */
+/** Warehouse queue states that ship from Fulfillment (normal ready + repaired shoe). */
+const FULFILLMENT_READY_STATUSES = ['verified_ready_for_shipping', 'repaired_shoe'];
+
 export async function prepareAwbForOrder(orderId, actorUserId) {
   const shipment = await ensureBostaDeliveryForOrder(orderId, actorUserId);
   const order = await Order.findById(orderId).select('internalStatus');
-  if (order?.internalStatus === 'verified_ready_for_shipping') {
+  if (FULFILLMENT_READY_STATUSES.includes(order?.internalStatus)) {
     await orderService.transitionOrderStatus(orderId, 'awaiting_bosta_pickup', {
       source: 'user_action',
       actorUserId,
@@ -362,7 +365,7 @@ export async function createBostaShipmentForOrder(orderId, actorUserId) {
   const shipment = await ensureBostaDeliveryForOrder(orderId, actorUserId);
 
   const order = await Order.findById(orderId).select('internalStatus');
-  if (order?.internalStatus === 'verified_ready_for_shipping') {
+  if (FULFILLMENT_READY_STATUSES.includes(order?.internalStatus)) {
     await orderService.transitionOrderStatus(orderId, 'awaiting_bosta_pickup', {
       source: 'system',
       actorUserId,
@@ -389,10 +392,21 @@ export async function pickAndPackOrder(orderId, actorUserId) {
     throw err;
   }
 
-  if (order.internalStatus !== 'verified_ready_for_shipping') {
+  if (!FULFILLMENT_READY_STATUSES.includes(order.internalStatus)) {
     const err = new Error('Order is not ready for shipping');
     err.statusCode = 400;
     throw err;
+  }
+
+  if (order.isRepairOrder && order.shippingMethod === 'pickup') {
+    order.assignedStockManagerId = actorUserId;
+    await order.save();
+    await orderService.transitionOrderStatus(orderId, 'delivered', {
+      source: 'user_action',
+      actorUserId,
+      note: `Repaired shoe handed to customer in store · ${order.repairItemName || 'repair'}`,
+    });
+    return { queued: false, pickup: true, repair: true, orderId, stockWarnings: [] };
   }
 
   if (order.shippingMethod === 'pickup') {
@@ -445,7 +459,7 @@ export async function pickAndPackOrder(orderId, actorUserId) {
     await orderService.transitionOrderStatus(orderId, 'local_shipping', {
       source: 'user_action',
       actorUserId,
-      note: 'Handed to local shipping',
+      note: order.isRepairOrder ? 'Repaired shoe handed to local shipping' : 'Handed to local shipping',
     });
 
     return { queued: false, localShipping: true, orderId, stockWarnings: [] };
@@ -511,7 +525,7 @@ export async function getPickList() {
   const todayEnd = new Date(`${todayYmd}T23:59:59.999+03:00`);
 
   const orders = await Order.find({
-    internalStatus: 'verified_ready_for_shipping',
+    internalStatus: { $in: FULFILLMENT_READY_STATUSES },
     placedAt: { $gte: cutoff },
     // Hide manual/Shopify ship-after delays until the Cairo calendar day arrives.
     $or: [

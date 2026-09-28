@@ -3,6 +3,8 @@ export const USER_ROLES = ['admin', 'orders_manager', 'stock_manager'];
 export const ORDER_STATUSES = [
   'pending_verification',
   'verified_ready_for_shipping',
+  /** Repair order: shoe repaired in-house, waiting for Fulfillment (no stock). */
+  'repaired_shoe',
   'awaiting_bosta_pickup',
   'picked_up_by_bosta',
   'local_shipping',

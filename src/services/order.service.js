@@ -61,9 +61,26 @@ async function recordStatusChange(
   );
 }
 
+const REPAIR_BLOCKED_STATUSES = new Set([
+  'pending_verification',
+  'no_response',
+  'verified_ready_for_shipping',
+  'out_of_stock',
+]);
+
 async function transitionOrder(order, toStatus, meta, session) {
   const fromStatus = order.internalStatus;
   assertTransition(fromStatus, toStatus);
+  if (order.isRepairOrder && REPAIR_BLOCKED_STATUSES.has(toStatus)) {
+    const err = new Error('Repair orders skip stock lanes — move it back to Repaired Shoe instead');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!order.isRepairOrder && toStatus === 'repaired_shoe') {
+    const err = new Error('Only repair orders can move to Repaired Shoe');
+    err.statusCode = 400;
+    throw err;
+  }
 
   const $set = {
     internalStatus: toStatus,
@@ -71,6 +88,9 @@ async function transitionOrder(order, toStatus, meta, session) {
   };
   const $unset = {};
 
+  if (toStatus === 'repaired_shoe' && (fromStatus === 'local_shipping' || fromStatus === 'awaiting_bosta_pickup')) {
+    $unset.localShippingMarkedAt = 1;
+  }
   if (toStatus === 'verified_ready_for_shipping') {
     $set.verifiedAt = new Date();
     if (fromStatus === 'out_of_stock') {
@@ -635,6 +655,7 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
           'pending_verification',
           'no_response',
           'verified_ready_for_shipping',
+          'repaired_shoe',
           'out_of_stock',
           'local_shipping',
         ];
@@ -753,8 +774,8 @@ async function executeDelivered(order, { source, actorUserId, note }, session) {
   await transitionOrder(order, 'delivered', { source, actorUserId, note }, session);
   await Customer.updateOne({ _id: order.customerId }, { $inc: { lifetimeDelivered: 1 } }, { session });
   const delivered = await Order.findById(order._id).session(session);
-  // Best-effort accounting — must not block delivery.
-  await recordDeliveryJournal(delivered, actorUserId);
+  // Best-effort accounting — must not block delivery. Repair service is not a sale.
+  if (!delivered.isRepairOrder) await recordDeliveryJournal(delivered, actorUserId);
   delivered._ledgerDocs = ledgerDocs;
   return delivered;
 }
@@ -1931,7 +1952,41 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
 }
 
 /** Sequential manual codes: M-1000, M-1001, … (atomic via Settings). */
-async function allocateManualOrderRef(session) {
+/** Match an existing customer by phone (any EG format) or create one; refresh name/email. */
+export async function findOrCreateManualCustomer(customer, session) {
+  let customerDoc = await Customer.findOne({ phone: customer.phone }).session(session);
+  if (!customerDoc) {
+    const core = normalizeEgPhoneDigits(customer.phone);
+    if (core.length >= 7) {
+      customerDoc = await Customer.findOne({
+        $or: phoneMatchRegexes(customer.phone).map((re) => ({ phone: { $regex: re } })),
+      }).session(session);
+    }
+  }
+  if (!customerDoc) {
+    [customerDoc] = await Customer.create(
+      [{
+        fullName: customer.fullName,
+        phone: customer.phone,
+        email: customer.email,
+        riskFlag: customer.riskFlag || 'none',
+      }],
+      { session }
+    );
+    return customerDoc;
+  }
+  // Keep customer profile current so name/phone search stays accurate.
+  const patch = {};
+  if (customer.fullName && customer.fullName !== customerDoc.fullName) patch.fullName = customer.fullName;
+  if (customer.email && customer.email !== customerDoc.email) patch.email = customer.email;
+  if (Object.keys(patch).length) {
+    Object.assign(customerDoc, patch);
+    await customerDoc.save({ session });
+  }
+  return customerDoc;
+}
+
+export async function allocateManualOrderRef(session) {
   const START = 1000;
   const doc = await Settings.findOneAndUpdate(
     { key: 'global' },
@@ -2111,35 +2166,7 @@ export async function createManualOrder({
       }
     }
 
-    let customerDoc = await Customer.findOne({ phone: customer.phone }).session(session);
-    if (!customerDoc) {
-      const core = normalizeEgPhoneDigits(customer.phone);
-      if (core.length >= 7) {
-        customerDoc = await Customer.findOne({
-          $or: phoneMatchRegexes(customer.phone).map((re) => ({ phone: { $regex: re } })),
-        }).session(session);
-      }
-    }
-    if (!customerDoc) {
-      [customerDoc] = await Customer.create(
-        [{
-          fullName: customer.fullName,
-          phone: customer.phone,
-          email: customer.email,
-          riskFlag: customer.riskFlag || 'none',
-        }],
-        { session }
-      );
-    } else {
-      // Keep customer profile current so name/phone search stays accurate.
-      const patch = {};
-      if (customer.fullName && customer.fullName !== customerDoc.fullName) patch.fullName = customer.fullName;
-      if (customer.email && customer.email !== customerDoc.email) patch.email = customer.email;
-      if (Object.keys(patch).length) {
-        Object.assign(customerDoc, patch);
-        await customerDoc.save({ session });
-      }
-    }
+    const customerDoc = await findOrCreateManualCustomer(customer, session);
 
     const orderItems = [];
     let outboundGoodsValue = 0;
@@ -2789,7 +2816,7 @@ export async function getOrderStateCounts() {
       ...shipReady,
     }),
   ]);
-  counts.fulfillment_ready = fulfillmentReady;
+  counts.fulfillment_ready = fulfillmentReady + (counts.repaired_shoe || 0);
   counts.pickup_ready = pickupReady;
 
   // Delayed: verify callbacks + ready-to-ship orders waiting for ship-after date.

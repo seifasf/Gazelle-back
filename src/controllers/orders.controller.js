@@ -3,6 +3,7 @@ import * as exchangeService from '../services/exchange.service.js';
 
 const STOCK_MANAGER_ORDER_STATUSES = new Set([
   'verified_ready_for_shipping',
+  'repaired_shoe',
   'awaiting_bosta_pickup',
   'out_of_stock',
   'picked_up_by_bosta',
@@ -88,6 +89,16 @@ export async function createManualOrder(req, res, next) {
       ...req.body,
       actorUserId: req.user._id,
     });
+    res.status(201).json({ data: order });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function createRepairOrder(req, res, next) {
+  try {
+    const { createRepairOrder: create } = await import('../services/repairOrder.service.js');
+    const order = await create({ ...req.body, actorUserId: req.user._id });
     res.status(201).json({ data: order });
   } catch (err) {
     next(err);
@@ -294,7 +305,7 @@ export async function updateShippingAddress(req, res, next) {
     const order = await Order.findById(req.params.id).populate('customerId');
     if (!order) return res.status(404).json({ error: 'Order not found' });
     if (
-      !['pending_verification', 'no_response', 'verified_ready_for_shipping', 'out_of_stock', 'awaiting_bosta_pickup'].includes(
+      !['pending_verification', 'no_response', 'verified_ready_for_shipping', 'repaired_shoe', 'out_of_stock', 'awaiting_bosta_pickup'].includes(
         order.internalStatus
       )
     ) {
@@ -324,7 +335,10 @@ export async function updateShippingAddress(req, res, next) {
         return res.status(400).json({ error: 'Return pickups must use Bosta, Local shipping, or Pickup' });
       }
       order.shippingMethod = shippingMethod;
-      if (shippingMethod === 'local_shipping') {
+      if (order.isRepairOrder) {
+        // Repair total is all-in — never add a courier fee on top.
+        order.shippingFee = 0;
+      } else if (shippingMethod === 'local_shipping') {
         order.shippingFee = LOCAL_SHIPPING_FEE;
       } else if (shippingMethod === 'pickup') {
         order.shippingFee = 0;
@@ -357,7 +371,7 @@ export async function updateShippingAddress(req, res, next) {
       || String(nextAddress.fullName || '') !== String(prev.fullName || '');
 
     // Always recalculate Shopify zone fee for Bosta when destination is known.
-    if (order.shippingMethod === 'bosta' && !order.isReturnOrder && !order.isCreatorOrder) {
+    if (order.shippingMethod === 'bosta' && !order.isReturnOrder && !order.isCreatorOrder && !order.isRepairOrder) {
       const destCity = String(nextAddress.city || '').trim();
       if (destCity) {
         const goods = Number(order.totalSellingPrice) || 0;
@@ -450,7 +464,7 @@ export async function transitionStatus(req, res, next) {
     // Stock may only send an order back to Fulfillment (Ready to ship).
     // Marking out of stock stays on the Fulfillment pick-pack flow.
     if (role === 'stock_manager') {
-      if (toStatus !== 'verified_ready_for_shipping') {
+      if (toStatus !== 'verified_ready_for_shipping' && toStatus !== 'repaired_shoe') {
         return res.status(403).json({
           error: 'Stock managers can only send orders back to Fulfillment (Ready to ship)',
         });

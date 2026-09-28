@@ -12,10 +12,13 @@ export function isOrderPrepaid(order) {
   return false;
 }
 
-/** Extra EGP 25 on Gazelle COD (policy + Bosta). Never on prepaid, return, or exchange. */
+/**
+ * Extra EGP 25 on Gazelle COD (policy + Bosta). Never on prepaid, return, exchange,
+ * or repair (repair total is the all-in amount to collect).
+ */
 export function omsCodFeeEgp(order) {
   if (!order) return 0;
-  if (order.isReturnOrder || order.isExchangeOrder) return 0;
+  if (order.isReturnOrder || order.isExchangeOrder || order.isRepairOrder) return 0;
   if (isOrderPrepaid(order)) return 0;
   if (order.isCreatorOrder && !(Number(order.totalSellingPrice) > 0)) return 0;
   return OMS_COD_FEE_EGP;

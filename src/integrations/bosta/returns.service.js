@@ -228,9 +228,19 @@ export async function syncBostaReturns({ maxPages = MAX_PAGES, from = null, to =
  * Dashboard metrics from synced Bosta returns in [from, to].
  */
 export async function bostaReturnsForRange({ from, to }) {
-  const rows = await BostaReturn.find({
+  const allRows = await BostaReturn.find({
     returnedAt: { $gte: from, $lte: to },
   }).lean();
+  const linkedIds = allRows.filter((r) => r.orderId).map((r) => r.orderId);
+  const repairIds = linkedIds.length
+    ? new Set(
+        (await Order.find({ _id: { $in: linkedIds }, isRepairOrder: true }).select('_id').lean())
+          .map((o) => String(o._id))
+      )
+    : new Set();
+  const rows = repairIds.size
+    ? allRows.filter((r) => !r.orderId || !repairIds.has(String(r.orderId)))
+    : allRows;
 
   const byType = {
     rto: 0,

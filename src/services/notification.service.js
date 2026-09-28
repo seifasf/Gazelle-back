@@ -55,6 +55,24 @@ export async function notifyOrderVerified(order) {
   });
 }
 
+export async function notifyRepairOrderReady(order) {
+  const how =
+    order.shippingMethod === 'pickup'
+      ? 'customer pickup'
+      : order.shippingMethod === 'local_shipping'
+        ? 'local courier'
+        : 'Bosta';
+  return createNotification({
+    type: 'order_verified',
+    roles: ['admin', 'stock_manager'],
+    severity: 'info',
+    title: `Repaired shoe #${order.shopifyOrderId || order._id}`,
+    body: `${order.repairItemName || 'Repaired shoe'} · ${how} — print the policy on Fulfillment (Repaired shoe tab).`,
+    link: `/orders/${order._id}`,
+    orderId: order._id,
+  });
+}
+
 export async function notifyOrderCallbackDue(order) {
   const ref = order.bostaTrackingNumber || order.shopifyOrderId || order._id;
   return createNotification({

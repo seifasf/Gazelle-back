@@ -38,3 +38,22 @@ describe('orderStateMachine pending_refund', () => {
     assert.equal(canTransition('pending_refund', 'in_transit'), false);
   });
 });
+
+describe('orderStateMachine repaired_shoe', () => {
+  it('ships a repaired shoe by Bosta, local courier, or customer pickup', () => {
+    assert.equal(canTransition('repaired_shoe', 'awaiting_bosta_pickup'), true);
+    assert.equal(canTransition('repaired_shoe', 'local_shipping'), true);
+    assert.equal(canTransition('repaired_shoe', 'delivered'), true);
+    assert.equal(canTransition('repaired_shoe', 'cancelled'), true);
+  });
+
+  it('never enters stock lanes', () => {
+    assert.equal(canTransition('repaired_shoe', 'out_of_stock'), false);
+    assert.equal(canTransition('repaired_shoe', 'verified_ready_for_shipping'), false);
+  });
+
+  it('can be pulled back from courier lanes to Repaired shoe', () => {
+    assert.equal(canTransition('awaiting_bosta_pickup', 'repaired_shoe'), true);
+    assert.equal(canTransition('local_shipping', 'repaired_shoe'), true);
+  });
+});

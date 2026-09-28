@@ -105,6 +105,10 @@ function buildPackageDescription(order, variantsById = new Map()) {
 
   const cod = bostaCodAmountForOrder(order);
   const tags = [];
+  if (order.isRepairOrder) {
+    tags.push(`REPAIRED SHOE · COD ${cod}`);
+    return [tags[0], ref, `DELIVER: ${order.repairItemName || 'Repaired shoe'} x1`].join(' | ').slice(0, 400);
+  }
   if (order.isReturnOrder) tags.push('RETURN PICKUP · COD 0 · NO CASH TO CUSTOMER');
   else if (order.isExchangeOrder) {
     const credit = Number(order.exchangeCreditAmount) || 0;
@@ -607,8 +611,9 @@ export async function createDelivery(order, customer) {
   const description = buildPackageDescription(order, variantsById);
 
   const outboundCount = countItems(order.items);
-  const outboundDesc =
-    formatItemLines(order.items, variantsById).join(' | ') || description;
+  const outboundDesc = order.isRepairOrder
+    ? `Repaired shoe: ${order.repairItemName || 'shoe'} x1`
+    : formatItemLines(order.items, variantsById).join(' | ') || description;
   const returnSource =
     order.bostaReturnItems?.length
       ? order.bostaReturnItems
@@ -666,7 +671,13 @@ export async function createDelivery(order, customer) {
   // Bosta Flex otherwise prints a second customer shipping fee (~EGP 80) on the AWB
   // on top of our COD. Shipping is already in COD (exchange = diff+fee; SEND = goods+fee).
   // These fields are create-only (Bosta rejects later updates).
-  if (order.isExchangeOrder || codAmount > 0 || isOrderPrepaidForBosta(order) || order.isReturnOrder) {
+  if (
+    order.isExchangeOrder
+    || order.isRepairOrder
+    || codAmount > 0
+    || isOrderPrepaidForBosta(order)
+    || order.isReturnOrder
+  ) {
     payload.isCustomerPayShipping = false;
     payload.customerShippingFee = 0;
     payload.businessPaidShipping = true;
@@ -801,7 +812,7 @@ export async function updateDeliveryPackageDescription(deliveryId, order) {
   if (!id || !order) return null;
 
   const variantsById = await loadVariantsForOrder(order);
-  const itemsCount = (order.items || []).reduce((s, i) => s + (i.quantity || 0), 0);
+  const itemsCount = Math.max(1, (order.items || []).reduce((s, i) => s + (i.quantity || 0), 0));
   const description = buildPackageDescription(order, variantsById);
   const baseBody = {
     allowToOpenPackage: true,

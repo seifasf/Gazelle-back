@@ -160,6 +160,19 @@ async function transitionToward(orderId, fromStatus, toStatus, meta) {
     return orderService.transitionOrderStatus(orderId, toStatus, meta);
   }
 
+  const readyBridges = {
+    picked_up_by_bosta: ['awaiting_bosta_pickup'],
+    in_transit: ['awaiting_bosta_pickup', 'picked_up_by_bosta'],
+    delivered: ['awaiting_bosta_pickup', 'picked_up_by_bosta', 'in_transit'],
+    failed_delivery: ['awaiting_bosta_pickup', 'picked_up_by_bosta', 'in_transit'],
+    returning_to_origin: ['awaiting_bosta_pickup', 'picked_up_by_bosta', 'in_transit'],
+    returned_awaiting_receipt: [
+      'awaiting_bosta_pickup',
+      'picked_up_by_bosta',
+      'in_transit',
+      'returning_to_origin',
+    ],
+  };
   const bridges = {
     // pending_verification is intentionally omitted — humans must verify first.
     awaiting_bosta_pickup: {
@@ -180,19 +193,8 @@ async function transitionToward(orderId, fromStatus, toStatus, meta) {
       returning_to_origin: [],
       returned_awaiting_receipt: ['returning_to_origin'],
     },
-    verified_ready_for_shipping: {
-      picked_up_by_bosta: ['awaiting_bosta_pickup'],
-      in_transit: ['awaiting_bosta_pickup', 'picked_up_by_bosta'],
-      delivered: ['awaiting_bosta_pickup', 'picked_up_by_bosta', 'in_transit'],
-      failed_delivery: ['awaiting_bosta_pickup', 'picked_up_by_bosta', 'in_transit'],
-      returning_to_origin: ['awaiting_bosta_pickup', 'picked_up_by_bosta', 'in_transit'],
-      returned_awaiting_receipt: [
-        'awaiting_bosta_pickup',
-        'picked_up_by_bosta',
-        'in_transit',
-        'returning_to_origin',
-      ],
-    },
+    verified_ready_for_shipping: readyBridges,
+    repaired_shoe: readyBridges,
     delivered: {
       // False Shopify-fulfillment→delivered must be correctable from live Bosta.
       returning_to_origin: [],
@@ -298,7 +300,7 @@ export async function processBostaStatusUpdate({ deliveryId, state, payload, not
   // Ready-to-ship stays in the warehouse queue until Gazelle owns the shipment
   // (print policy / pick-pack sets bostaDeliveryId with businessReference = order id).
   // Do not attach or advance from foreign / guessed deliveries.
-  if (order.internalStatus === 'verified_ready_for_shipping') {
+  if (order.internalStatus === 'verified_ready_for_shipping' || order.internalStatus === 'repaired_shoe') {
     const ref = String(
       payload?.businessReference || payload?.business_reference || ''
     ).trim();
@@ -435,6 +437,7 @@ export async function pollStuckOrders(thresholdHours = 2) {
     internalStatus: {
       $in: [
         'verified_ready_for_shipping',
+        'repaired_shoe',
         'picked_up_by_bosta',
         'in_transit',
         'failed_delivery',

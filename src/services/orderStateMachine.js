@@ -21,6 +21,14 @@ export const ORDER_TRANSITIONS = {
     'out_of_stock',
     'cancelled',
   ],
+  // Repair order waiting in Fulfillment: Bosta AWB, local courier, or customer pickup.
+  repaired_shoe: [
+    'awaiting_bosta_pickup',
+    'picked_up_by_bosta',
+    'local_shipping',
+    'delivered',
+    'cancelled',
+  ],
   // Hold for missing SKUs — edit items, cancel, or send back to Ready to ship.
   out_of_stock: ['verified_ready_for_shipping', 'cancelled'],
   // AWB created on Bosta — courier has not collected yet.
@@ -32,6 +40,7 @@ export const ORDER_TRANSITIONS = {
     'failed_delivery',
     'returning_to_origin',
     'verified_ready_for_shipping',
+    'repaired_shoe',
     'out_of_stock',
     'pending_verification',
     'cancelled',
@@ -42,6 +51,7 @@ export const ORDER_TRANSITIONS = {
     'cancelled',
     'pending_verification',
     'verified_ready_for_shipping',
+    'repaired_shoe',
     'in_transit',
     'failed_delivery',
     'returning_to_origin',

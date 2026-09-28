@@ -1,4 +1,4 @@
-import Order from '../models/Order.js';
+import Order from '../models/ReportOrder.js';
 import PaymobReceived from '../models/PaymobReceived.js';
 import OrderStatusHistory from '../models/OrderStatusHistory.js';
 import InventoryLedger from '../models/InventoryLedger.js';
@@ -355,9 +355,16 @@ async function deliveredCountForRange({ from, to }) {
 
 /** Warehouse confirms only — secondary analytics, not executive return-rate. */
 async function gazelleReturnCountForRange({ from, to }) {
+  const ids = await OrderStatusHistory.distinct('orderId', {
+    toStatus: 'returned_to_stock',
+    createdAt: { $gte: from, $lte: to },
+  });
+  if (!ids.length) return 0;
+  const reportable = await Order.distinct('_id', { _id: { $in: ids } });
   return OrderStatusHistory.countDocuments({
     toStatus: 'returned_to_stock',
     createdAt: { $gte: from, $lte: to },
+    orderId: { $in: reportable },
   });
 }
 
@@ -393,6 +400,7 @@ async function returnsForRange({ from, to }) {
       },
     },
     { $unwind: '$order' },
+    { $match: { 'order.isRepairOrder': { $ne: true } } },
     {
       $group: {
         _id: null,
@@ -466,6 +474,7 @@ async function dailyBreakdownForRange({ from, to, fromYmd, toYmd }) {
         },
       },
       { $unwind: '$order' },
+      { $match: { 'order.isRepairOrder': { $ne: true } } },
       {
         $group: {
           _id: dateToStringCairo('$createdAt'),

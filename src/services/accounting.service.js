@@ -1,6 +1,6 @@
 import GLAccount from '../models/GLAccount.js';
 import JournalEntry from '../models/JournalEntry.js';
-import Order from '../models/Order.js';
+import Order from '../models/ReportOrder.js';
 import Variant from '../models/Variant.js';
 import Product from '../models/Product.js'; // ensure populate('productId') resolves
 import { getAccountByCode } from './chartOfAccounts.seed.js';
@@ -262,7 +262,6 @@ async function operationalPlFromOrders({ from, to }) {
   // Shipping economics: sync live Bosta API fees for delivered + failed/RTO.
   let shippingEconomics = computeShippingEconomics({});
   if (applyShippingEconomics) {
-    const Order = (await import('../models/Order.js')).default;
     shippingEconomics = await loadShippingEconomicsForRange({ from, to, Order });
     customerShippingCollected = shippingEconomics.customerShipping;
     shippingEconomicsOrderCount = shippingEconomics.orderCount;
