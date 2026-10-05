@@ -428,7 +428,8 @@ export async function handleOrdersUpdated(payload) {
     order.shippingFee = 0;
   }
 
-  const shipping = payload.shipping_address;
+  const addressLocked = Boolean(order.shippingAddressLockedAt);
+  const shipping = addressLocked ? null : payload.shipping_address;
   if (shipping) {
     const fullName = `${shipping.first_name || ''} ${shipping.last_name || ''}`.trim();
     const prev = order.shippingAddress?.toObject?.() || order.shippingAddress || {};
@@ -444,9 +445,11 @@ export async function handleOrdersUpdated(payload) {
 
   const current = order.shippingAddress?.toObject?.() || order.shippingAddress || {};
   if (
-    isPlaceholderCustomerName(current.fullName) ||
-    isPlaceholderPhone(current.phone) ||
-    isPlaceholderStreet(current.line1)
+    !addressLocked && (
+      isPlaceholderCustomerName(current.fullName) ||
+      isPlaceholderPhone(current.phone) ||
+      isPlaceholderStreet(current.line1)
+    )
   ) {
     const enriched = await enrichContactFromShopifyGraphql(payload, current);
     order.shippingAddress = enriched?.shippingAddress || enriched;

@@ -387,6 +387,8 @@ export async function updateShippingAddress(req, res, next) {
     }
 
     if (addressChanged) {
+      order.shippingAddressLockedAt = new Date();
+      order.shippingAddressLockedBy = req.user?._id;
       order.verificationLog = order.verificationLog || [];
       order.verificationLog.push({
         outcome: 'confirmed',

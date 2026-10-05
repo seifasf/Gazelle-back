@@ -9,6 +9,7 @@ import logger from '../../utils/logger.js';
  * Bosta receiver must match this — not the Shopify customer account name.
  */
 export function applyShopifyShippingAddress(order, payload) {
+  if (order?.shippingAddressLockedAt) return false;
   const shipping = payload?.shipping_address || payload?.billing_address;
   if (!shipping) return false;
 

@@ -11,6 +11,7 @@ import { syncBostaReturns } from './integrations/bosta/returns.service.js';
 import { ensureChartOfAccounts } from './services/chartOfAccounts.seed.js';
 import { ensureBrandExpenses } from './services/brandExpenses.seed.js';
 import logger from './utils/logger.js';
+import { startKeepAwake } from './utils/keepAwake.js';
 
 async function ensureCatalogLoaded() {
   try {
@@ -57,6 +58,14 @@ async function startServer() {
   // Bind to 0.0.0.0 so the service is reachable in containerized hosts (Render, etc.).
   const server = app.listen(config.PORT, '0.0.0.0', () => {
     logger.info(`Gazelle API listening on port ${config.PORT}`);
+  });
+
+  startKeepAwake({
+    appUrl: config.APP_URL,
+    mode: config.KEEP_AWAKE,
+    nodeEnv: config.NODE_ENV,
+    hours: config.KEEP_AWAKE_HOURS,
+    offDays: config.KEEP_AWAKE_OFF_DAYS,
   });
 
   let shuttingDown = false;

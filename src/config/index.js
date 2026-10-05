@@ -29,6 +29,12 @@ const envSchema = z.object({
   CORS_ORIGIN: z.string().optional(),
   /** Used to convert USD brand expenses (e.g. website) into EGP totals. */
   USD_TO_EGP: z.coerce.number().positive().default(50),
+  /** auto = self-ping APP_URL in production during working hours (Render free plan). on | off to force. */
+  KEEP_AWAKE: z.enum(['auto', 'on', 'off']).default('auto'),
+  /** Cairo hours to stay warm, e.g. "8-24" or "9-2" (past midnight). */
+  KEEP_AWAKE_HOURS: z.string().default('8-24'),
+  /** Comma-separated days allowed to sleep, e.g. "fri". */
+  KEEP_AWAKE_OFF_DAYS: z.string().default('fri'),
 });
 
 const parsed = envSchema.safeParse(process.env);

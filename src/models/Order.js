@@ -60,6 +60,9 @@ const orderSchema = new mongoose.Schema(
         return this.shippingMethod !== 'pickup';
       },
     },
+    /** Set when staff edit the ship-to; Shopify sync must not overwrite it after this. */
+    shippingAddressLockedAt: Date,
+    shippingAddressLockedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     shippingMethod: { type: String, enum: SHIPPING_METHODS, default: 'bosta', index: true },
     // "cod" means the customer pays Cash on Delivery (typically Bosta COD).
     // "online" means the customer already paid via an online provider (Paymob, etc.).

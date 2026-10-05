@@ -1,0 +1,19 @@
+# Render free plan: the API sleeps at night and on Friday to save instance hours.
+# Wake it before staff start (Sat-Thu) so the first page load is fast; the API
+# then keeps itself warm until KEEP_AWAKE_HOURS ends.
+# 05:00 + 06:00 UTC = 08:00 + 09:00 Cairo in summer, 07:00 + 08:00 in winter.
+name: Morning wake
+
+on:
+  schedule:
+    - cron: '0 5,6 * * 0-4,6'
+  workflow_dispatch:
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping API health
+        env:
+          API_URL: ${{ vars.API_URL || 'https://gazelle-back-qre2.onrender.com' }}
+        run: curl -fsS --retry 5 --retry-delay 20 --retry-all-errors --max-time 90 "$API_URL/api/v1/health"
