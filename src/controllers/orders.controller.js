@@ -448,6 +448,17 @@ export async function updateShippingAddress(req, res, next) {
       }
     }
 
+    if (order.isReturnOrder && order.shippingMethod === 'bosta' && order.internalStatus === 'verified_ready_for_shipping') {
+      const routed = await orderService.routeBostaReturnPickup(order._id, req.user?._id);
+      return res.json({
+        data: routed.order,
+        movedToBostaReturns: routed.moved,
+        ...(routed.crpError
+          ? { warning: `Moved to Returning to Warehouse, but the Bosta CRP was not created: ${routed.crpError}. Print the CRP from Returns.` }
+          : {}),
+      });
+    }
+
     res.json({
       data: order,
       ...(bostaSync ? { bostaUpdated: true } : {}),

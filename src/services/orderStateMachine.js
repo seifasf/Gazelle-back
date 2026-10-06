@@ -12,12 +12,14 @@ export const ORDER_TRANSITIONS = {
   // Warehouse can park an order as out_of_stock until inventory is fixed.
   // Bosta: print AWB → awaiting_bosta_pickup; local courier → local_shipping.
   // Pickup handoff can go delivered, or collect/refund can go straight to Back from pickup.
+  // Return pickup switched to Bosta → Returning to Warehouse (CRP), never Fulfillment.
   verified_ready_for_shipping: [
     'awaiting_bosta_pickup',
     'local_shipping',
     'picked_up_by_bosta',
     'delivered',
     'back_from_pickup',
+    'returning_to_origin',
     'out_of_stock',
     'cancelled',
   ],

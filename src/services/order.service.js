@@ -81,6 +81,11 @@ async function transitionOrder(order, toStatus, meta, session) {
     err.statusCode = 400;
     throw err;
   }
+  if (fromStatus === 'verified_ready_for_shipping' && toStatus === 'returning_to_origin' && !order.isReturnOrder) {
+    const err = new Error('Only return pickups can go from Ready to ship to Returning to Warehouse');
+    err.statusCode = 400;
+    throw err;
+  }
 
   const $set = {
     internalStatus: toStatus,
@@ -2592,6 +2597,43 @@ export async function createManualOrder({
 }
 
 /**
+ * A return pickup that ends up on Bosta (e.g. created as local courier, then switched)
+ * belongs in Returning to Warehouse with a CRP — same as one created as Bosta — not Fulfillment.
+ */
+export async function routeBostaReturnPickup(orderId, actorUserId) {
+  const order = await Order.findById(orderId);
+  if (
+    !order
+    || !order.isReturnOrder
+    || order.shippingMethod !== 'bosta'
+    || order.internalStatus !== 'verified_ready_for_shipping'
+  ) {
+    return { order, moved: false };
+  }
+
+  await transitionOrderStatus(orderId, 'returning_to_origin', {
+    source: 'user_action',
+    actorUserId,
+    note: 'Return pickup switched to Bosta · Returning to Warehouse · Bosta CRP · COD 0',
+  });
+
+  let crpError = null;
+  try {
+    const { ensureBostaDeliveryForOrder } = await import('./fulfillment.service.js');
+    await ensureBostaDeliveryForOrder(orderId, actorUserId);
+  } catch (err) {
+    crpError = err?.message || String(err);
+    logger.error(
+      { err: crpError, orderId: String(orderId) },
+      'Return moved to Returning to Warehouse but Bosta CRP failed — print CRP from Returns to retry'
+    );
+  }
+
+  const fresh = await Order.findById(orderId).populate('customerId');
+  return { order: fresh, moved: true, crpError };
+}
+
+/**
  * Resolve a prior order for exchange / return by Shopify order number.
  * Always searches Shopify for the entered id (any age), then upserts into OMS.
  * Local-only fallback for manual orders (M-1000 / legacy MAN-…) or Mongo ids.
@@ -3532,6 +3574,7 @@ export default {
   releaseOutOfStockOrdersIfRestocked,
   scanOutOfStockOrdersForRelease,
   createManualOrder,
+  routeBostaReturnPickup,
   findOrderForExchange,
   suggestShippingFeeByCity,
   resolveExchangeShippingFee,

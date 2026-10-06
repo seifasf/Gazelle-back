@@ -335,10 +335,24 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
 /** Warehouse queue states that ship from Fulfillment (normal ready + repaired shoe). */
 const FULFILLMENT_READY_STATUSES = ['verified_ready_for_shipping', 'repaired_shoe'];
 
+function isBostaReturnPickup(order) {
+  return Boolean(order?.isReturnOrder) && order.shippingMethod !== 'local_shipping' && order.shippingMethod !== 'pickup';
+}
+
+async function moveBostaReturnToReturning(orderId, actorUserId) {
+  await orderService.transitionOrderStatus(orderId, 'returning_to_origin', {
+    source: 'user_action',
+    actorUserId,
+    note: 'Bosta CRP created · Returning to Warehouse · COD 0',
+  });
+}
+
 export async function prepareAwbForOrder(orderId, actorUserId) {
   const shipment = await ensureBostaDeliveryForOrder(orderId, actorUserId);
-  const order = await Order.findById(orderId).select('internalStatus');
-  if (FULFILLMENT_READY_STATUSES.includes(order?.internalStatus)) {
+  const order = await Order.findById(orderId).select('internalStatus isReturnOrder shippingMethod');
+  if (order?.internalStatus === 'verified_ready_for_shipping' && isBostaReturnPickup(order)) {
+    await moveBostaReturnToReturning(orderId, actorUserId);
+  } else if (FULFILLMENT_READY_STATUSES.includes(order?.internalStatus)) {
     await orderService.transitionOrderStatus(orderId, 'awaiting_bosta_pickup', {
       source: 'user_action',
       actorUserId,
@@ -364,8 +378,10 @@ export async function prepareAwbForOrder(orderId, actorUserId) {
 export async function createBostaShipmentForOrder(orderId, actorUserId) {
   const shipment = await ensureBostaDeliveryForOrder(orderId, actorUserId);
 
-  const order = await Order.findById(orderId).select('internalStatus');
-  if (FULFILLMENT_READY_STATUSES.includes(order?.internalStatus)) {
+  const order = await Order.findById(orderId).select('internalStatus isReturnOrder shippingMethod');
+  if (order?.internalStatus === 'verified_ready_for_shipping' && isBostaReturnPickup(order)) {
+    await moveBostaReturnToReturning(orderId, actorUserId);
+  } else if (FULFILLMENT_READY_STATUSES.includes(order?.internalStatus)) {
     await orderService.transitionOrderStatus(orderId, 'awaiting_bosta_pickup', {
       source: 'system',
       actorUserId,
@@ -465,6 +481,24 @@ export async function pickAndPackOrder(orderId, actorUserId) {
     return { queued: false, localShipping: true, orderId, stockWarnings: [] };
   }
 
+  if (isBostaReturnPickup(order) && order.internalStatus === 'verified_ready_for_shipping') {
+    const routed = await orderService.routeBostaReturnPickup(orderId, actorUserId);
+    if (routed.crpError) {
+      const err = new Error(`Moved to Returning to Warehouse, but the Bosta CRP failed: ${routed.crpError}`);
+      err.statusCode = 502;
+      throw err;
+    }
+    return {
+      queued: false,
+      bosta: true,
+      returnPickup: true,
+      orderId,
+      deliveryId: routed.order?.bostaDeliveryId,
+      trackingNumber: routed.order?.bostaTrackingNumber,
+      stockWarnings: [],
+    };
+  }
+
   // Fast path: policy already printed → Bosta delivery exists → awaiting courier pickup.
   if (order.bostaDeliveryId && order.bostaShipmentStatus === 'created') {
     if (actorUserId && !order.assignedStockManagerId) {
@@ -533,6 +567,8 @@ export async function getPickList() {
       { delayedUntil: { $exists: false } },
       { delayedUntil: { $lte: todayEnd } },
     ],
+    // Bosta return pickups live in Returning to Warehouse, never on the pick list.
+    $nor: [{ isReturnOrder: true, shippingMethod: 'bosta' }],
   })
     // Newest ready-to-ship first so newly joined orders are easy to spot/select.
     .sort({ verifiedAt: -1, placedAt: -1 })

@@ -13,6 +13,10 @@ describe('orderStateMachine pending_refund', () => {
     assert.equal(canTransition('delivered', 'back_from_local_shipping'), true);
   });
 
+  it('lets a return pickup switched to Bosta leave Ready to ship for Returning to Warehouse', () => {
+    assert.equal(canTransition('verified_ready_for_shipping', 'returning_to_origin'), true);
+  });
+
   it('allows local_shipping to pull back to Ready to ship', () => {
     assert.equal(canTransition('local_shipping', 'verified_ready_for_shipping'), true);
   });
