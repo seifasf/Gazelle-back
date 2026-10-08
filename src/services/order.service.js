@@ -617,6 +617,7 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
 
   let newlyCancelled = false;
   const cancelled = await withTransaction(async (session) => {
+    newlyCancelled = false;
     const order = await Order.findById(orderId).session(session);
     if (!order) {
       const err = new Error('Order not found');
