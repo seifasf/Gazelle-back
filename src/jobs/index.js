@@ -12,6 +12,7 @@ import InventoryLedger from '../models/InventoryLedger.js';
 import Order from '../models/Order.js';
 import Settings from '../models/Settings.js';
 import WebhookReceipt from '../models/WebhookReceipt.js';
+import { enqueueReceiptJob } from '../utils/idempotency.js';
 import { JOB_NAMES } from '../constants/index.js';
 import { checkRestockNeeded, checkSlowMovers } from '../services/adminJobs.service.js';
 import logger from '../utils/logger.js';
@@ -182,7 +183,53 @@ export function registerJobs(agenda) {
     return { repair, oos };
   });
 
+  agenda.define(JOB_NAMES.REPLAY_WEBHOOKS, async () => replayUnprocessedWebhooks());
+
   logger.info('Agenda jobs registered');
+}
+
+const REPLAY_MAX = 5;
+
+/**
+ * Receipts stored but never processed (job failed, server restarted mid-job, Paymob
+ * processing threw). Shopify order topics are retried by the orders sync instead, and an
+ * old inventory level must never be replayed over newer warehouse stock.
+ */
+export async function replayUnprocessedWebhooks({ limit = 50 } = {}) {
+  const now = Date.now();
+  const receipts = await WebhookReceipt.find({
+    $or: [{ processedAt: { $exists: false } }, { processedAt: null }],
+    createdAt: { $lt: new Date(now - 5 * 60 * 1000), $gt: new Date(now - 3 * 24 * 60 * 60 * 1000) },
+    replayCount: { $not: { $gte: REPLAY_MAX } },
+    $nor: [
+      {
+        source: 'shopify',
+        topic: { $in: ['orders/create', 'orders/updated', 'inventory_levels/update'] },
+      },
+    ],
+  })
+    .sort({ createdAt: 1 })
+    .limit(limit);
+
+  let replayed = 0;
+  for (const receipt of receipts) {
+    await WebhookReceipt.updateOne({ _id: receipt._id }, { $inc: { replayCount: 1 } });
+    try {
+      if (receipt.source === 'paymob') {
+        const { processPaymobReceipt } = await import(
+          '../integrations/paymob/webhookReceipt.service.js'
+        );
+        await processPaymobReceipt(receipt);
+      } else {
+        await enqueueReceiptJob(receipt);
+      }
+      replayed += 1;
+    } catch (err) {
+      logger.warn({ err: err?.message || err, receiptId: String(receipt._id) }, 'Webhook replay failed');
+    }
+  }
+  if (replayed) logger.info({ replayed, scanned: receipts.length }, 'Replayed unprocessed webhooks');
+  return { replayed, scanned: receipts.length };
 }
 
 export async function scheduleRecurringJobs(agenda) {
@@ -200,6 +247,7 @@ export async function scheduleRecurringJobs(agenda) {
   await agenda.every('5 minutes', JOB_NAMES.RELEASE_OUT_OF_STOCK);
   // Keep hold field ↔ ledger ↔ terminal orders aligned (stock puzzle).
   await agenda.every('15 minutes', JOB_NAMES.STOCK_INTEGRITY);
+  await agenda.every('10 minutes', JOB_NAMES.REPLAY_WEBHOOKS);
   logger.info('Agenda recurring jobs scheduled');
 }
 

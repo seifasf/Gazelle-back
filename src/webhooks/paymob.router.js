@@ -1,19 +1,14 @@
 import { Router } from 'express';
 import WebhookReceipt from '../models/WebhookReceipt.js';
-import { recordPaymobPayment } from '../integrations/paymob/payments.service.js';
+import {
+  processPaymobReceipt,
+  unwrapPaymobPayload,
+} from '../integrations/paymob/webhookReceipt.service.js';
 import { verifyPaymobHmac } from './verifyPaymobHmac.js';
 import { config } from '../config/index.js';
 import logger from '../utils/logger.js';
 
 const router = Router();
-
-/** Paymob sends the transaction under `obj` on processed callbacks. */
-function unwrapPaymobPayload(body) {
-  if (!body || typeof body !== 'object') return {};
-  if (body.obj && typeof body.obj === 'object') return body.obj;
-  if (body.transaction && typeof body.transaction === 'object') return body.transaction;
-  return body;
-}
 
 router.post('/', async (req, res) => {
   const raw = req.body;
@@ -40,25 +35,21 @@ router.post('/', async (req, res) => {
   const externalId = `${paymentId || 'paymob'}-${status ?? 'event'}`;
 
   try {
-    const receipt = await WebhookReceipt.create({
-      source: 'paymob',
-      externalId,
-      payload: raw,
-    });
-
-    const result = await recordPaymobPayment(payload);
-    receipt.processedAt = new Date();
-    if (result?.reason && result.reason !== 'duplicate') {
-      receipt.error = result.reason;
+    let receipt;
+    try {
+      receipt = await WebhookReceipt.create({ source: 'paymob', externalId, payload: raw });
+    } catch (error) {
+      if (error?.code !== 11000) throw error;
+      receipt = await WebhookReceipt.findOne({ source: 'paymob', externalId });
+      if (!receipt || receipt.processedAt) {
+        logger.info({ externalId }, 'Duplicate Paymob webhook ignored');
+        return res.status(200).json({ received: true, duplicate: true });
+      }
     }
-    await receipt.save();
 
+    const result = await processPaymobReceipt(receipt);
     return res.status(200).json({ received: true, recorded: Boolean(result?.recorded) });
   } catch (error) {
-    if (error?.code === 11000) {
-      logger.info({ externalId }, 'Duplicate Paymob webhook ignored');
-      return res.status(200).json({ received: true, duplicate: true });
-    }
     logger.error({ err: error?.message || error, externalId }, 'Paymob webhook failed');
     return res.status(500).json({ error: 'Paymob webhook failed' });
   }

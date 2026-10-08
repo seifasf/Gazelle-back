@@ -22,9 +22,8 @@ router.post('/', async (req, res) => {
     res.status(200).json({ received: true });
   } catch (err) {
     logger.error({ err }, 'Bosta webhook enqueue failed');
-    // Still ACK so Bosta does not hammer retries for our internal failures;
-    // the receipt/error path will surface in logs + Agenda.
-    res.status(200).json({ received: true, error: 'enqueue_failed' });
+    // Ask Bosta to retry: a re-delivered event whose receipt exists is queued again, not dropped.
+    res.status(500).json({ received: false, error: 'enqueue_failed' });
   }
 });
 

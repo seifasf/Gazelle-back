@@ -107,6 +107,7 @@ export const JOB_NAMES = {
   ORDER_DELAY_CALLBACKS: 'order-delay-callbacks',
   RELEASE_OUT_OF_STOCK: 'release-out-of-stock',
   STOCK_INTEGRITY: 'stock-integrity',
+  REPLAY_WEBHOOKS: 'replay-webhooks',
 };
 
 export const PO_STATUSES = [

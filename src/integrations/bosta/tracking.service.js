@@ -383,6 +383,28 @@ export async function processBostaStatusUpdate({ deliveryId, state, payload, not
     internalStatus !== 'delivered' &&
     !bostaReallyDelivered
   ) {
+    // Webhook jobs and two polling jobs run in parallel; an older read applied after a
+    // newer "delivered" must not reverse a real sale. Only unwind when Bosta says so now.
+    let liveDelivered = true;
+    try {
+      const fresh = await getDelivery(order.bostaTrackingNumber || order.bostaDeliveryId || deliveryId);
+      const live = fresh?.data || fresh;
+      liveDelivered =
+        extractBostaStateCode(live?.state ?? live?.status) === 45
+        || Boolean(live?.state?.deliveryTime || live?.deliveryTime);
+    } catch (err) {
+      logger.warn(
+        { err: err?.message || err, orderId: order._id },
+        'Could not re-check Bosta before unwinding delivered; keeping delivered'
+      );
+    }
+    if (liveDelivered) {
+      logger.info(
+        { orderId: order._id, ignored: internalStatus, state: stateLabel },
+        'Stale Bosta state after delivered ignored'
+      );
+      return order;
+    }
     try {
       await orderService.unwindFalseDeliveredSale(order._id, {
         note: `Unwound false delivered before Bosta → ${internalStatus} (${stateLabel})`,
@@ -474,10 +496,13 @@ export async function pollStuckOrders(thresholdHours = 2) {
       { lastStatusUpdateAt: { $exists: false } },
       { lastStatusUpdateAt: null },
     ],
-  }).limit(100);
+  })
+    .sort({ bostaLastPolledAt: 1, _id: 1 })
+    .limit(100);
 
   const results = [];
   for (const order of stuck) {
+    await Order.updateOne({ _id: order._id }, { $set: { bostaLastPolledAt: new Date() } });
     try {
       // Prefer tracking — GET /deliveries/:id 404s on Bosta v2 for many valid shipments.
       const key = order.bostaTrackingNumber || order.bostaDeliveryId;

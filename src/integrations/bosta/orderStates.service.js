@@ -145,7 +145,6 @@ const COURIER_ACTIVE_STATUSES = [
   'in_transit',
   'failed_delivery',
   'returning_to_origin',
-  'returned_awaiting_receipt',
 ];
 
 /**
@@ -189,7 +188,9 @@ export async function syncOrderStatesFromBosta({
 
   const select =
     '_id shopifyOrderName bostaDeliveryId bostaTrackingNumber bostaShipmentStatus internalStatus';
-  const sort = { lastStatusUpdateAt: 1, updatedAt: 1 };
+  // Never-polled first, then least recently polled; status-change time would starve orders
+  // that sit in one status.
+  const sort = { bostaLastPolledAt: 1, _id: 1 };
 
   let linkedOrders = [];
   if (prioritizeCourier) {
@@ -220,6 +221,7 @@ export async function syncOrderStatesFromBosta({
   }
 
   for (const order of linkedOrders) {
+    await Order.updateOne({ _id: order._id }, { $set: { bostaLastPolledAt: new Date() } });
     try {
       const before = order.internalStatus;
       const payload = await resolveLiveDelivery(order, null);

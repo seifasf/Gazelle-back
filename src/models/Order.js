@@ -220,6 +220,8 @@ const orderSchema = new mongoose.Schema(
     deliveredAt: Date,
     closedAt: Date,
     lastStatusUpdateAt: { type: Date, default: Date.now },
+    /** Last time a Bosta poll read this order (rotates polling so no order is starved). */
+    bostaLastPolledAt: Date,
     /** Customer asked to delay — call again on this Cairo calendar day. */
     delayedUntil: { type: Date, index: true },
     delayNote: { type: String, maxlength: 500 },
@@ -230,6 +232,7 @@ const orderSchema = new mongoose.Schema(
 );
 
 orderSchema.index({ internalStatus: 1, placedAt: 1 });
+orderSchema.index({ internalStatus: 1, bostaLastPolledAt: 1 });
 orderSchema.index({ 'items.variantId': 1, internalStatus: 1 });
 orderSchema.index({ placedAt: 1 });
 orderSchema.index({ deliveredAt: 1, internalStatus: 1 });

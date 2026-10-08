@@ -8,10 +8,13 @@ const webhookReceiptSchema = new mongoose.Schema(
     payload: mongoose.Schema.Types.Mixed,
     processedAt: Date,
     error: String,
+    /** Times the replay sweeper re-queued this receipt. */
+    replayCount: { type: Number, default: 0 },
   },
   { timestamps: { createdAt: true, updatedAt: false } }
 );
 
 webhookReceiptSchema.index({ source: 1, externalId: 1 }, { unique: true });
+webhookReceiptSchema.index({ processedAt: 1, createdAt: 1 });
 
 export default mongoose.model('WebhookReceipt', webhookReceiptSchema);
