@@ -3,7 +3,7 @@
  * Usage:
  *   API_BASE=https://gazelle-back-qre2.onrender.com/api/v1 \
  *   ADMIN_EMAIL=admin@gazelle.local \
- *   ADMIN_PASSWORD=changeme123 \
+ *   ADMIN_PASSWORD=<admin password> \
  *   node scripts/setup-production.js
  */
 import dotenv from 'dotenv';
@@ -11,7 +11,11 @@ dotenv.config();
 
 const BASE = process.env.API_BASE || 'https://gazelle-back-qre2.onrender.com/api/v1';
 const EMAIL = process.env.ADMIN_EMAIL || 'admin@gazelle.local';
-const PASSWORD = process.env.ADMIN_PASSWORD || 'changeme123';
+const PASSWORD = process.env.ADMIN_PASSWORD;
+if (!PASSWORD) {
+  console.error('Set ADMIN_PASSWORD (no default password).');
+  process.exit(1);
+}
 
 async function call(method, path, { token, body } = {}) {
   const headers = { 'Content-Type': 'application/json' };

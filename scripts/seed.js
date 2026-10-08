@@ -43,7 +43,10 @@ async function seed() {
   await connectDatabase();
 
   const adminEmail = process.env.SEED_ADMIN_EMAIL || 'admin@gazelle.local';
-  const adminPassword = process.env.SEED_ADMIN_PASSWORD || 'changeme123';
+  const adminPassword = process.env.SEED_ADMIN_PASSWORD;
+  if (!adminPassword || adminPassword.length < 10) {
+    throw new Error('Set SEED_ADMIN_PASSWORD (at least 10 characters) before seeding.');
+  }
 
   const existing = await User.findOne({ email: adminEmail });
   if (!existing) {

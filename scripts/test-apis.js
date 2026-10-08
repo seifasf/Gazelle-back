@@ -222,7 +222,7 @@ async function run() {
   await req('GET', '/health');
   await req('POST', '/auth/login', { body: { email: 'wrong@test.local', password: 'bad' }, expectStatus: 401 });
 
-  const adminToken = await login('admin@gazelle.local', 'changeme123');
+  const adminToken = await login(process.env.TEST_ADMIN_EMAIL || 'admin@gazelle.local', process.env.TEST_ADMIN_PASSWORD);
   await req('GET', '/auth/me', { token: adminToken });
 
   await req('GET', '/users', { token: adminToken });

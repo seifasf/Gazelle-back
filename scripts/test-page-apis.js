@@ -8,7 +8,11 @@ dotenv.config();
 
 const BASE = process.env.API_BASE || 'http://localhost:4000/api/v1';
 const ADMIN_EMAIL = process.env.TEST_ADMIN_EMAIL || 'admin@gazelle.local';
-const ADMIN_PASSWORD = process.env.TEST_ADMIN_PASSWORD || 'changeme123';
+const ADMIN_PASSWORD = process.env.TEST_ADMIN_PASSWORD;
+if (!ADMIN_PASSWORD) {
+  console.error('Set TEST_ADMIN_PASSWORD (no default password).');
+  process.exit(1);
+}
 
 const results = [];
 

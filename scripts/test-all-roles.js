@@ -78,7 +78,7 @@ async function run() {
 
   await ensureTestUsers();
 
-  const admin = await login('admin@gazelle.local', 'changeme123');
+  const admin = await login(process.env.TEST_ADMIN_EMAIL || 'admin@gazelle.local', process.env.TEST_ADMIN_PASSWORD);
   const om = await login('om@test.local', 'testpass123');
   const sm = await login('sm@test.local', 'testpass123');
   if (!admin || !om || !sm) throw new Error('Failed to obtain tokens for all roles');

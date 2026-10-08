@@ -73,7 +73,7 @@ async function run() {
   console.log('Verifying OMS redesign against', BASE, '\n');
   await ensureTestUsers();
 
-  const adminToken = await login('admin@gazelle.local', 'changeme123');
+  const adminToken = await login(process.env.TEST_ADMIN_EMAIL || 'admin@gazelle.local', process.env.TEST_ADMIN_PASSWORD);
 
   // Catalog pagination (136 products)
   const { data: catalogPage1 } = await req('GET', '/inventory/catalog?limit=24&page=1', { token: adminToken });

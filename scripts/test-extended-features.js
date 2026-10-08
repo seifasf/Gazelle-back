@@ -46,7 +46,7 @@ async function login(email, password) {
 
 async function run() {
   console.log('\n=== Extended feature tests ===\n');
-  const admin = await login('admin@gazelle.local', 'changeme123');
+  const admin = await login(process.env.TEST_ADMIN_EMAIL || 'admin@gazelle.local', process.env.TEST_ADMIN_PASSWORD);
   if (!admin) throw new Error('Admin login failed');
 
   console.log('[INTEGRATIONS & REFERENCE]');
