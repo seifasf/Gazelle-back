@@ -29,11 +29,55 @@ export const BOSTA_FAILED_RTO_STATUSES = [
 ];
 
 export function shippingLossAppliesToRange({ from, to } = {}) {
-  const start = new Date(`${SHIPPING_LOSS_START_YMD}T00:00:00.000Z`);
-  const end = to ? new Date(to) : null;
-  if (end && String(to).length <= 10) end.setUTCHours(23, 59, 59, 999);
+  const start = zonedDayBound(SHIPPING_LOSS_START_YMD);
+  const end = rangeEnd(to);
   if (end && end < start) return false;
   return true;
+}
+
+/**
+ * Failed / RTO orders for a range, dated by when they FIRST entered a failed/RTO status
+ * (status history), not by updatedAt — later edits, return scans or fee syncs must not
+ * move an old failure into the current month. Orders with no failed history fall back
+ * to updatedAt.
+ */
+export async function findFailedRtoOrdersForRange({
+  Order,
+  OrderStatusHistory,
+  fromBound,
+  rangeTo,
+  extraFilter = {},
+  select,
+}) {
+  const firstFailed = await OrderStatusHistory.aggregate([
+    { $match: { toStatus: { $in: BOSTA_FAILED_RTO_STATUSES }, createdAt: { $lte: rangeTo } } },
+    { $group: { _id: '$orderId', firstFailedAt: { $min: '$createdAt' } } },
+    { $match: { firstFailedAt: { $gte: fromBound, $lte: rangeTo } } },
+  ]);
+  const datedIds = firstFailed.map((row) => row._id);
+
+  const undatedCandidates = await Order.find({
+    internalStatus: { $in: BOSTA_FAILED_RTO_STATUSES },
+    updatedAt: { $gte: fromBound, $lte: rangeTo },
+    ...extraFilter,
+  }).select('_id');
+  const candidateIds = undatedCandidates.map((o) => o._id);
+  const withHistory = candidateIds.length
+    ? await OrderStatusHistory.distinct('orderId', {
+        orderId: { $in: candidateIds },
+        toStatus: { $in: BOSTA_FAILED_RTO_STATUSES },
+      })
+    : [];
+  const hasHistory = new Set(withHistory.map(String));
+  const fallbackIds = candidateIds.filter((id) => !hasHistory.has(String(id)));
+
+  const ids = [...datedIds, ...fallbackIds];
+  if (!ids.length) return [];
+  return Order.find({
+    _id: { $in: ids },
+    internalStatus: { $in: BOSTA_FAILED_RTO_STATUSES },
+    ...extraFilter,
+  }).select(select);
 }
 
 export function roundMoney(n) {
@@ -219,7 +263,7 @@ export function computeShippingEconomicsFromOrders({
 /**
  * Load delivered + failed/RTO Bosta orders, sync live fees from Bosta APIs, then compute.
  */
-export async function loadShippingEconomicsForRange({ from, to, Order } = {}) {
+export async function loadShippingEconomicsForRange({ from, to, Order, OrderStatusHistory } = {}) {
   if (!shippingLossAppliesToRange({ from, to })) {
     return {
       ...computeShippingEconomics({}),
@@ -249,17 +293,23 @@ export async function loadShippingEconomicsForRange({ from, to, Order } = {}) {
     ],
   };
 
+  const History =
+    OrderStatusHistory || (await import('../models/OrderStatusHistory.js')).default;
+
   const [deliveredOrders, failedRtoOrders] = await Promise.all([
     Order.find({
       internalStatus: 'delivered',
       deliveredAt: { $gte: fromBound, $lte: rangeTo },
       ...bostaMethodFilter,
     }).select(select),
-    Order.find({
-      internalStatus: { $in: BOSTA_FAILED_RTO_STATUSES },
-      updatedAt: { $gte: fromBound, $lte: rangeTo },
-      ...bostaMethodFilter,
-    }).select(select),
+    findFailedRtoOrdersForRange({
+      Order,
+      OrderStatusHistory: History,
+      fromBound,
+      rangeTo,
+      extraFilter: bostaMethodFilter,
+      select,
+    }),
   ]);
 
   const allOrders = [...deliveredOrders, ...failedRtoOrders];

@@ -37,11 +37,7 @@ async function computeMonthShippingLoss(yearMonth) {
   const toYmd = `${yearMonth}-${String(lastDay).padStart(2, '0')}`;
   const Order = (await import('../models/ReportOrder.js')).default;
 
-  return loadShippingEconomicsForRange({
-    from: `${fromYmd}T00:00:00+03:00`,
-    to: `${toYmd}T23:59:59.999+03:00`,
-    Order,
-  });
+  return loadShippingEconomicsForRange({ from: fromYmd, to: toYmd, Order });
 }
 
 function usdToEgpRate() {
