@@ -1,6 +1,7 @@
 import Order from '../../models/Order.js';
 import BostaStatusMapping from '../../models/BostaStatusMapping.js';
 import { getDelivery } from './shipments.service.js';
+import { bostaLookupKey, pickLiveBostaUpdate } from './liveWebhookUpdate.js';
 import orderService from '../../services/order.service.js';
 import logger from '../../utils/logger.js';
 import {
@@ -430,6 +431,29 @@ export async function processBostaStatusUpdate({ deliveryId, state, payload, not
   }
 }
 
+/**
+ * The Bosta webhook is unauthenticated, so its body is only a hint of which order changed.
+ * Resolve the order from the hint, then read the delivery from the Bosta API and apply that.
+ * Returns null when the hint matches no order or Bosta has no state for it.
+ */
+export async function loadLiveBostaUpdate({ deliveryId, payload }) {
+  const order = await findOrderForBostaPayload({ deliveryId, payload });
+  if (!order) return null;
+
+  const { key, linked } = bostaLookupKey(order, { deliveryId, payload });
+  if (!key) return null;
+
+  const delivery = await getDelivery(key);
+  const update = pickLiveBostaUpdate({ order, delivery, linked, hintedDeliveryId: deliveryId });
+  if (!update) {
+    logger.warn(
+      { orderId: order._id, key, linked },
+      'Bosta webhook not confirmed by Bosta API for this order; ignored'
+    );
+  }
+  return update;
+}
+
 export async function pollStuckOrders(thresholdHours = 2) {
   const cutoff = new Date(Date.now() - thresholdHours * 60 * 60 * 1000);
   const stuck = await Order.find({
@@ -476,4 +500,4 @@ export async function pollStuckOrders(thresholdHours = 2) {
   return results;
 }
 
-export default { mapBostaStateToInternal, processBostaStatusUpdate, pollStuckOrders };
+export default { mapBostaStateToInternal, processBostaStatusUpdate, loadLiveBostaUpdate, pollStuckOrders };

@@ -25,8 +25,11 @@ router.post('/', async (req, res) => {
       logger.warn({ hasHmac: Boolean(hmac), keys: Object.keys(payload || {}) }, 'Paymob HMAC rejected');
       return res.status(401).json({ error: 'Invalid HMAC' });
     }
+  } else if (config.ALLOW_UNSIGNED_WEBHOOKS) {
+    logger.warn('PAYMOB_HMAC_SECRET not set - accepting unsigned webhook (ALLOW_UNSIGNED_WEBHOOKS=true)');
   } else {
-    logger.warn('PAYMOB_HMAC_SECRET not set — accepting webhook without verification');
+    logger.error('PAYMOB_HMAC_SECRET not set - rejecting Paymob webhook');
+    return res.status(401).json({ error: 'Webhook signing secret not configured' });
   }
 
   const status =

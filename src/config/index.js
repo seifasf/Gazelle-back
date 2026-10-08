@@ -24,6 +24,11 @@ const envSchema = z.object({
   PAYMOB_PUBLIC_KEY: z.string().optional(),
   PAYMOB_SECRET_KEY: z.string().optional(),
   PAYMOB_HMAC_SECRET: z.string().optional(),
+  /** Local testing only: accept Shopify/Paymob webhooks when their signing secret is not configured. */
+  ALLOW_UNSIGNED_WEBHOOKS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
   APP_URL: z.string().default('http://localhost:4000'),
   /** Comma-separated allowed origins for CORS (e.g. https://gazelle.onrender.com). Empty = allow all. */
   CORS_ORIGIN: z.string().optional(),

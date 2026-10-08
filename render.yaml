@@ -40,6 +40,8 @@ services:
         sync: false
       - key: BOSTA_API_BASE_URL
         value: https://app.bosta.co/api/v2
+      - key: PAYMOB_HMAC_SECRET
+        sync: false
       # Free plan: stay warm in Cairo working hours, sleep at night + Friday (< 750 instance hours).
       - key: KEEP_AWAKE_HOURS
         value: "8-24"

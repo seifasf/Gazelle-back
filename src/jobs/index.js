@@ -1,5 +1,9 @@
 import { processShopifyWebhookJob, retryFailedShopifyOrderCreates } from '../webhooks/shopify.handlers.js';
-import { processBostaStatusUpdate, pollStuckOrders } from '../integrations/bosta/tracking.service.js';
+import {
+  processBostaStatusUpdate,
+  loadLiveBostaUpdate,
+  pollStuckOrders,
+} from '../integrations/bosta/tracking.service.js';
 import { syncBostaReturns } from '../integrations/bosta/returns.service.js';
 import { syncOrderStatesFromBosta } from '../integrations/bosta/orderStates.service.js';
 import { syncCatalog } from '../integrations/shopify/sync.service.js';
@@ -24,15 +28,18 @@ export function registerJobs(agenda) {
     if (!receipt || receipt.processedAt) return;
 
     const { normalizeBostaWebhookPayload } = await import('../integrations/bosta/webhookPayload.js');
-    const { payload, deliveryId, state } = normalizeBostaWebhookPayload(receipt.payload);
+    const { payload, deliveryId } = normalizeBostaWebhookPayload(receipt.payload);
 
     try {
-      const updated = await processBostaStatusUpdate({
-        deliveryId,
-        state,
-        payload,
-        note: 'Bosta webhook',
-      });
+      const live = await loadLiveBostaUpdate({ deliveryId, payload });
+      const updated = live
+        ? await processBostaStatusUpdate({
+          deliveryId: live.deliveryId,
+          state: live.state,
+          payload: live.payload,
+          note: 'Bosta webhook (confirmed with Bosta)',
+        })
+        : null;
       receipt.processedAt = new Date();
       if (!updated) {
         receipt.error = 'no_matching_order';

@@ -7,7 +7,7 @@ export async function verifyShopifyHmac(rawBody, hmacHeader) {
   const secret = creds.webhookSecret || config.SHOPIFY_WEBHOOK_SECRET;
 
   if (!secret) {
-    return config.NODE_ENV !== 'production';
+    return config.ALLOW_UNSIGNED_WEBHOOKS;
   }
   if (!hmacHeader) return false;
 
