@@ -1,6 +1,7 @@
 import * as fulfillmentService from '../services/fulfillment.service.js';
 import * as warehouseReviewService from '../services/warehouseReview.service.js';
 import { sendExcel } from '../utils/excelExport.js';
+import { enrichOrderMoneyFields } from '../utils/omsCod.js';
 import Order from '../models/Order.js';
 
 export async function getWarehouseReview(req, res, next) {
@@ -67,7 +68,7 @@ export async function exportCurrentStock(req, res, next) {
 export async function getPickList(req, res, next) {
   try {
     const orders = await fulfillmentService.getPickList();
-    res.json({ data: orders });
+    res.json({ data: orders.map((order) => enrichOrderMoneyFields(order)) });
   } catch (err) {
     next(err);
   }
