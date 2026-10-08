@@ -1787,7 +1787,7 @@ export async function stockIntake({
  * One Mongo transaction for the whole batch, then return. Shopify + OOS release
  * run after the response so the browser is not left on a dead 502 connection.
  */
-export async function stockIntakeBatch({ items, reasonCode, actorUserId }) {
+export async function stockIntakeBatch({ items, reasonCode, actorUserId, inTransaction }) {
   if (!Array.isArray(items) || !items.length) {
     const err = new Error('items array is required');
     err.statusCode = 400;
@@ -1817,6 +1817,7 @@ export async function stockIntakeBatch({ items, reasonCode, actorUserId }) {
   }
 
   const { variantsById, ledgerDocs } = await withTransaction(async (session) => {
+    if (inTransaction) await inTransaction(session);
     const docs = await applyLedgerEntries(entries, session);
     const ids = [...new Set(accepted.map((row) => row.variantId))];
     const variants = await Variant.find({ _id: { $in: ids } })
@@ -1862,6 +1863,17 @@ export async function stockIntakeBatch({ items, reasonCode, actorUserId }) {
   };
 }
 
+function staleStockCountError(rows, savedBefore = 0) {
+  const list = rows.map((r) => `${r.sku} (was ${r.expected}, now ${r.current})`).join(', ');
+  const saved = savedBefore ? ` ${savedBefore} earlier size(s) were already saved.` : '';
+  const err = new Error(
+    `Warehouse stock changed since you opened it: ${list}. Reload and enter the counts again.${saved}`
+  );
+  err.statusCode = 409;
+  err.details = { stale: rows };
+  return err;
+}
+
 /**
  * Set absolute warehouse realStock for many variants (open-stock count / Excel import).
  * Always pushes sellable qty (realStock − onHoldStock) to Shopify — all order holds count.
@@ -1876,10 +1888,37 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
   const results = [];
   const allCrossings = [];
 
+  // Absolute counts typed on an old screen would silently undo intakes/scans made since.
+  const expectedRows = items.filter(
+    (i) => i?.variantId && i.expectedRealStock != null && Number.isFinite(Number(i.expectedRealStock))
+  );
+  if (expectedRows.length) {
+    const current = await Variant.find({ _id: { $in: expectedRows.map((i) => i.variantId) } })
+      .select('sku realStock')
+      .lean();
+    const byId = new Map(current.map((v) => [String(v._id), v]));
+    const stale = expectedRows
+      .map((i) => ({ row: i, variant: byId.get(String(i.variantId)) }))
+      .filter(({ row, variant }) => variant && (variant.realStock ?? 0) !== Number(row.expectedRealStock));
+    if (stale.length) {
+      throw staleStockCountError(
+        stale.map(({ row, variant }) => ({
+          sku: variant.sku,
+          expected: Number(row.expectedRealStock),
+          current: variant.realStock ?? 0,
+        }))
+      );
+    }
+  }
+
   for (const item of items) {
     const variantId = item.variantId;
     const target = Number(item.realStock ?? item.target ?? item.quantity);
     if (!variantId || !Number.isFinite(target)) continue;
+    const expected =
+      item.expectedRealStock != null && Number.isFinite(Number(item.expectedRealStock))
+        ? Number(item.expectedRealStock)
+        : null;
 
     const outcome = await withTransaction(async (session) => {
       const variant = await Variant.findById(variantId).session(session);
@@ -1889,6 +1928,9 @@ export async function setRealStockBatch({ items, reasonCode = 'stock_count', act
         throw err;
       }
       const current = variant.realStock ?? 0;
+      if (expected != null && current !== expected) {
+        throw staleStockCountError([{ sku: variant.sku, expected, current }], results.length);
+      }
       const delta = target - current;
       if (delta === 0) {
         return { variantId, sku: variant.sku, previous: current, realStock: current, changed: false };

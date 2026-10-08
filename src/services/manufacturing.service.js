@@ -7,7 +7,7 @@ import PurchaseOrder from '../models/PurchaseOrder.js';
 import Product from '../models/Product.js';
 import Variant from '../models/Variant.js';
 import { OPEN_PO_STATUSES, FACTORY_AVG_LEAD_TIME_MIN_SAMPLES } from '../constants/index.js';
-import { stockIntake } from './order.service.js';
+import { stockIntakeBatch } from './order.service.js';
 import logger from '../utils/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -547,6 +547,12 @@ export async function updatePurchaseOrder(id, { status, expectedDeliveryDate, no
     throw err;
   }
 
+  if (status === 'received') {
+    const err = new Error('Use Receive to mark a purchase order received (it adds the stock)');
+    err.statusCode = 400;
+    throw err;
+  }
+
   if (items) {
     po.items = await enrichItems(items);
     po.totalCost = computeTotalCost(po.items);
@@ -579,22 +585,30 @@ export async function receivePurchaseOrder(id, actorUserId) {
     throw err;
   }
 
-  if (!po.sentAt) po.sentAt = po.createdAt;
-
-  for (const item of po.items) {
-    await stockIntake({
-      variantId: item.variantId,
-      quantity: item.quantity,
-      reasonCode: 'factory_receive',
-      note: `PO ${po.poNumber}`,
-      actorUserId,
-      syncToShopify: false,
-    });
-  }
-
-  po.status = 'received';
-  po.receivedAt = new Date();
-  await po.save();
+  // Claiming the PO inside the stock transaction makes a double click / second tab add stock once.
+  await stockIntakeBatch({
+    items: po.items.map((item) => ({ variantId: item.variantId, quantity: item.quantity })),
+    reasonCode: 'factory_receive',
+    actorUserId,
+    inTransaction: async (session) => {
+      const claimed = await PurchaseOrder.findOneAndUpdate(
+        { _id: po._id, status: { $nin: ['received', 'cancelled'] } },
+        {
+          $set: {
+            status: 'received',
+            receivedAt: new Date(),
+            sentAt: po.sentAt || po.createdAt,
+          },
+        },
+        { session, new: true }
+      );
+      if (!claimed) {
+        const err = new Error('Purchase order already received');
+        err.statusCode = 409;
+        throw err;
+      }
+    },
+  });
   return getPurchaseOrder(id);
 }
 
