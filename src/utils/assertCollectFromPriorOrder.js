@@ -1,6 +1,6 @@
 /**
  * Collect / CRP lines must be SKUs the customer already has on the linked prior order.
- * Operators sometimes change "collect size" to the new size by mistake — reject that.
+ * Operators sometimes change "collect size" to the new size by mistake â€” reject that.
  */
 
 function priorLineKeyParts(pi) {
@@ -114,7 +114,7 @@ export function assertCollectFromPriorOrder(collectItems, priorOrder, { kind = '
       }
       const err = new Error(
         `Collect item ${sku || vid || 'unknown'} is not on original order ${priorLabel}. ` +
-          'Collect must be what the customer already has — only Deliver can change size.'
+          'Collect must be what the customer already has â€” only Deliver can change size.'
       );
       err.statusCode = 400;
       throw err;
@@ -179,7 +179,7 @@ export function healCollectToPriorOrder(collectItems, priorOrder) {
       continue;
     }
 
-    // Cannot heal — keep original so assert still fails loudly
+    // Cannot heal â€” keep original so assert still fails loudly
     healed.push({
       variantId: r.variantId,
       sku: r.sku,
