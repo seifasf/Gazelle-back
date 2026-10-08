@@ -5,6 +5,7 @@ import logger from '../../utils/logger.js';
 import { inventorySetQuantities } from './mutations/inventorySet.js';
 import { fetchLocations } from './queries/locations.js';
 import { assertShopifyInventoryWriteAllowed } from './writePolicy.js';
+import { pushRecordUpdate } from './inventoryEcho.js';
 
 const BATCH_SIZE = 25;
 
@@ -90,9 +91,8 @@ export async function syncVariantAvailableToShopify(variantId) {
     throw err;
   }
 
-  variant.onlineStock = target;
-  variant.shopifyAvailable = target > 0;
-  variant.lastSyncedAt = new Date();
+  const pushedAt = new Date();
+  const pushRecord = pushRecordUpdate(target, pushedAt);
   // Avoid full-document validate — open stock may already be negative on realStock.
   await Variant.updateOne(
     { _id: variant._id },
@@ -100,8 +100,10 @@ export async function syncVariantAvailableToShopify(variantId) {
       $set: {
         onlineStock: target,
         shopifyAvailable: target > 0,
-        lastSyncedAt: new Date(),
+        lastSyncedAt: pushedAt,
+        ...pushRecord.$set,
       },
+      $push: pushRecord.$push,
     }
   );
 
@@ -176,18 +178,24 @@ export async function pushWarehouseStockToShopify({ dryRun = false } = {}) {
         continue;
       }
 
-      const ops = chunk.map((p) => ({
-        updateOne: {
-          filter: { _id: p.variantId },
-          update: {
-            $set: {
-              onlineStock: p.target,
-              shopifyAvailable: p.target > 0,
-              lastSyncedAt: new Date(),
+      const pushedAt = new Date();
+      const ops = chunk.map((p) => {
+        const pushRecord = pushRecordUpdate(p.target, pushedAt);
+        return {
+          updateOne: {
+            filter: { _id: p.variantId },
+            update: {
+              $set: {
+                onlineStock: p.target,
+                shopifyAvailable: p.target > 0,
+                lastSyncedAt: pushedAt,
+                ...pushRecord.$set,
+              },
+              $push: pushRecord.$push,
             },
           },
-        },
-      }));
+        };
+      });
       if (ops.length) await Variant.bulkWrite(ops);
       updated += chunk.length;
     } catch (err) {

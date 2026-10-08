@@ -565,7 +565,9 @@ export async function handleInventoryLevelsUpdate(payload) {
   }
 
   try {
-    await queueShopifyInventoryIngest(variant._id, shopifyAvailable);
+    await queueShopifyInventoryIngest(variant._id, shopifyAvailable, {
+      eventAt: payload.updated_at || null,
+    });
   } catch (err) {
     logger.warn(
       { err: err?.message || err, sku: variant.sku, shopifyAvailable },

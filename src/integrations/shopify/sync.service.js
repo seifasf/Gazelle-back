@@ -69,13 +69,15 @@ export async function syncCatalogFromShopify() {
         imageUrl: sv.resolvedImageUrl || product.imageUrl,
         sellingPrice: parseFloat(sv.price) || 0,
         compareAtPrice: sv.resolvedCompareAtPrice,
-        onlineStock: sv.resolvedOnlineStock ?? sv.inventoryQuantity ?? 0,
         lastSyncedAt: new Date(),
       };
 
+      // inventoryQuantity sums every Shopify location; existing variants keep the
+      // warehouse-location mirror maintained by pushes and inventory webhooks.
       if (!existing) {
         update.onHoldStock = 0;
         update.realStock = 0;
+        update.onlineStock = sv.resolvedOnlineStock ?? sv.inventoryQuantity ?? 0;
       }
 
       await Variant.findOneAndUpdate(

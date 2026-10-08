@@ -104,10 +104,20 @@ export function registerJobs(agenda) {
   });
 
   agenda.define(JOB_NAMES.SHOPIFY_INBOUND_INVENTORY, async (job) => {
-    const { variantId, shopifyAvailable } = job.attrs.data || {};
+    const { variantId, shopifyAvailable, eventAt, recheck } = job.attrs.data || {};
     if (!variantId || shopifyAvailable == null) return;
-    const { applyShopifyAvailableToWarehouse } = await import('../services/order.service.js');
-    await applyShopifyAvailableToWarehouse(variantId, shopifyAvailable);
+    const { applyShopifyAvailableToWarehouse, SHOPIFY_INBOUND_DECREASE_RECHECK_MS } = await import(
+      '../services/order.service.js'
+    );
+    const result = await applyShopifyAvailableToWarehouse(variantId, shopifyAvailable, {
+      eventAt,
+      allowDefer: !recheck,
+    });
+    if (result?.deferDecrease) {
+      // Reschedule this same job: Agenda saves the running job's attrs when the handler returns.
+      job.attrs.data = { ...job.attrs.data, recheck: true };
+      job.schedule(new Date(Date.now() + SHOPIFY_INBOUND_DECREASE_RECHECK_MS));
+    }
   });
 
   agenda.define(JOB_NAMES.SHOPIFY_CATALOG_SYNC, async () => {

@@ -20,6 +20,11 @@ const variantSchema = new mongoose.Schema(
     realStock: { type: Number, default: 0, min: 0 },
     lowStockThreshold: { type: Number, default: 5, min: 0 },
     lastSyncedAt: { type: Date },
+    lastShopifyPushAt: { type: Date },
+    shopifyPushHistory: {
+      type: [{ qty: Number, at: Date, _id: false }],
+      default: undefined,
+    },
   },
   { timestamps: true }
 );

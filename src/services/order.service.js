@@ -50,6 +50,7 @@ import { recordCustomerCancellation } from './customer.service.js';
 import { annotateOfferItems } from './offerOrder.service.js';
 import logger from '../utils/logger.js';
 import { assertContactReadyToConfirm } from '../utils/shopifyShippingAddress.js';
+import { classifyInboundInventory } from '../integrations/shopify/inventoryEcho.js';
 
 async function recordStatusChange(
   { orderId, fromStatus, toStatus, source, actorUserId, note },
@@ -308,14 +309,16 @@ async function pushSellableNow(variantIds) {
 /**
  * Two-way inventory:
  * OMS sellable (real − hold) ↔ Shopify available at the warehouse location.
- * Echoes of our own pushes are ignored. Shopify sales are ignored once the
- * order webhook has reserved hold (sellable already matches). Decreases are
- * delayed a few seconds so orders/create can land first.
+ * Echoes and stale copies of our own pushes are ignored (see inventoryEcho.js).
+ * Shopify sales are ignored once the order webhook has reserved hold (sellable
+ * already matches). Decreases are delayed so orders/create can land first, and an
+ * unexplained drop is re-checked once more before it is applied as an admin edit.
  */
-const SHOPIFY_INVENTORY_ECHO_MS = 90_000;
 const SHOPIFY_INBOUND_DECREASE_DELAY_MS = 12_000;
+export const SHOPIFY_INBOUND_DECREASE_RECHECK_MS = 5 * 60_000;
+const SHOPIFY_RECENT_ORDER_WINDOW_MS = 15 * 60_000;
 
-async function recentShopifyOrderQty(variantId, windowMs = 180_000) {
+async function recentShopifyOrderQty(variantId, windowMs = SHOPIFY_RECENT_ORDER_WINDOW_MS) {
   const since = new Date(Date.now() - windowMs);
   const orders = await Order.find({
     shopifyOrderId: { $nin: [null, ''] },
@@ -351,8 +354,14 @@ async function markOnlineStock(variantId, available) {
 /**
  * Set warehouse so OMS sellable matches Shopify available.
  * Does not push back to Shopify (Shopify is already at that number).
+ * `eventAt` is the webhook's `updated_at`; with `allowDefer`, an unexplained drop
+ * returns `{ deferDecrease: true }` instead of being applied.
  */
-export async function applyShopifyAvailableToWarehouse(variantId, shopifyAvailable) {
+export async function applyShopifyAvailableToWarehouse(
+  variantId,
+  shopifyAvailable,
+  { eventAt = null, allowDefer = false } = {}
+) {
   const targetAvail = Math.max(0, Math.round(Number(shopifyAvailable)));
   if (!Number.isFinite(Number(shopifyAvailable))) return null;
 
@@ -363,25 +372,26 @@ export async function applyShopifyAvailableToWarehouse(variantId, shopifyAvailab
   const hold = Math.max(0, Number(variant.onHoldStock) || 0);
   const omsSellable = Math.max(0, real - hold);
   const previousOnline = variant.onlineStock ?? null;
-  const lastPushAt = variant.lastSyncedAt ? new Date(variant.lastSyncedAt).getTime() : 0;
 
   if (targetAvail === omsSellable) {
     if (previousOnline !== targetAvail) await markOnlineStock(variant._id, targetAvail);
     return { adjusted: false, matched: true };
   }
 
-  // Exact echo of the last OMS → Shopify push.
-  if (
-    lastPushAt &&
-    Date.now() - lastPushAt < SHOPIFY_INVENTORY_ECHO_MS &&
-    previousOnline != null &&
-    targetAvail === previousOnline
-  ) {
+  const echoKind = classifyInboundInventory({
+    targetAvail,
+    lastPushAt: variant.lastShopifyPushAt,
+    pushHistory: variant.shopifyPushHistory,
+    eventAt,
+  });
+  if (echoKind) {
     logger.info(
-      { variantId: String(variant._id), sku: variant.sku, targetAvail, previousOnline },
-      'Ignoring Shopify inventory webhook echo of OMS push'
+      { variantId: String(variant._id), sku: variant.sku, targetAvail, previousOnline, eventAt, echoKind },
+      echoKind === 'stale'
+        ? 'Ignoring Shopify inventory webhook older than the last OMS push'
+        : 'Ignoring Shopify inventory webhook echo of OMS push'
     );
-    return { adjusted: false, ignoredEcho: true };
+    return { adjusted: false, ignoredEcho: true, echoKind };
   }
 
   const drop = omsSellable - targetAvail;
@@ -394,6 +404,13 @@ export async function applyShopifyAvailableToWarehouse(variantId, shopifyAvailab
         'Shopify available drop matches recent Shopify orders — warehouse unchanged'
       );
       return { adjusted: false, ignoredSale: true };
+    }
+    if (allowDefer) {
+      logger.info(
+        { sku: variant.sku, drop, recentSold, targetAvail, omsSellable },
+        'Shopify available drop without a matching order yet — re-checking later'
+      );
+      return { adjusted: false, deferDecrease: true };
     }
   }
 
@@ -426,7 +443,7 @@ export async function ingestShopifyAvailableIncrease(variantId, shopifyAvailable
   return applyShopifyAvailableToWarehouse(variantId, shopifyAvailable);
 }
 
-export async function queueShopifyInventoryIngest(variantId, shopifyAvailable) {
+export async function queueShopifyInventoryIngest(variantId, shopifyAvailable, { eventAt = null } = {}) {
   const targetAvail = Math.max(0, Math.round(Number(shopifyAvailable)));
   if (!Number.isFinite(Number(shopifyAvailable))) return null;
 
@@ -438,7 +455,7 @@ export async function queueShopifyInventoryIngest(variantId, shopifyAvailable) {
   );
 
   if (targetAvail >= omsSellable) {
-    return applyShopifyAvailableToWarehouse(variantId, targetAvail);
+    return applyShopifyAvailableToWarehouse(variantId, targetAvail, { eventAt });
   }
 
   try {
@@ -446,6 +463,8 @@ export async function queueShopifyInventoryIngest(variantId, shopifyAvailable) {
     const job = agenda.create(JOB_NAMES.SHOPIFY_INBOUND_INVENTORY, {
       variantId: String(variantId),
       shopifyAvailable: targetAvail,
+      eventAt: eventAt || null,
+      recheck: false,
     });
     job.unique({ 'data.variantId': String(variantId) });
     job.schedule(new Date(Date.now() + SHOPIFY_INBOUND_DECREASE_DELAY_MS));
@@ -453,7 +472,7 @@ export async function queueShopifyInventoryIngest(variantId, shopifyAvailable) {
     return { queued: true, shopifyAvailable: targetAvail };
   } catch (err) {
     logger.warn({ err: err?.message || err }, 'Could not debounce Shopify inbound inventory');
-    return applyShopifyAvailableToWarehouse(variantId, targetAvail);
+    return applyShopifyAvailableToWarehouse(variantId, targetAvail, { eventAt });
   }
 }
 
