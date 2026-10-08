@@ -1491,7 +1491,17 @@ export async function confirmReturnedToStock(
  * Pass variantIds to limit the scan; omit / empty to scan every out_of_stock order
  * (used by the periodic safety job).
  */
-export async function releaseOutOfStockOrdersIfRestocked(
+let oosReleaseChain = Promise.resolve();
+
+export function releaseOutOfStockOrdersIfRestocked(variantIds, opts) {
+  // The stock check runs outside the release transaction, so two concurrent runs (intake +
+  // periodic scan) could both hand the same shelf units to different orders. Run one at a time.
+  const run = oosReleaseChain.then(() => releaseOutOfStockOrdersNow(variantIds, opts));
+  oosReleaseChain = run.catch(() => {});
+  return run;
+}
+
+async function releaseOutOfStockOrdersNow(
   variantIds,
   { actorUserId = null, note } = {}
 ) {

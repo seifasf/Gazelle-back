@@ -423,6 +423,14 @@ export async function buildFullOrderHoldReleaseEntries(orderId, session = null) 
 export async function reconcileVariantOnHoldFromLedger(variantId, session = null) {
   if (!variantId) return null;
   const vid = new mongoose.Types.ObjectId(String(variantId));
+
+  // Read the field before the ledger: a reserve committed in between then fails the
+  // compare-and-set below instead of being overwritten with a stale total.
+  const variant = session
+    ? await Variant.findById(vid).select('sku onHoldStock').session(session).lean()
+    : await Variant.findById(vid).select('sku onHoldStock').lean();
+  if (!variant) return null;
+
   const pipeline = [
     {
       $match: {
@@ -440,18 +448,21 @@ export async function reconcileVariantOnHoldFromLedger(variantId, session = null
     : await InventoryLedger.aggregate(pipeline);
   const target = Math.max(0, Number(rows[0]?.total) || 0);
 
-  const variant = session
-    ? await Variant.findById(vid).session(session)
-    : await Variant.findById(vid);
-  if (!variant) return null;
-
   const previous = Math.max(0, variant.onHoldStock ?? 0);
   if (previous === target) {
     return { variantId: String(vid), sku: variant.sku, previous, next: target, changed: false };
   }
 
-  variant.onHoldStock = target;
-  await variant.save(session ? { session } : undefined);
+  // updateOne skips validators: realStock can legitimately be negative after ledger $inc.
+  const write = await Variant.updateOne(
+    { _id: vid, onHoldStock: variant.onHoldStock ?? null },
+    { $set: { onHoldStock: target } },
+    session ? { session } : undefined
+  );
+  if (!write.matchedCount) {
+    logger.info({ sku: variant.sku }, 'onHoldStock changed during reconcile; left for next pass');
+    return { variantId: String(vid), sku: variant.sku, previous, next: previous, changed: false };
+  }
   logger.info(
     { sku: variant.sku, previous, next: target },
     'Reconciled variant onHoldStock from ledger'
@@ -522,11 +533,17 @@ export async function repairStockIntegrity({ actorUserId = null } = {}) {
   const allIds = [...new Set([...variantIds, ...fieldHoldIds].map(String))];
 
   let holdsReconciled = 0;
+  const failedVariantIds = [];
   for (const id of allIds) {
-    const result = await reconcileVariantOnHoldFromLedger(id);
-    if (result?.changed) {
-      holdsReconciled += 1;
-      touchedVariants.add(id);
+    try {
+      const result = await reconcileVariantOnHoldFromLedger(id);
+      if (result?.changed) {
+        holdsReconciled += 1;
+        touchedVariants.add(id);
+      }
+    } catch (err) {
+      failedVariantIds.push(id);
+      logger.error({ err, variantId: id }, 'onHoldStock reconcile failed');
     }
   }
 
@@ -534,6 +551,7 @@ export async function repairStockIntegrity({ actorUserId = null } = {}) {
     orphanOrdersCleared: orphanOrderIds.size,
     orphanHoldsReleased,
     holdsReconciled,
+    failedVariantIds,
     variantIds: [...touchedVariants],
   };
 }

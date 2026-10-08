@@ -160,6 +160,7 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
       order.bostaDeliveryId,
     ].filter(Boolean).map(String);
     const tried = new Set();
+    let lookupError = null;
     for (const key of lookupKeys) {
       if (tried.has(key)) continue;
       tried.add(key);
@@ -167,11 +168,20 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
         live = await getDelivery(key);
         if (live) break;
       } catch (err) {
+        // Only 400/404 prove the link is wrong; timeouts, 5xx and auth errors do not.
+        if (err.statusCode !== 404 && err.statusCode !== 400) lookupError = err;
         logger.warn(
-          { err: err.message, orderId, key },
+          { err: err.message, status: err.statusCode, orderId, key },
           'Could not fetch linked Bosta delivery key'
         );
       }
+    }
+    if (!live && lookupError) {
+      const err = new Error(
+        `Bosta did not answer for the linked shipment (${lookupError.message}). Try again in a minute; no new shipment was created.`
+      );
+      err.statusCode = 503;
+      throw err;
     }
     if (!live) {
       logger.warn(
