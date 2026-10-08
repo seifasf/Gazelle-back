@@ -64,7 +64,12 @@ export async function listOrders(req, res, next) {
       delayed,
       limit: Number(limit) || 50,
       skip: Number(skip) || 0,
-      sort: delayed === '1' || delayed === 'true' ? { delayedUntil: 1 } : undefined,
+      sort:
+        delayed === '1' || delayed === 'true'
+          ? { delayedUntil: 1 }
+          : req.query.sort === 'placed_asc'
+            ? { placedAt: 1, _id: 1 }
+            : undefined,
     });
     const { enrichOrderMoneyFields } = await import('../utils/omsCod.js');
     result.orders = result.orders.map((order) => enrichOrderMoneyFields(order));
