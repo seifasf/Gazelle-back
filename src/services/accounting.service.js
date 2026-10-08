@@ -5,6 +5,7 @@ import Variant from '../models/Variant.js';
 import Product from '../models/Product.js'; // ensure populate('productId') resolves
 import { getAccountByCode } from './chartOfAccounts.seed.js';
 import logger from '../utils/logger.js';
+import { dateRangeFilter } from '../utils/cairoTime.js';
 
 void Product;
 
@@ -128,13 +129,8 @@ function buildDecisionInsights({
 async function operationalPlFromOrders({ from, to }) {
   const match = { internalStatus: 'delivered' };
   if (from || to) {
-    match.deliveredAt = {};
-    if (from) match.deliveredAt.$gte = new Date(from);
-    if (to) {
-      const end = new Date(to);
-      if (String(to).length <= 10) end.setHours(23, 59, 59, 999);
-      match.deliveredAt.$lte = end;
-    }
+    const range = dateRangeFilter(from, to);
+    if (range) match.deliveredAt = range;
   }
 
   const orders = await Order.find(match).select(
@@ -354,13 +350,8 @@ export async function updateAccount(id, data) {
 export async function listJournalEntries({ from, to, limit = 50, skip = 0 } = {}) {
   const filter = {};
   if (from || to) {
-    filter.date = {};
-    if (from) filter.date.$gte = new Date(from);
-    if (to) {
-      const end = new Date(to);
-      if (String(to).length <= 10) end.setHours(23, 59, 59, 999);
-      filter.date.$lte = end;
-    }
+    const range = dateRangeFilter(from, to);
+    if (range) filter.date = range;
   }
 
   const [entries, total, sourceRows] = await Promise.all([
@@ -425,13 +416,8 @@ export async function createJournalEntry({ date, description, reference, lines, 
 export async function getProfitAndLoss({ from, to } = {}) {
   const filter = {};
   if (from || to) {
-    filter.date = {};
-    if (from) filter.date.$gte = new Date(from);
-    if (to) {
-      const end = new Date(to);
-      if (String(to).length <= 10) end.setHours(23, 59, 59, 999);
-      filter.date.$lte = end;
-    }
+    const range = dateRangeFilter(from, to);
+    if (range) filter.date = range;
   }
 
   const entries = await JournalEntry.find(filter).populate('lines.accountId', 'code name category type');
@@ -704,13 +690,8 @@ export async function backfillMissingDeliveryJournals({ limit = 300 } = {}) {
 export async function getTopProducts({ from, to, limit = 50, days = 30 } = {}) {
   const match = { internalStatus: 'delivered' };
   if (from || to) {
-    match.deliveredAt = {};
-    if (from) match.deliveredAt.$gte = new Date(from);
-    if (to) {
-      const end = new Date(to);
-      if (String(to).length <= 10) end.setHours(23, 59, 59, 999);
-      match.deliveredAt.$lte = end;
-    }
+    const range = dateRangeFilter(from, to);
+    if (range) match.deliveredAt = range;
   } else {
     match.deliveredAt = { $gte: new Date(Date.now() - days * 24 * 60 * 60 * 1000) };
   }

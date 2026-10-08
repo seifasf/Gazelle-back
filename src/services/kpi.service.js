@@ -3,13 +3,13 @@ import InventoryLedger from '../models/InventoryLedger.js';
 import DiscrepancyAlert from '../models/DiscrepancyAlert.js';
 import Order from '../models/ReportOrder.js';
 import User from '../models/User.js';
+import { dateRangeFilter, rangeEnd, rangeStart } from '../utils/cairoTime.js';
 
 function dateFilter(from, to) {
   const filter = {};
   if (from || to) {
-    filter.createdAt = {};
-    if (from) filter.createdAt.$gte = new Date(from);
-    if (to) filter.createdAt.$lte = new Date(to);
+    const range = dateRangeFilter(from, to);
+    if (range) filter.createdAt = range;
   }
   return filter;
 }
@@ -40,8 +40,8 @@ export async function getEmployeeKpis(userId, { from, to } = {}) {
         ...(from || to
           ? {
               placedAt: {
-                ...(from ? { $gte: new Date(from) } : {}),
-                ...(to ? { $lte: new Date(to) } : {}),
+                ...(from ? { $gte: rangeStart(from) } : {}),
+                ...(to ? { $lte: rangeEnd(to) } : {}),
               },
             }
           : {}),
@@ -96,8 +96,8 @@ export async function getEmployeeKpis(userId, { from, to } = {}) {
         ...(from || to
           ? {
               resolvedAt: {
-                ...(from ? { $gte: new Date(from) } : {}),
-                ...(to ? { $lte: new Date(to) } : {}),
+                ...(from ? { $gte: rangeStart(from) } : {}),
+                ...(to ? { $lte: rangeEnd(to) } : {}),
               },
             }
           : {}),

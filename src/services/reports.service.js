@@ -9,53 +9,12 @@ import * as kpiService from './kpi.service.js';
 import logger from '../utils/logger.js';
 import { ORDERS_PLACED_FROM_YMD } from '../constants/index.js';
 import { classifyReturnKind } from '../utils/returnKind.js';
-
-/** Business calendar for Gazelle (Egypt). */
-const BUSINESS_TZ = 'Africa/Cairo';
+import { BUSINESS_TZ, dateRangeFilter, formatYmdInTz, zonedDayBound } from '../utils/cairoTime.js';
 
 function parseDate(value) {
   if (!value) return null;
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? null : d;
-}
-
-/** Format a Date as YYYY-MM-DD in the business timezone. */
-function formatYmdInTz(date, timeZone = BUSINESS_TZ) {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(date);
-}
-
-/**
- * Convert a calendar YYYY-MM-DD in BUSINESS_TZ to a UTC Date at start/end of that day.
- */
-function zonedDayBound(ymd, end = false, timeZone = BUSINESS_TZ) {
-  const m = String(ymd).match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return null;
-  const y = Number(m[1]);
-  const mo = Number(m[2]);
-  const d = Number(m[3]);
-  const hour = end ? 23 : 0;
-  const minute = end ? 59 : 0;
-  const second = end ? 59 : 0;
-  const ms = end ? 999 : 0;
-
-  // Guess UTC instant, then correct using the zone offset at that instant.
-  let utc = Date.UTC(y, mo - 1, d, hour, minute, second, ms);
-  const asTz = new Date(utc).toLocaleString('en-US', { timeZone });
-  const asUtc = new Date(utc).toLocaleString('en-US', { timeZone: 'UTC' });
-  const shift = new Date(asUtc).getTime() - new Date(asTz).getTime();
-  utc += shift;
-
-  // Re-check after shift (DST edges).
-  const ymdCheck = formatYmdInTz(new Date(utc), timeZone);
-  if (ymdCheck !== `${m[1]}-${m[2]}-${m[3]}`) {
-    utc += (ymdCheck < `${m[1]}-${m[2]}-${m[3]}` ? 1 : -1) * 60 * 60 * 1000;
-  }
-  return new Date(utc);
 }
 
 function startOfBusinessDay(ymdOrDate) {
@@ -2018,13 +1977,8 @@ export async function getDashboardStats(query = {}) {
 export async function getProfitabilityReport({ from, to, groupBy = 'product' }) {
   const match = { internalStatus: 'delivered' };
   if (from || to) {
-    match.deliveredAt = {};
-    if (from) match.deliveredAt.$gte = new Date(from);
-    if (to) {
-      const end = new Date(to);
-      if (String(to).length <= 10) end.setHours(23, 59, 59, 999);
-      match.deliveredAt.$lte = end;
-    }
+    const range = dateRangeFilter(from, to);
+    if (range) match.deliveredAt = range;
   }
 
   const orders = await Order.find(match).select(
@@ -2181,9 +2135,8 @@ export async function getProfitabilityReport({ from, to, groupBy = 'product' }) 
 export async function getAuditLog({ from, to, limit = 100, skip = 0 }) {
   const filter = {};
   if (from || to) {
-    filter.createdAt = {};
-    if (from) filter.createdAt.$gte = new Date(from);
-    if (to) filter.createdAt.$lte = new Date(to);
+    const range = dateRangeFilter(from, to);
+    if (range) filter.createdAt = range;
   }
 
   const [statusHistory, inventoryLedger] = await Promise.all([

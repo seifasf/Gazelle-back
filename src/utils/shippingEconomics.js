@@ -16,6 +16,8 @@
  * Gazelle city/zone estimates are never used for shipping loss.
  */
 
+import { rangeEnd, rangeStart, zonedDayBound } from './cairoTime.js';
+
 export const SHIPPING_LOSS_START_YMD = '2026-09-01';
 
 /** Statuses where Bosta may bill the brand but the customer never paid shipping. */
@@ -228,10 +230,9 @@ export async function loadShippingEconomicsForRange({ from, to, Order } = {}) {
     };
   }
 
-  const shippingStart = new Date(`${SHIPPING_LOSS_START_YMD}T00:00:00.000Z`);
-  const rangeFrom = from ? new Date(from) : shippingStart;
-  let rangeTo = to ? new Date(to) : new Date();
-  if (to && String(to).length <= 10) rangeTo.setHours(23, 59, 59, 999);
+  const shippingStart = zonedDayBound(SHIPPING_LOSS_START_YMD);
+  const rangeFrom = rangeStart(from) || shippingStart;
+  const rangeTo = rangeEnd(to) || new Date();
   const fromBound = rangeFrom < shippingStart ? shippingStart : rangeFrom;
 
   const select =
