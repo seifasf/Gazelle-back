@@ -1,11 +1,11 @@
 import { Router } from 'express';
 import * as customersController from '../controllers/customers.controller.js';
 import { authenticate } from '../middleware/auth.js';
-import { requireRoles } from '../middleware/rbac.js';
+import { requireRoles, sanitizeFinancialResponse } from '../middleware/rbac.js';
 
 const router = Router();
 
-router.use(authenticate);
+router.use(authenticate, sanitizeFinancialResponse);
 
 router.get('/', requireRoles('admin', 'orders_manager'), customersController.listCustomers);
 router.get('/filter-options', requireRoles('admin', 'orders_manager'), customersController.filterOptions);

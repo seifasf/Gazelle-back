@@ -1,11 +1,11 @@
 import { Router } from 'express';
 import * as fulfillmentController from '../controllers/fulfillment.controller.js';
 import { authenticate } from '../middleware/auth.js';
-import { requireRoles } from '../middleware/rbac.js';
+import { requireRoles, sanitizeFinancialResponse } from '../middleware/rbac.js';
 
 const router = Router();
 
-router.use(authenticate);
+router.use(authenticate, sanitizeFinancialResponse);
 
 router.get('/warehouse-review', requireRoles('admin', 'stock_manager'), fulfillmentController.getWarehouseReview);
 router.get('/warehouse-review/export', requireRoles('admin', 'stock_manager'), fulfillmentController.exportWarehouseReview);

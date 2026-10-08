@@ -154,7 +154,12 @@ export async function getOrder(req, res, next) {
 
 export async function verifyOrder(req, res, next) {
   try {
-    const order = await orderService.verifyOrder(req.params.id, req.user._id, req.body);
+    const { outcome, note, shippingMethod } = req.body || {};
+    const order = await orderService.verifyOrder(req.params.id, req.user._id, {
+      outcome,
+      note,
+      shippingMethod,
+    });
     res.json({ data: order });
   } catch (err) {
     next(err);
@@ -177,7 +182,12 @@ export async function bulkVerifyOrders(req, res, next) {
 
 export async function cancelOrder(req, res, next) {
   try {
-    const order = await orderService.cancelOrder(req.params.id, req.user._id, req.body);
+    const { reason, note } = req.body || {};
+    const order = await orderService.cancelOrder(req.params.id, req.user._id, {
+      reason,
+      note,
+      source: 'user_action',
+    });
     const warning = order?.shopifyCancelWarning;
     if (warning) {
       const data = order.toObject ? order.toObject() : { ...order };
@@ -469,10 +479,21 @@ export async function updateShippingAddress(req, res, next) {
   }
 }
 
+/** Targets whose stock / refund side effects only run in their own endpoints. */
+const DEDICATED_TRANSITIONS = {
+  cancelled: 'Use Cancel order so on-hold stock is released',
+  returned_to_stock: 'Use Returns (scan and confirm) so items are restocked',
+  pending_refund: 'Use Returns (scan and confirm) so items are restocked before refund',
+};
+
 export async function transitionStatus(req, res, next) {
   try {
     const toStatus = req.body.toStatus;
     const role = req.user.role;
+
+    if (Object.hasOwn(DEDICATED_TRANSITIONS, toStatus)) {
+      return res.status(400).json({ error: DEDICATED_TRANSITIONS[toStatus] });
+    }
 
     // Stock may only send an order back to Fulfillment (Ready to ship).
     // Marking out of stock stays on the Fulfillment pick-pack flow.
