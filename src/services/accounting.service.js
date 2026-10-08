@@ -919,7 +919,7 @@ export async function recordDeliveryJournal(order, actorUserId) {
       );
     }
 
-    return JournalEntry.create({
+    return await JournalEntry.create({
       date: order.deliveredAt || new Date(),
       description: `Auto journal — order ${order.shopifyOrderId || order._id}`,
       reference: order.shopifyOrderId || String(order._id),
@@ -929,6 +929,9 @@ export async function recordDeliveryJournal(order, actorUserId) {
       lines,
     });
   } catch (err) {
+    if (err?.code === 11000) {
+      return JournalEntry.findOne({ orderId: order._id, source: 'auto_delivery' });
+    }
     logger.warn({ err, orderId: order._id }, 'Failed to record delivery journal');
     return null;
   }

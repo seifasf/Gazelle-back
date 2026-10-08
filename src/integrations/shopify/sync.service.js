@@ -87,19 +87,22 @@ export async function syncCatalogFromShopify() {
     }
   }
 
-  // Drop OMS rows only when the Shopify product is gone (or archived) — not merely draft.
-  const staleProducts = await Product.find({
-    shopifyProductId: { $exists: true, $nin: ['', ...knownShopifyIds] },
-  }).select('_id shopifyProductId title status');
-
-  if (staleProducts.length) {
-    const staleIds = staleProducts.map((p) => p._id);
-    const removedVariants = await Variant.deleteMany({ productId: { $in: staleIds } });
-    await Product.deleteMany({ _id: { $in: staleIds } });
-    logger.info(
-      { products: staleProducts.length, variants: removedVariants.deletedCount },
-      'Removed products no longer on Shopify (Shopify unchanged)'
+  // Products gone from Shopify (or archived) are archived here, never deleted: their variants
+  // still carry warehouse stock, holds, ledger rows and order lines.
+  if (shopifyProducts.length) {
+    const archived = await Product.updateMany(
+      {
+        shopifyProductId: { $exists: true, $nin: ['', ...knownShopifyIds] },
+        status: { $ne: 'archived' },
+      },
+      { $set: { status: 'archived', lastSyncedAt: new Date() } }
     );
+    if (archived.modifiedCount) {
+      logger.info(
+        { products: archived.modifiedCount },
+        'Archived products no longer active/draft on Shopify (Shopify unchanged)'
+      );
+    }
   }
 
   await Settings.findOneAndUpdate(

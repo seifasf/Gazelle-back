@@ -457,7 +457,7 @@ export async function queueShopifyInventoryIngest(variantId, shopifyAvailable) {
   }
 }
 
-export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCogsSnapshot, shippingMethod }) {
+export async function verifyOrder(orderId, actorUserId, { outcome, note, shippingMethod }) {
   const order = await Order.findById(orderId).populate('items.variantId');
   if (!order) {
     const err = new Error('Order not found');
@@ -517,7 +517,6 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
   const verified = await withTransaction(async (session) => {
     const fresh = await Order.findById(orderId).session(session);
     fresh.verificationLog.push({ outcome, note, actorUserId });
-    if (totalCogsSnapshot != null) fresh.totalCogsSnapshot = totalCogsSnapshot;
     if (!fresh.assignedOrdersManagerId) fresh.assignedOrdersManagerId = actorUserId;
     if (shippingMethod) {
       fresh.shippingMethod = shippingMethod;
@@ -537,13 +536,9 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, totalCo
       { session }
     );
 
-    let ledgerDocs = [];
-    if (fresh.orderSource === 'manual') {
-      ledgerDocs = await reserveStockForOrder(fresh._id, fresh.items, session);
-    } else {
-      // Shopify already reserves at ingest — top up if hold is missing.
-      ledgerDocs = await ensureOrderStockHeld(fresh._id, fresh.items, session);
-    }
+    // Manual orders reserve at creation and Shopify orders at ingest; an order sent back to
+    // Pending keeps its hold, so only top up what is missing.
+    const ledgerDocs = await ensureOrderStockHeld(fresh._id, fresh.items, session);
 
     await transitionOrder(
       fresh,

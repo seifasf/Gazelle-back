@@ -529,6 +529,7 @@ export function buildCustomerSegmentFilter(segment) {
           $expr: {
             $and: [
               { $gt: ['$lifetimeOrders', 0] },
+              { $gt: ['$lifetimeRejectedOrReturned', 0] },
               { $gte: ['$lifetimeRejectedOrReturned', '$lifetimeDelivered'] },
             ],
           },

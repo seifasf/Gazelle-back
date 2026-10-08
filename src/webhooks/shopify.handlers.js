@@ -504,10 +504,8 @@ export async function handleProductsUpdate(payload) {
   for (const variant of payload.variants || []) {
     const gid = variant.admin_graphql_api_id || `gid://shopify/ProductVariant/${variant.id}`;
     const sku = String(variant.sku || '').trim();
-    if (!sku) {
-      await Variant.deleteOne({ shopifyVariantId: gid });
-      continue;
-    }
+    // A blank SKU in Shopify must not delete the OMS variant (stock, holds and orders point at it).
+    if (!sku) continue;
     const color = variant.option1 || variant.option2;
     const size = variant.option2 && variant.option1 ? variant.option2 : variant.option3;
     await Variant.findOneAndUpdate(

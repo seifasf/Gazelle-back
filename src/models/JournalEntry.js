@@ -27,5 +27,11 @@ const journalEntrySchema = new mongoose.Schema(
 journalEntrySchema.index({ date: -1 });
 journalEntrySchema.index({ orderId: 1 });
 journalEntrySchema.index({ source: 1 });
+// One automatic delivery journal per order. Run scripts/dedupe-delivery-journals.js first
+// if older duplicates exist, or this index cannot be built.
+journalEntrySchema.index(
+  { orderId: 1, source: 1 },
+  { unique: true, partialFilterExpression: { source: 'auto_delivery' } }
+);
 
 export default mongoose.model('JournalEntry', journalEntrySchema);

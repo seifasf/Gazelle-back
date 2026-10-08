@@ -1,7 +1,7 @@
 import Order from '../models/Order.js';
 import Variant from '../models/Variant.js';
 import { withTransaction } from '../utils/transaction.js';
-import { applyLedgerEntries } from './inventory.service.js';
+import { applyLedgerEntries, netOrderLedgerQty } from './inventory.service.js';
 import { syncShopifySellableAfterLedger } from './order.service.js';
 import { refreshOrderOfferFlag } from './offerOrder.service.js';
 import { orderHasOfferItems } from '../utils/offerOrder.js';
@@ -35,6 +35,33 @@ function recalcMerchandiseTotals(order) {
 
 function totalUnits(order) {
   return (order.items || []).reduce((s, i) => s + (Number(i.quantity) || 0), 0);
+}
+
+/**
+ * Set this order's hold on each variant to exactly the units its lines need.
+ * Uses the order's own ledger net, so a release never takes holds that belong to other orders.
+ */
+async function rebalanceOrderHolds(order, variantIds, actorUserId, session) {
+  const entries = [];
+  for (const vid of new Set(variantIds.map(String))) {
+    const target = (order.items || [])
+      .filter((i) => String(i.variantId) === vid)
+      .reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+    const held = Math.max(
+      0,
+      await netOrderLedgerQty(order._id, vid, ['on_hold_reserve', 'on_hold_release'], session)
+    );
+    const delta = target - held;
+    if (!delta) continue;
+    entries.push({
+      variantId: vid,
+      orderId: order._id,
+      ledgerType: delta > 0 ? 'on_hold_reserve' : 'on_hold_release',
+      quantityDelta: delta,
+      actorUserId,
+    });
+  }
+  return entries.length ? applyLedgerEntries(entries, session) : [];
 }
 
 function assertEditable(order) {
@@ -94,31 +121,19 @@ export async function processExchange(orderId, actorUserId, { fromItemId, toVari
     }
 
     const previousSku = item.sku;
-
-    const ledgerDocs = await applyLedgerEntries(
-      [
-        {
-          variantId: item.variantId,
-          orderId: order._id,
-          ledgerType: 'on_hold_release',
-          quantityDelta: -item.quantity,
-          actorUserId,
-        },
-        {
-          variantId: newVariant._id,
-          orderId: order._id,
-          ledgerType: 'on_hold_reserve',
-          quantityDelta: item.quantity,
-          actorUserId,
-        },
-      ],
-      session
-    );
+    const previousVariantId = item.variantId;
 
     item.variantId = newVariant._id;
     item.sku = newVariant.sku;
     item.unitSellingPrice = newVariant.sellingPrice;
     item.unitCogs = newVariant.cogs;
+
+    const ledgerDocs = await rebalanceOrderHolds(
+      order,
+      [previousVariantId, newVariant._id],
+      actorUserId,
+      session
+    );
 
     recalcMerchandiseTotals(order);
     await refreshOrderOfferFlag(order, [item], session);
@@ -189,30 +204,15 @@ export async function removeOrderItem(orderId, actorUserId, { itemId, note, quan
     }
 
     const removedSku = item.sku;
-    const variant = await Variant.findById(item.variantId).session(session);
-    const onHold = Number(variant?.onHoldStock) || 0;
-    const releaseQty = Math.min(removeQty, onHold);
-    let ledgerDocs = [];
-    if (releaseQty > 0) {
-      ledgerDocs = await applyLedgerEntries(
-        [
-          {
-            variantId: item.variantId,
-            orderId: order._id,
-            ledgerType: 'on_hold_release',
-            quantityDelta: -releaseQty,
-            actorUserId,
-          },
-        ],
-        session
-      );
-    }
+    const removedVariantId = item.variantId;
 
     if (removeQty >= lineQty) {
-      item.deleteOne();
+      order.items.pull(item._id);
     } else {
       item.quantity = lineQty - removeQty;
     }
+
+    const ledgerDocs = await rebalanceOrderHolds(order, [removedVariantId], actorUserId, session);
 
     recalcMerchandiseTotals(order);
     order.isOfferOrder = orderHasOfferItems(order.items);
@@ -279,19 +279,6 @@ export async function addOrderItem(orderId, actorUserId, { variantId, quantity =
       throw err;
     }
 
-    const ledgerDocs = await applyLedgerEntries(
-      [
-        {
-          variantId: variant._id,
-          orderId: order._id,
-          ledgerType: 'on_hold_reserve',
-          quantityDelta: qty,
-          actorUserId,
-        },
-      ],
-      session
-    );
-
     const existing = (order.items || []).find(
       (i) => String(i.variantId) === String(variant._id)
     );
@@ -308,6 +295,8 @@ export async function addOrderItem(orderId, actorUserId, { variantId, quantity =
         unitCogs: variant.cogs,
       });
     }
+
+    const ledgerDocs = await rebalanceOrderHolds(order, [variant._id], actorUserId, session);
 
     recalcMerchandiseTotals(order);
     await refreshOrderOfferFlag(order, existing ? [] : [order.items.at(-1)], session);
