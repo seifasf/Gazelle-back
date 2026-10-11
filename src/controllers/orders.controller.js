@@ -354,7 +354,7 @@ export async function updateShippingAddress(req, res, next) {
         // Repair total is all-in — never add a courier fee on top.
         order.shippingFee = 0;
       } else if (shippingMethod === 'local_shipping') {
-        order.shippingFee = LOCAL_SHIPPING_FEE;
+        if (prevMethod !== 'local_shipping') order.shippingFee = LOCAL_SHIPPING_FEE;
       } else if (shippingMethod === 'pickup') {
         order.shippingFee = 0;
       } else if (shippingMethod === 'bosta' && prevMethod !== 'bosta') {

@@ -51,6 +51,7 @@ import { annotateOfferItems } from './offerOrder.service.js';
 import logger from '../utils/logger.js';
 import { assertContactReadyToConfirm } from '../utils/shopifyShippingAddress.js';
 import { classifyInboundInventory } from '../integrations/shopify/inventoryEcho.js';
+import { resolveLocalShippingFee } from '../utils/localShippingFee.js';
 
 async function recordStatusChange(
   { orderId, fromStatus, toStatus, source, actorUserId, note },
@@ -538,9 +539,10 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, shippin
     fresh.verificationLog.push({ outcome, note, actorUserId });
     if (!fresh.assignedOrdersManagerId) fresh.assignedOrdersManagerId = actorUserId;
     if (shippingMethod) {
+      const switchedMethod = (fresh.shippingMethod || 'bosta') !== shippingMethod;
       fresh.shippingMethod = shippingMethod;
       if (shippingMethod === 'local_shipping') {
-        fresh.shippingFee = LOCAL_SHIPPING_FEE;
+        if (switchedMethod) fresh.shippingFee = LOCAL_SHIPPING_FEE;
       } else if (shippingMethod === 'pickup') {
         fresh.shippingFee = 0;
       }
@@ -2329,7 +2331,7 @@ export async function createManualOrder({
           );
 
     // Exchange: COD = (new−old) + shipping; if old > new, credit reduces COD but shipping still applies.
-    // Bosta shipping = Shopify zone rates (free ≥ 2999 on zones 1–4). Local = fixed LOCAL_SHIPPING_FEE.
+    // Bosta shipping = Shopify zone rates (free ≥ 2999 on zones 1–4). Local = staff-set fee (default LOCAL_SHIPPING_FEE).
     // Return pickup: no COD / no shipping collect — courier must not give cash to customer.
     const feeRaw = shippingFee != null ? Number(shippingFee) : null;
     const method = shippingMethod || 'bosta';
@@ -2338,7 +2340,7 @@ export async function createManualOrder({
     const finalShippingFee = customerReturn
       ? 0
       : method === 'local_shipping'
-        ? LOCAL_SHIPPING_FEE
+        ? resolveLocalShippingFee(shippingFee)
         : method === 'pickup'
           ? 0
             : exchange
@@ -2857,7 +2859,7 @@ async function healMissingOrderVariants(order) {
 
 /**
  * Shopify zone shipping for a destination city (Bosta / online).
- * Local courier stays LOCAL_SHIPPING_FEE and is handled by callers.
+ * Local courier fee is staff-set (default LOCAL_SHIPPING_FEE) and handled by callers.
  */
 export async function suggestShippingFeeByCity(city, goodsTotal = 0) {
   const { fee } = resolveShopifyZoneShippingFee(city, goodsTotal);

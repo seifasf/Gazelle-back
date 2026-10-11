@@ -1,6 +1,6 @@
 /**
  * Shopify shipping zones (Gazelle store) — synced from Admin shipping_zones + rate cards.
- * Local courier is NOT zone-based (always LOCAL_SHIPPING_FEE).
+ * Local courier is NOT zone-based (staff-set fee, default LOCAL_SHIPPING_FEE).
  */
 
 export const SHOPIFY_FREE_SHIPPING_MIN = 2999;
