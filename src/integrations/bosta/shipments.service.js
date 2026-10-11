@@ -6,6 +6,7 @@ import { bostaWebhookUrl } from './webhookPayload.js';
 import { fetchBostaDistricts } from './cities.service.js';
 import logger from '../../utils/logger.js';
 import { omsCodCollectAmount } from '../../utils/omsCod.js';
+import { bostaOpenPackageFields } from './deliveryImages.js';
 
 function splitName(fullName) {
   const parts = (fullName || 'Customer').trim().split(/\s+/);
@@ -183,15 +184,17 @@ async function loadVariantsForOrder(order) {
       .lean();
     const productIds = [...new Set(variants.map((v) => String(v.productId)).filter(Boolean))];
     const products = productIds.length
-      ? await Product.find({ _id: { $in: productIds } }).select('title').lean()
+      ? await Product.find({ _id: { $in: productIds } }).select('title imageUrl').lean()
       : [];
-    const productTitleById = Object.fromEntries(products.map((p) => [String(p._id), p.title]));
+    const productById = Object.fromEntries(products.map((p) => [String(p._id), p]));
     for (const v of variants) {
-      const pt = productTitleById[String(v.productId)] || v.title;
+      const product = productById[String(v.productId)];
+      const pt = product?.title || v.title;
       map.set(String(v._id), {
         ...v,
         productTitle: pt,
         title: pt,
+        productImageUrl: product?.imageUrl || '',
       });
     }
   }
@@ -206,14 +209,17 @@ async function loadVariantsForOrder(order) {
   if (needProduct.length) {
     const Product = (await import('../../models/Product.js')).default;
     const products = await Product.find({ _id: { $in: [...new Set(needProduct)] } })
-      .select('title')
+      .select('title imageUrl')
       .lean();
-    const titles = Object.fromEntries(products.map((p) => [String(p._id), p.title]));
+    const productById = Object.fromEntries(products.map((p) => [String(p._id), p]));
     for (const [id, v] of map) {
+      const product = productById[String(v.productId)];
       const pt =
         (v.productId && typeof v.productId === 'object' ? v.productId.title : null) ||
-        titles[String(v.productId)];
-      if (pt) map.set(id, { ...v, productTitle: pt, title: pt });
+        product?.title;
+      if (pt) {
+        map.set(id, { ...v, productTitle: pt, title: pt, productImageUrl: v.productImageUrl || product?.imageUrl || '' });
+      }
     }
   }
 
@@ -649,9 +655,13 @@ export async function createDelivery(order, customer) {
           description: outboundDesc,
         };
 
+  const openPackage = bostaOpenPackageFields(order, variantsById);
+  if (!openPackage.allowToOpenPackage) {
+    logger.warn({ orderId: String(order._id) }, 'No product photos for Bosta — delivery created without open-package');
+  }
   const payload = {
     type: deliveryType,
-    allowToOpenPackage: true, // فتح الشحنة = نعم
+    ...openPackage, // فتح الشحنة = نعم (Bosta requires product photos)
     specs: {
       packageType: 'Parcel',
       size: 'MEDIUM',
@@ -792,7 +802,7 @@ export async function createDelivery(order, customer) {
     }
     if (/city/i.test(msg) || err?.statusCode === 400 || err?.statusCode === 500) {
       const wrapped = new Error(
-        resolved?.resolvedName
+        resolved?.resolvedName || !/city/i.test(msg)
           ? msg
           : `Bosta rejected the city “${shipping.city || city}”. Pick a Bosta city (e.g. Cairo) and put the area in Zone, then retry.`
       );
@@ -815,7 +825,7 @@ export async function updateDeliveryPackageDescription(deliveryId, order) {
   const itemsCount = Math.max(1, (order.items || []).reduce((s, i) => s + (i.quantity || 0), 0));
   const description = buildPackageDescription(order, variantsById);
   const baseBody = {
-    allowToOpenPackage: true,
+    ...bostaOpenPackageFields(order, variantsById),
     specs: { packageDetails: { itemsCount, description } },
     // Keep COD in sync — paid Shopify orders must stay 0 on the AWB.
     cod: bostaCodAmountForOrder(order),
@@ -921,8 +931,9 @@ export async function updateDeliveryAddressAndCod(deliveryId, order, customer) {
     if (district.zoneId) dropOffAddress.zoneId = district.zoneId;
   }
 
+  const variantsById = await loadVariantsForOrder(order);
   const body = {
-    allowToOpenPackage: true,
+    ...bostaOpenPackageFields(order, variantsById),
     cod: bostaCodAmountForOrder(order),
     dropOffAddress,
     receiver: {
