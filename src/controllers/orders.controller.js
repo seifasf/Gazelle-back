@@ -309,6 +309,8 @@ export async function addItem(req, res, next) {
   }
 }
 
+const STOCK_ADDRESS_EDIT_STATUSES = ['verified_ready_for_shipping', 'repaired_shoe'];
+
 export async function updateShippingAddress(req, res, next) {
   try {
     const Order = (await import('../models/Order.js')).default;
@@ -326,9 +328,14 @@ export async function updateShippingAddress(req, res, next) {
     ) {
       return res.status(400).json({ error: 'Cannot edit address at this stage' });
     }
+    // Warehouse may only correct the ship-to on orders in Fulfillment — not courier or fee.
+    const isStockManager = req.user?.role === 'stock_manager';
+    if (isStockManager && !STOCK_ADDRESS_EDIT_STATUSES.includes(order.internalStatus)) {
+      return res.status(403).json({ error: 'Stock can only fix addresses on orders in Fulfillment' });
+    }
 
     const {
-      shippingMethod,
+      shippingMethod: requestedMethod,
       line1,
       line2,
       city,
@@ -336,6 +343,7 @@ export async function updateShippingAddress(req, res, next) {
       phone,
       fullName,
     } = req.body || {};
+    const shippingMethod = isStockManager ? undefined : requestedMethod;
 
     const prevMethod = order.shippingMethod || 'bosta';
     if (shippingMethod != null && shippingMethod !== '') {
@@ -385,8 +393,15 @@ export async function updateShippingAddress(req, res, next) {
       || String(nextAddress.phone || '') !== String(prev.phone || '')
       || String(nextAddress.fullName || '') !== String(prev.fullName || '');
 
-    // Always recalculate Shopify zone fee for Bosta when destination is known.
-    if (order.shippingMethod === 'bosta' && !order.isReturnOrder && !order.isCreatorOrder && !order.isRepairOrder) {
+    // Recalculate the Shopify zone fee only when the Bosta destination city changes (keeps staff-set fees).
+    const cityChanged = String(nextAddress.city || '').trim() !== String(prev.city || '').trim();
+    if (
+      cityChanged
+      && order.shippingMethod === 'bosta'
+      && !order.isReturnOrder
+      && !order.isCreatorOrder
+      && !order.isRepairOrder
+    ) {
       const destCity = String(nextAddress.city || '').trim();
       if (destCity) {
         const goods = Number(order.totalSellingPrice) || 0;
