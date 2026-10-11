@@ -51,7 +51,7 @@ import { annotateOfferItems } from './offerOrder.service.js';
 import logger from '../utils/logger.js';
 import { assertContactReadyToConfirm } from '../utils/shopifyShippingAddress.js';
 import { classifyInboundInventory } from '../integrations/shopify/inventoryEcho.js';
-import { resolveLocalShippingFee } from '../utils/localShippingFee.js';
+import { parseStaffShippingFee, resolveLocalShippingFee } from '../utils/localShippingFee.js';
 
 async function recordStatusChange(
   { orderId, fromStatus, toStatus, source, actorUserId, note },
@@ -2331,7 +2331,7 @@ export async function createManualOrder({
           );
 
     // Exchange: COD = (new−old) + shipping; if old > new, credit reduces COD but shipping still applies.
-    // Bosta shipping = Shopify zone rates (free ≥ 2999 on zones 1–4). Local = staff-set fee (default LOCAL_SHIPPING_FEE).
+    // Bosta shipping = staff-set fee, else Shopify zone rates (free ≥ 2999 on zones 1–4). Local = staff-set fee (default LOCAL_SHIPPING_FEE).
     // Return pickup: no COD / no shipping collect — courier must not give cash to customer.
     const feeRaw = shippingFee != null ? Number(shippingFee) : null;
     const method = shippingMethod || 'bosta';
@@ -2354,9 +2354,10 @@ export async function createManualOrder({
             : isCreatorOrder && Number.isFinite(feeRaw) && feeRaw >= 0
               ? feeRaw
               : (() => {
-                // Always use Shopify zone from destination city (ignore stale client defaults like 90).
+                // Staff-typed fee wins; blank falls back to the Shopify zone for the destination city.
+                const typed = parseStaffShippingFee(shippingFee);
+                if (typed != null) return typed;
                 if (destCity) return zoneResolved.fee;
-                if (Number.isFinite(feeRaw) && feeRaw > 0) return feeRaw;
                 return DEFAULT_BOSTA_SHIPPING_FEE;
               })();
 
