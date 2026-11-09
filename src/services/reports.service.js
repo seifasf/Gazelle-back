@@ -675,7 +675,7 @@ async function deliveryPerformanceForRange({ from, to }) {
       isReturnOrder: { $ne: true },
       deliveredAt: { $exists: false },
       internalStatus: {
-        $in: ['returning_to_origin', 'returned_awaiting_receipt', 'returned_to_stock', 'back_from_local_shipping'],
+        $in: ['returning_to_origin', 'returned_awaiting_receipt', 'returned_to_stock', 'back_from_local_shipping', 'back_from_flextock'],
       },
       lastStatusUpdateAt: { $gte: from, $lte: to },
     }),
@@ -721,7 +721,7 @@ async function deliveryPerformanceForRange({ from, to }) {
           isReturnOrder: { $ne: true },
           deliveredAt: { $exists: false },
           internalStatus: {
-            $in: ['returning_to_origin', 'returned_awaiting_receipt', 'returned_to_stock', 'back_from_local_shipping'],
+            $in: ['returning_to_origin', 'returned_awaiting_receipt', 'returned_to_stock', 'back_from_local_shipping', 'back_from_flextock'],
           },
           lastStatusUpdateAt: { $gte: from, $lte: to },
         },
@@ -1319,7 +1319,7 @@ function ordersPlacedCutoff() {
 
 async function warehouseReturnsSnapshot() {
   const cutoff = ordersPlacedCutoff();
-  const openStatuses = ['returning_to_origin', 'returned_awaiting_receipt', 'back_from_local_shipping'];
+  const openStatuses = ['returning_to_origin', 'returned_awaiting_receipt', 'back_from_local_shipping', 'back_from_flextock'];
   const [returningToOrigin, backAtBosta, backFromLocal, openExchanges] = await Promise.all([
     Order.countDocuments({ placedAt: { $gte: cutoff }, internalStatus: 'returning_to_origin' }),
     Order.countDocuments({ placedAt: { $gte: cutoff }, internalStatus: 'returned_awaiting_receipt' }),
@@ -1415,6 +1415,7 @@ async function buildDashboardCore(range, preset) {
                             'returned_awaiting_receipt',
                             'returned_to_stock',
                             'back_from_local_shipping',
+                            'back_from_flextock',
                           ],
                         ],
                       },
@@ -1512,6 +1513,7 @@ async function buildDashboardCore(range, preset) {
                             'returned_awaiting_receipt',
                             'returned_to_stock',
                             'back_from_local_shipping',
+                            'back_from_flextock',
                           ],
                         ],
                       },
@@ -1538,6 +1540,7 @@ async function buildDashboardCore(range, preset) {
                             'returned_awaiting_receipt',
                             'returned_to_stock',
                             'back_from_local_shipping',
+                            'back_from_flextock',
                           ],
                         ],
                       },

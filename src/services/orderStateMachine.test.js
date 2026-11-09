@@ -13,6 +13,16 @@ describe('orderStateMachine pending_refund', () => {
     assert.equal(canTransition('delivered', 'back_from_local_shipping'), true);
   });
 
+  it('allows Flextock courier states to move to back_from_flextock', () => {
+    assert.equal(canTransition('awaiting_bosta_pickup', 'back_from_flextock'), true);
+    assert.equal(canTransition('picked_up_by_bosta', 'back_from_flextock'), true);
+    assert.equal(canTransition('in_transit', 'back_from_flextock'), true);
+    assert.equal(canTransition('failed_delivery', 'back_from_flextock'), true);
+    assert.equal(canTransition('delivered', 'back_from_flextock'), true);
+    assert.equal(canTransition('back_from_flextock', 'pending_refund'), true);
+    assert.equal(canTransition('back_from_flextock', 'returned_to_stock'), true);
+  });
+
   it('lets a return pickup switched to Bosta leave Ready to ship for Returning to Warehouse', () => {
     assert.equal(canTransition('verified_ready_for_shipping', 'returning_to_origin'), true);
   });

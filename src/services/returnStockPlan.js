@@ -65,4 +65,5 @@ export const CONFIRMABLE_RETURN_STATUSES = [
   'returning_to_origin',
   'back_from_local_shipping',
   'back_from_pickup',
+  'back_from_flextock',
 ];

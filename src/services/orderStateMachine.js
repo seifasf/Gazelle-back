@@ -41,6 +41,7 @@ export const ORDER_TRANSITIONS = {
     'delivered',
     'failed_delivery',
     'returning_to_origin',
+    'back_from_flextock',
     'verified_ready_for_shipping',
     'repaired_shoe',
     'out_of_stock',
@@ -60,21 +61,35 @@ export const ORDER_TRANSITIONS = {
     'back_from_local_shipping',
     'returned_to_stock',
   ],
-  // Bosta webhooks can skip steps (e.g. exception → RTO without a separate in_transit event).
-  picked_up_by_bosta: ['in_transit', 'delivered', 'failed_delivery', 'returning_to_origin'],
-  in_transit: ['delivered', 'failed_delivery', 'returning_to_origin'],
-  // Local failed delivery can go straight back to warehouse stock (courier returns the bag).
+  // Bosta webhooks / Flextock poll can skip steps (e.g. exception → RTO without a separate in_transit event).
+  picked_up_by_bosta: [
+    'in_transit',
+    'delivered',
+    'failed_delivery',
+    'returning_to_origin',
+    'back_from_flextock',
+  ],
+  in_transit: [
+    'delivered',
+    'failed_delivery',
+    'returning_to_origin',
+    'back_from_flextock',
+  ],
+  // Local / Flextock failed delivery can go straight back when the bag is physically here.
   failed_delivery: [
     'in_transit',
     'returning_to_origin',
     'delivered',
     'back_from_local_shipping',
+    'back_from_flextock',
     'returned_to_stock',
   ],
   // Admin confirmed the local courier brought the bag back — warehouse scans on Returns.
   back_from_local_shipping: ['returned_to_stock', 'pending_verification', 'cancelled', 'pending_refund'],
   // Customer left collect / refund items at the store — warehouse scans on Returns.
   back_from_pickup: ['returned_to_stock', 'pending_verification', 'cancelled', 'pending_refund'],
+  // Admin confirmed the Flextock package is back — warehouse scans on Returns.
+  back_from_flextock: ['returned_to_stock', 'pending_verification', 'cancelled', 'pending_refund'],
   // Warehouse can confirm receipt even if Bosta never flipped to "Back at Bosta".
   returning_to_origin: ['returned_awaiting_receipt', 'returned_to_stock', 'pending_refund'],
   returned_awaiting_receipt: ['returned_to_stock', 'pending_refund'],
@@ -89,6 +104,7 @@ export const ORDER_TRANSITIONS = {
     'returned_awaiting_receipt',
     'back_from_local_shipping',
     'back_from_pickup',
+    'back_from_flextock',
     'failed_delivery',
     'in_transit',
   ],

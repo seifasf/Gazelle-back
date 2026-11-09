@@ -9,6 +9,7 @@ test('maps common Flextock statuses onto OMS courier states', () => {
   assert.equal(mapFlextockStatusToInternal('out_for_delivery'), FLEXTOCK_INTERNAL.transit);
   assert.equal(mapFlextockStatusToInternal('delivered'), FLEXTOCK_INTERNAL.delivered);
   assert.equal(mapFlextockStatusToInternal('canceled'), FLEXTOCK_INTERNAL.returned);
+  assert.equal(mapFlextockStatusToInternal('canceled'), 'back_from_flextock');
   assert.equal(mapFlextockStatusToInternal('delivery_failed'), FLEXTOCK_INTERNAL.failed);
   assert.equal(mapFlextockStatusToInternal('RTO'), FLEXTOCK_INTERNAL.returning);
 });

@@ -10,7 +10,8 @@ export const FLEXTOCK_INTERNAL = {
   delivered: 'delivered',
   failed: 'failed_delivery',
   returning: 'returning_to_origin',
-  returned: 'returned_awaiting_receipt',
+  /** Physically back / cancelled at Flextock — warehouse scans on Returns. */
+  returned: 'back_from_flextock',
 };
 
 function compact(value) {

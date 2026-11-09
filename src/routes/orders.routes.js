@@ -48,6 +48,11 @@ router.post(
   ordersController.returnLocalShippingToStock
 );
 router.post(
+  '/:id/flextock-return-to-stock',
+  requireRoles('admin', 'orders_manager'),
+  ordersController.returnFlextockToStock
+);
+router.post(
   '/:id/pickup-return-to-stock',
   requireRoles('admin', 'orders_manager', 'stock_manager'),
   ordersController.returnPickupToStock

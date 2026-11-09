@@ -10,6 +10,7 @@ const STOCK_MANAGER_ORDER_STATUSES = new Set([
   'local_shipping',
   'back_from_local_shipping',
   'back_from_pickup',
+  'back_from_flextock',
   'in_transit',
   'returning_to_origin',
   'returned_awaiting_receipt',
@@ -599,6 +600,19 @@ export async function returnLocalShippingToStock(req, res, next) {
   }
 }
 
+export async function returnFlextockToStock(req, res, next) {
+  try {
+    const order = await orderService.returnFlextockToStock(
+      req.params.id,
+      req.user._id,
+      req.body || {}
+    );
+    res.json({ data: order });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function returnPickupToStock(req, res, next) {
   try {
     const order = await orderService.returnPickupToStock(
@@ -645,6 +659,7 @@ export default {
   applyDiscount,
   partialLocalDelivery,
   returnLocalShippingToStock,
+  returnFlextockToStock,
   returnPickupToStock,
   exportPendingRefunds,
 };

@@ -14,6 +14,7 @@ const OPEN_STATUSES = [
   'in_transit',
   'failed_delivery',
   'returning_to_origin',
+  'back_from_flextock',
 ];
 
 export async function applyFlextockStatusToOrder(order, live) {

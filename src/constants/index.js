@@ -10,6 +10,8 @@ export const ORDER_STATUSES = [
   'local_shipping',
   'back_from_local_shipping',
   'back_from_pickup',
+  /** Package physically back from Flextock — warehouse scans on Returns. */
+  'back_from_flextock',
   'in_transit',
   'delivered',
   'out_of_stock',

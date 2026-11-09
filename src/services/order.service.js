@@ -618,7 +618,7 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
     throw err;
   }
 
-  const peek = await Order.findById(orderId).select('shippingMethod internalStatus');
+  const peek = await Order.findById(orderId).select('shippingMethod internalStatus flextockOrderCode');
   if (
     source === 'user_action' &&
     peek?.shippingMethod === 'local_shipping' &&
@@ -628,6 +628,23 @@ export async function cancelOrder(orderId, actorUserId, { reason, note, source =
       note: cancelNote,
       reason,
       intent: 'cancel',
+    });
+  }
+  if (
+    source === 'user_action' &&
+    peek?.shippingMethod === 'flextock' &&
+    [
+      'awaiting_bosta_pickup',
+      'picked_up_by_bosta',
+      'in_transit',
+      'failed_delivery',
+    ].includes(peek.internalStatus)
+  ) {
+    return returnFlextockToStock(orderId, actorUserId, {
+      note: cancelNote,
+      reason,
+      intent: 'cancel',
+      cancelRemote: true,
     });
   }
 
@@ -1071,6 +1088,85 @@ export async function partialLocalDelivery(orderId, actorUserId, { deliveries = 
   }
 
   return delivered;
+}
+
+/**
+ * Admin confirms the Flextock package is physically back (cancel / fail / exchange collect).
+ * Moves to back_from_flextock — warehouse then scans on Returns (hold stays until scan).
+ * Optionally cancels the Flextock outbound order when cancelRemote is true.
+ */
+export async function returnFlextockToStock(
+  orderId,
+  actorUserId,
+  { note, intent, reason, cancelRemote = false } = {}
+) {
+  const result = await withTransaction(async (session) => {
+    const order = await Order.findById(orderId).session(session);
+    if (!order) {
+      const err = new Error('Order not found');
+      err.statusCode = 404;
+      throw err;
+    }
+    if (order.shippingMethod !== 'flextock') {
+      const err = new Error('Only Flextock orders can return this way');
+      err.statusCode = 400;
+      throw err;
+    }
+    const allowed = [
+      'awaiting_bosta_pickup',
+      'picked_up_by_bosta',
+      'in_transit',
+      'failed_delivery',
+    ];
+    const deliveredCollectBack =
+      order.internalStatus === 'delivered'
+      && (order.isExchangeOrder || order.isReturnOrder);
+    if (!allowed.includes(order.internalStatus) && !deliveredCollectBack) {
+      const err = new Error(
+        'Order must be awaiting / with Flextock courier, Failed delivery, or a delivered Flextock exchange/refund to mark Back from Flextock'
+      );
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const kind = ['cancel', 'exchange', 'failed', 'refund'].includes(intent) ? intent : 'failed';
+    order.localReturnIntent = kind === 'refund' ? 'failed' : kind;
+    if (kind === 'cancel' && reason) order.cancellationReason = reason;
+    await order.save({ session });
+
+    const staffNote =
+      (typeof note === 'string' && note.trim()) ||
+      (kind === 'cancel'
+        ? 'Cancel — package back from Flextock, scan on Returns'
+        : kind === 'exchange'
+          ? 'Exchange — package back from Flextock, scan on Returns'
+          : deliveredCollectBack || order.isReturnOrder
+            ? 'Collect / refund bag back from Flextock — scan on Returns'
+            : 'Admin confirmed package is back from Flextock — scan on Returns');
+
+    await transitionOrder(
+      order,
+      'back_from_flextock',
+      { source: 'user_action', actorUserId, note: staffNote },
+      session
+    );
+
+    return Order.findById(orderId).session(session);
+  });
+
+  if (cancelRemote && result?.flextockOrderCode) {
+    try {
+      const { cancelFlextockOrder } = await import('../integrations/flextock/orders.service.js');
+      await cancelFlextockOrder(result.flextockOrderCode, result.flextockOrderType || 'outbound');
+    } catch (err) {
+      logger.warn(
+        { err: err.message, orderId: String(orderId), code: result.flextockOrderCode },
+        'Flextock cancel API failed after Back from Flextock — OMS already moved'
+      );
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -1727,6 +1823,7 @@ export async function transitionOrderStatus(orderId, toStatus, meta) {
     || toStatus === 'returning_to_origin'
     || toStatus === 'back_from_local_shipping'
     || toStatus === 'back_from_pickup'
+    || toStatus === 'back_from_flextock'
   ) {
     await notifyReturnToOrigin(updated);
   } else if (toStatus === 'delivered') {
@@ -3631,6 +3728,7 @@ export default {
   unwindFalseDeliveredSale,
   partialLocalDelivery,
   returnLocalShippingToStock,
+  returnFlextockToStock,
   returnPickupToStock,
   confirmReturnedToStock,
   confirmRefundPaid,
