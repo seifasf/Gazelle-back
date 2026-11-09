@@ -545,6 +545,8 @@ export async function verifyOrder(orderId, actorUserId, { outcome, note, shippin
         if (switchedMethod) fresh.shippingFee = LOCAL_SHIPPING_FEE;
       } else if (shippingMethod === 'pickup') {
         fresh.shippingFee = 0;
+      } else if (shippingMethod === 'flextock' && switchedMethod && !(Number(fresh.shippingFee) > 0)) {
+        fresh.shippingFee = DEFAULT_BOSTA_SHIPPING_FEE;
       }
     }
     fresh.delayedUntil = undefined;
@@ -2743,6 +2745,7 @@ export async function createManualOrder({
     manualOrder.isReturnOrder
     && manualOrder.shippingMethod !== 'local_shipping'
     && manualOrder.shippingMethod !== 'pickup'
+    && manualOrder.shippingMethod !== 'flextock'
   ) {
     try {
       const { ensureBostaDeliveryForOrder } = await import('./fulfillment.service.js');
