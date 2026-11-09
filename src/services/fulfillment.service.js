@@ -107,7 +107,11 @@ export async function checkStockAvailability(order) {
 }
 
 function assertBostaShipable(order) {
-  if (order.shippingMethod === 'pickup' || order.shippingMethod === 'local_shipping') {
+  if (
+    order.shippingMethod === 'pickup'
+    || order.shippingMethod === 'local_shipping'
+    || order.shippingMethod === 'flextock'
+  ) {
     const err = new Error('This order does not use Bosta shipping');
     err.statusCode = 400;
     throw err;
@@ -115,6 +119,26 @@ function assertBostaShipable(order) {
   if (!order.shippingAddress?.line1 || !String(order.shippingAddress?.city || '').trim()) {
     const err = new Error(
       'Order is missing street or city. Open the order, fix the shipping address, then retry.'
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
+function assertFlextockShipable(order) {
+  if (order.shippingMethod !== 'flextock') {
+    const err = new Error('This order does not use Flextock shipping');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (order.isRepairOrder) {
+    const err = new Error('Flextock needs product SKUs — use Bosta or local shipping for repairs');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!order.shippingAddress?.line1 || !String(order.shippingAddress?.city || '').trim()) {
+    const err = new Error(
+      'Order is missing street or city. Open the order, fix the shipping address, then retry Flextock.'
     );
     err.statusCode = 400;
     throw err;
@@ -346,7 +370,181 @@ export async function ensureBostaDeliveryForOrder(orderId, actorUserId) {
 const FULFILLMENT_READY_STATUSES = ['verified_ready_for_shipping', 'repaired_shoe'];
 
 function isBostaReturnPickup(order) {
-  return Boolean(order?.isReturnOrder) && order.shippingMethod !== 'local_shipping' && order.shippingMethod !== 'pickup';
+  return (
+    Boolean(order?.isReturnOrder)
+    && order.shippingMethod !== 'local_shipping'
+    && order.shippingMethod !== 'pickup'
+    && order.shippingMethod !== 'flextock'
+  );
+}
+
+/**
+ * Create (or reuse) the Flextock outbound order. Does NOT change internalStatus.
+ * Credentials stay optional until FLEXTOCK_* env vars are set.
+ */
+export async function ensureFlextockOrderForOrder(orderId, actorUserId) {
+  const { isFlextockConfigured } = await import('../integrations/flextock/client.js');
+  const { createFlextockOrder } = await import('../integrations/flextock/orders.service.js');
+
+  let order = await Order.findById(orderId).populate('customerId');
+  if (!order) {
+    const err = new Error('Order not found');
+    err.statusCode = 404;
+    throw err;
+  }
+  assertFlextockShipable(order);
+
+  if (!isFlextockConfigured()) {
+    const err = new Error(
+      'Flextock API is not configured yet. Add FLEXTOCK_USERNAME, FLEXTOCK_PASSWORD, and FLEXTOCK_API_KEY, then retry.'
+    );
+    err.statusCode = 503;
+    throw err;
+  }
+
+  if (order.flextockOrderCode && order.flextockShipmentStatus === 'created') {
+    if (actorUserId && !order.assignedStockManagerId) {
+      order.assignedStockManagerId = actorUserId;
+      await order.save();
+    }
+    return {
+      orderCode: order.flextockOrderCode,
+      trackingNumber: order.flextockTrackingNumber || null,
+      trackingUrl: order.flextockTrackingUrl || null,
+      orderId,
+      created: false,
+    };
+  }
+
+  const claimed = await Order.findOneAndUpdate(
+    {
+      _id: orderId,
+      shippingMethod: 'flextock',
+      $or: [
+        { flextockShipmentStatus: { $nin: ['creating'] } },
+        { flextockShipmentStatus: null },
+        { flextockShipmentStatus: { $exists: false } },
+      ],
+    },
+    {
+      $set: {
+        flextockShipmentStatus: 'creating',
+        flextockShipmentError: null,
+        ...(actorUserId ? { assignedStockManagerId: actorUserId } : {}),
+      },
+    },
+    { new: true }
+  ).populate('customerId');
+
+  if (!claimed) {
+    for (let i = 0; i < 10; i += 1) {
+      await sleep(500);
+      const fresh = await Order.findById(orderId).select(
+        'flextockOrderCode flextockTrackingNumber flextockTrackingUrl flextockShipmentStatus flextockShipmentError'
+      );
+      if (fresh?.flextockOrderCode && fresh.flextockShipmentStatus === 'created') {
+        return {
+          orderCode: fresh.flextockOrderCode,
+          trackingNumber: fresh.flextockTrackingNumber || null,
+          trackingUrl: fresh.flextockTrackingUrl || null,
+          orderId,
+          created: false,
+        };
+      }
+      if (fresh?.flextockShipmentStatus === 'failed') {
+        const err = new Error(fresh.flextockShipmentError || 'Flextock order create failed');
+        err.statusCode = 502;
+        throw err;
+      }
+    }
+    const err = new Error('Flextock order is already being created — retry in a moment');
+    err.statusCode = 409;
+    throw err;
+  }
+
+  try {
+    const result = await createFlextockOrder(claimed, claimed.customerId);
+    const saved = await Order.findByIdAndUpdate(
+      orderId,
+      {
+        $set: {
+          flextockOrderCode: result.orderCode,
+          flextockOutboundOrderCode: result.orderCode,
+          flextockOrderType: 'outbound',
+          flextockOrderStatus: result.orderStatus || undefined,
+          flextockTrackingNumber: result.trackingNumber || undefined,
+          flextockTrackingUrl: result.trackingUrl || undefined,
+          flextockShipmentStatus: 'created',
+          flextockShipmentError: null,
+          flextockSyncedAt: new Date(),
+        },
+      },
+      { new: true }
+    );
+    if (!saved?.flextockOrderCode) {
+      const err = new Error('Flextock order created but could not be saved — contact admin');
+      err.statusCode = 500;
+      throw err;
+    }
+    return {
+      orderCode: saved.flextockOrderCode,
+      trackingNumber: saved.flextockTrackingNumber || null,
+      trackingUrl: saved.flextockTrackingUrl || null,
+      orderId,
+      created: true,
+    };
+  } catch (error) {
+    await Order.findByIdAndUpdate(orderId, {
+      $set: {
+        flextockShipmentStatus: 'failed',
+        flextockShipmentError: error.message,
+      },
+    });
+    logger.error({ err: error.message, orderId }, 'Flextock order create failed');
+    throw error;
+  }
+}
+
+export async function prepareFlextockForOrder(orderId, actorUserId) {
+  const shipment = await ensureFlextockOrderForOrder(orderId, actorUserId);
+  const order = await Order.findById(orderId).select('internalStatus');
+  if (FULFILLMENT_READY_STATUSES.includes(order?.internalStatus)) {
+    await orderService.transitionOrderStatus(orderId, 'awaiting_bosta_pickup', {
+      source: 'user_action',
+      actorUserId,
+      note: shipment.created
+        ? 'Flextock order created — awaiting warehouse / courier'
+        : 'Flextock order confirmed — awaiting warehouse / courier',
+    });
+  }
+  return {
+    url: shipment.trackingUrl || null,
+    orderCode: shipment.orderCode,
+    deliveryId: shipment.orderCode,
+    trackingNumber: shipment.trackingNumber,
+    orderId,
+    created: shipment.created,
+    carrier: 'flextock',
+  };
+}
+
+export async function createFlextockShipmentForOrder(orderId, actorUserId) {
+  const shipment = await ensureFlextockOrderForOrder(orderId, actorUserId);
+  const order = await Order.findById(orderId).select('internalStatus');
+  if (FULFILLMENT_READY_STATUSES.includes(order?.internalStatus)) {
+    await orderService.transitionOrderStatus(orderId, 'awaiting_bosta_pickup', {
+      source: 'system',
+      actorUserId,
+      note: shipment.created
+        ? 'Flextock order created — awaiting warehouse / courier'
+        : 'Flextock order confirmed — awaiting warehouse / courier',
+    });
+  }
+  return {
+    orderCode: shipment.orderCode,
+    trackingNumber: shipment.trackingNumber,
+    orderId,
+  };
 }
 
 async function moveBostaReturnToReturning(orderId, actorUserId) {
@@ -358,6 +556,11 @@ async function moveBostaReturnToReturning(orderId, actorUserId) {
 }
 
 export async function prepareAwbForOrder(orderId, actorUserId) {
+  const methodOrder = await Order.findById(orderId).select('shippingMethod');
+  if (methodOrder?.shippingMethod === 'flextock') {
+    return prepareFlextockForOrder(orderId, actorUserId);
+  }
+
   const shipment = await ensureBostaDeliveryForOrder(orderId, actorUserId);
   const order = await Order.findById(orderId).select('internalStatus isReturnOrder shippingMethod');
   if (order?.internalStatus === 'verified_ready_for_shipping' && isBostaReturnPickup(order)) {
@@ -378,6 +581,7 @@ export async function prepareAwbForOrder(orderId, actorUserId) {
     trackingNumber: shipment.trackingNumber,
     orderId,
     created: shipment.created,
+    carrier: 'bosta',
   };
 }
 
@@ -489,6 +693,27 @@ export async function pickAndPackOrder(orderId, actorUserId) {
     });
 
     return { queued: false, localShipping: true, orderId, stockWarnings: [] };
+  }
+
+  if (order.shippingMethod === 'flextock') {
+    try {
+      const shipment = await createFlextockShipmentForOrder(orderId, actorUserId);
+      return {
+        queued: false,
+        flextock: true,
+        awaitingPickup: true,
+        orderId,
+        orderCode: shipment.orderCode,
+        deliveryId: shipment.orderCode,
+        trackingNumber: shipment.trackingNumber,
+        stockWarnings: [],
+      };
+    } catch (error) {
+      const err = new Error(error.message || 'Failed to create Flextock order');
+      err.statusCode = error.statusCode || 502;
+      err.stockWarnings = [];
+      throw err;
+    }
   }
 
   if (isBostaReturnPickup(order) && order.internalStatus === 'verified_ready_for_shipping') {
@@ -809,12 +1034,26 @@ export async function markOrderOutOfStock(orderId, actorUserId, { note, lines } 
 
 export async function getShipmentStatus(orderId) {
   const order = await Order.findById(orderId).select(
-    'bostaShipmentStatus bostaShipmentError bostaDeliveryId bostaTrackingNumber internalStatus shippingMethod localShippingNote localShippingMarkedAt'
+    'bostaShipmentStatus bostaShipmentError bostaDeliveryId bostaTrackingNumber flextockShipmentStatus flextockShipmentError flextockOrderCode flextockTrackingNumber flextockTrackingUrl flextockOrderStatus internalStatus shippingMethod localShippingNote localShippingMarkedAt'
   );
   if (!order) {
     const err = new Error('Order not found');
     err.statusCode = 404;
     throw err;
+  }
+  if (order.shippingMethod === 'flextock') {
+    return {
+      status: order.flextockShipmentStatus,
+      error: order.flextockShipmentError,
+      deliveryId: order.flextockOrderCode,
+      orderCode: order.flextockOrderCode,
+      trackingNumber: order.flextockTrackingNumber,
+      trackingUrl: order.flextockTrackingUrl,
+      carrierStatus: order.flextockOrderStatus,
+      orderStatus: order.internalStatus,
+      shippingMethod: order.shippingMethod,
+      carrier: 'flextock',
+    };
   }
   return {
     status: order.bostaShipmentStatus,
@@ -825,13 +1064,22 @@ export async function getShipmentStatus(orderId) {
     shippingMethod: order.shippingMethod,
     localShippingNote: order.localShippingNote,
     localShippingMarkedAt: order.localShippingMarkedAt,
+    carrier: 'bosta',
   };
 }
 
 export async function getAwbForOrder(orderId) {
   const order = await Order.findById(orderId);
-  if (order?.shippingMethod === 'local_shipping' || order?.shippingMethod === 'pickup') {
-    const err = new Error('This shipping method does not have a Bosta AWB');
+  if (
+    order?.shippingMethod === 'local_shipping'
+    || order?.shippingMethod === 'pickup'
+    || order?.shippingMethod === 'flextock'
+  ) {
+    const err = new Error(
+      order?.shippingMethod === 'flextock'
+        ? 'Flextock orders do not use a Bosta AWB — open the Flextock tracking link instead'
+        : 'This shipping method does not have a Bosta AWB'
+    );
     err.statusCode = 400;
     throw err;
   }
@@ -916,8 +1164,11 @@ export async function buildOrderSheet(orderId) {
 export default {
   pickAndPackOrder,
   ensureBostaDeliveryForOrder,
+  ensureFlextockOrderForOrder,
   prepareAwbForOrder,
+  prepareFlextockForOrder,
   createBostaShipmentForOrder,
+  createFlextockShipmentForOrder,
   getPickList,
   markOrderOutOfStock,
   getShipmentStatus,

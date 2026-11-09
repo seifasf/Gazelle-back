@@ -41,7 +41,14 @@ export const LEDGER_TYPES = [
   'online_stock_increment_api',
 ];
 
-export const STATUS_SOURCES = ['shopify_webhook', 'shopify_import', 'bosta_webhook', 'user_action', 'system'];
+export const STATUS_SOURCES = [
+  'shopify_webhook',
+  'shopify_import',
+  'bosta_webhook',
+  'flextock_poll',
+  'user_action',
+  'system',
+];
 
 export const RISK_FLAGS = ['none', 'watch', 'high_risk', 'vip'];
 
@@ -73,7 +80,7 @@ export const MANUAL_ORDER_SOURCES = [
   'other',
 ];
 
-export const SHIPPING_METHODS = ['bosta', 'local_shipping', 'pickup'];
+export const SHIPPING_METHODS = ['bosta', 'flextock', 'local_shipping', 'pickup'];
 
 /** Fixed courier fee for Gazelle local shipping (EGP). */
 export const LOCAL_SHIPPING_FEE = 95;
@@ -101,6 +108,7 @@ export const JOB_NAMES = {
   BOSTA_POLLING_FALLBACK: 'bosta-polling-fallback',
   BOSTA_ORDER_STATES_SYNC: 'bosta-order-states-sync',
   BOSTA_RETURNS_SYNC: 'bosta-returns-sync',
+  FLEXTOCK_ORDER_STATES_SYNC: 'flextock-order-states-sync',
   CHECK_RESTOCK_NEEDED: 'check-restock-needed',
   CHECK_SLOW_MOVERS: 'check-slow-movers',
   SHOPIFY_ORDERS_SYNC: 'shopify-orders-sync',

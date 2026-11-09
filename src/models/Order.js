@@ -92,6 +92,21 @@ const orderSchema = new mongoose.Schema(
       default: 'none',
     },
     bostaShipmentError: String,
+    /** Flextock merchant order_code (usually Shopify name without #). */
+    flextockOrderCode: { type: String, index: true },
+    flextockOutboundOrderCode: String,
+    flextockOrderType: { type: String, enum: ['outbound', 'return', 'exchange'] },
+    flextockOrderStatus: String,
+    flextockTrackingNumber: String,
+    flextockTrackingUrl: String,
+    flextockCourierName: String,
+    flextockShipmentStatus: {
+      type: String,
+      enum: ['none', 'queued', 'creating', 'created', 'failed'],
+      default: 'none',
+    },
+    flextockShipmentError: String,
+    flextockSyncedAt: Date,
     /** Live Bosta invoice breakdown (from calculator or delivery API). */
     bostaFeeBreakdown: {
       shippingFee: { type: Number, min: 0 },
@@ -233,6 +248,7 @@ const orderSchema = new mongoose.Schema(
 
 orderSchema.index({ internalStatus: 1, placedAt: 1 });
 orderSchema.index({ internalStatus: 1, bostaLastPolledAt: 1 });
+orderSchema.index({ shippingMethod: 1, flextockOrderCode: 1, flextockSyncedAt: 1 });
 orderSchema.index({ 'items.variantId': 1, internalStatus: 1 });
 orderSchema.index({ placedAt: 1 });
 orderSchema.index({ deliveredAt: 1, internalStatus: 1 });

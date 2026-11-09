@@ -20,6 +20,25 @@ const envSchema = z.object({
   SHOPIFY_LOCATION_ID: z.string().optional(),
   BOSTA_API_KEY: z.string().optional(),
   BOSTA_API_BASE_URL: z.string().default('https://app.bosta.co/api/v2'),
+  FLEXTOCK_API_BASE_URL: z.string().default('https://api.flextock.com'),
+  FLEXTOCK_USERNAME: z.string().optional(),
+  FLEXTOCK_PASSWORD: z.string().optional(),
+  FLEXTOCK_API_KEY: z.string().optional(),
+  FLEXTOCK_INTEGRATION_SOURCE: z.string().default('gazelle'),
+  FLEXTOCK_VENDOR_NAME: z.string().default('gazelle'),
+  FLEXTOCK_CURRENCY: z.string().default('EGP'),
+  FLEXTOCK_REQUIRES_SELF_DELIVERY: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+  FLEXTOCK_SYNC_INVENTORY: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+  FLEXTOCK_EXCHANGE_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
   PAYMOB_API_KEY: z.string().optional(),
   PAYMOB_PUBLIC_KEY: z.string().optional(),
   PAYMOB_SECRET_KEY: z.string().optional(),

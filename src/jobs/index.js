@@ -149,6 +149,15 @@ export function registerJobs(agenda) {
     return result;
   });
 
+  agenda.define(JOB_NAMES.FLEXTOCK_ORDER_STATES_SYNC, async () => {
+    const { isFlextockConfigured } = await import('../integrations/flextock/client.js');
+    if (!isFlextockConfigured()) return { skipped: true, reason: 'not_configured' };
+    const { syncFlextockOrderStates } = await import('../integrations/flextock/sync.service.js');
+    const result = await syncFlextockOrderStates({ limit: 80 });
+    logger.info(result, 'Scheduled Flextock order-states sync finished');
+    return result;
+  });
+
   agenda.define(JOB_NAMES.CHECK_RESTOCK_NEEDED, async () => checkRestockNeeded());
   agenda.define(JOB_NAMES.CHECK_SLOW_MOVERS, async () => checkSlowMovers());
 
@@ -249,6 +258,8 @@ export async function scheduleRecurringJobs(agenda) {
   await agenda.every('3 minutes', JOB_NAMES.BOSTA_ORDER_STATES_SYNC);
   await agenda.every('15 minutes', JOB_NAMES.BOSTA_POLLING_FALLBACK);
   await agenda.every('30 minutes', JOB_NAMES.BOSTA_RETURNS_SYNC);
+  // Flextock has no webhook in the External APIs guide — poll open flextock orders.
+  await agenda.every('5 minutes', JOB_NAMES.FLEXTOCK_ORDER_STATES_SYNC);
   await agenda.every('24 hours', JOB_NAMES.CHECK_RESTOCK_NEEDED);
   await agenda.every('24 hours', JOB_NAMES.CHECK_SLOW_MOVERS);
   // ~08:00 Cairo daily (cron uses server local; also safe to run every day morning window)

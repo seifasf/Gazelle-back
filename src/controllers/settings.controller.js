@@ -3,6 +3,7 @@ import BostaStatusMapping from '../models/BostaStatusMapping.js';
 import { syncCatalog } from '../integrations/shopify/sync.service.js';
 import { fetchBostaCities } from '../integrations/bosta/cities.service.js';
 import { isBostaConfigured } from '../integrations/bosta/client.js';
+import { isFlextockConfigured } from '../integrations/flextock/client.js';
 import { getAgenda } from '../config/agenda.js';
 import { JOB_NAMES } from '../constants/index.js';
 import { maskSecret } from '../integrations/shopify/credentials.js';
@@ -38,6 +39,8 @@ export async function getSettings(req, res, next) {
       data: {
         settings: sanitizeSettings(settings),
         bostaStatusMappings: mappings,
+        bostaConfigured: isBostaConfigured(),
+        flextockConfigured: isFlextockConfigured(),
       },
     });
   } catch (err) {
@@ -127,10 +130,31 @@ export async function forceBostaStatesSync(req, res, next) {
   }
 }
 
+export async function forceFlextockStatesSync(req, res, next) {
+  try {
+    if (!isFlextockConfigured()) {
+      return res.status(503).json({
+        error:
+          'Flextock API is not configured yet. Add FLEXTOCK_USERNAME, FLEXTOCK_PASSWORD, and FLEXTOCK_API_KEY, then retry.',
+      });
+    }
+    const { syncFlextockOrderStates } = await import('../integrations/flextock/sync.service.js');
+    const agenda = getAgenda();
+    await agenda.now(JOB_NAMES.FLEXTOCK_ORDER_STATES_SYNC, {});
+    const quick = await syncFlextockOrderStates({ limit: 80 }).catch((err) => ({
+      error: err.message,
+    }));
+    res.json({ queued: true, job: JOB_NAMES.FLEXTOCK_ORDER_STATES_SYNC, quick });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export default {
   getSettings,
   updateSettings,
   upsertBostaMapping,
   forceShopifySync,
   forceBostaStatesSync,
+  forceFlextockStatesSync,
 };

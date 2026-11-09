@@ -365,6 +365,9 @@ export async function updateShippingAddress(req, res, next) {
         if (prevMethod !== 'local_shipping') order.shippingFee = LOCAL_SHIPPING_FEE;
       } else if (shippingMethod === 'pickup') {
         order.shippingFee = 0;
+      } else if (shippingMethod === 'flextock' && prevMethod !== 'flextock') {
+        // No Flextock fee table yet — keep staff-set fee or fall back to the default courier rate.
+        if (!(Number(order.shippingFee) > 0)) order.shippingFee = DEFAULT_BOSTA_SHIPPING_FEE;
       } else if (shippingMethod === 'bosta' && prevMethod !== 'bosta') {
         const goods = Number(order.totalSellingPrice) || 0;
         const suggested = await orderService.suggestShippingFeeByCity(
@@ -410,10 +413,14 @@ export async function updateShippingAddress(req, res, next) {
       }
     }
 
-    // Address fix after a failed Bosta create — clear so stock can retry scan & ship.
+    // Address fix after a failed Bosta / Flextock create — clear so stock can retry scan & ship.
     if (order.bostaShipmentStatus === 'failed' && !order.bostaDeliveryId) {
       order.bostaShipmentStatus = 'none';
       order.bostaShipmentError = null;
+    }
+    if (order.flextockShipmentStatus === 'failed' && !order.flextockOrderCode) {
+      order.flextockShipmentStatus = 'none';
+      order.flextockShipmentError = null;
     }
 
     if (addressChanged) {
