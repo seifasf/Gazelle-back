@@ -90,8 +90,8 @@ function cleanLabel(value) {
 export function flextockCustomerAddress(order, customer) {
   const shipping = order?.shippingAddress || {};
   const name = splitCustomerName(shipping.fullName || customer?.fullName);
-  const city = String(shipping.city || '').trim();
-  const area = String(shipping.zone || '').trim() || city;
+  const city = String(shipping.city || '').replace(/\s+/g, ' ').trim();
+  const area = String(shipping.zone || '').replace(/\s+/g, ' ').trim() || city;
   const phone = normalizeFlextockPhone(shipping.phone || customer?.phone);
   return {
     country: 'Egypt',

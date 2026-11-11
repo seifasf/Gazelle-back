@@ -112,7 +112,7 @@ function jwtExpMs(token) {
 async function assertConfigured() {
   if (!(await isFlextockConfigured())) {
     const err = new Error(
-      'Flextock API is not configured yet. Add merchant username, password, and API key in Settings → Flextock (or Render FLEXTOCK_*), then retry.'
+      'Flextock is not configured. Add username, password, and API key in Settings → Flextock, then retry.'
     );
     err.statusCode = 503;
     throw err;
@@ -149,10 +149,10 @@ function authFailureError(data, status, username) {
     || lower.includes('missing data')
     || status === 401
     || status === 403;
-  const who = username ? ` (tried username ${maskSecret(username)})` : '';
+  const who = username ? ` · user ${maskSecret(username)}` : '';
   const err = new Error(
     badCreds
-      ? `Flextock login failed (${raw})${who}. Open Settings → Flextock and enter the merchant username, password, and API key from Flextock (same values as their portal login + API key). Do not use quotes or spaces.`
+      ? `Flextock login failed${who}. Fix username / password / API key in Settings → Flextock, then retry.`
       : raw
   );
   // Never forward Flextock 401/403 — the OMS frontend treats bare 401 as session expiry.
