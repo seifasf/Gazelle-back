@@ -60,6 +60,7 @@ export async function productsForOrder(order) {
     const line = (order.items || []).find((i) => String(i.variantId?._id || i.variantId) === String(variant._id));
     const item = flextockProductFromVariant(variant, {
       price: line?.unitSellingPrice,
+      compareAtPrice: line?.unitCompareAtPrice,
       name: product?.title ? `${product.title}${variant.size ? ` ${variant.size}` : ''}` : variant.title,
       imageUrl: variant.imageUrl || product?.imageUrl,
     });

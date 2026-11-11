@@ -31,6 +31,9 @@ const settingsSchema = new mongoose.Schema(
     flextockUsername: String,
     flextockPassword: String,
     flextockApiKey: String,
+    /** PDF integration_source / vendor_name — must match the Flextock merchant name. */
+    flextockIntegrationSource: String,
+    flextockVendorName: String,
     defaultLowStockThreshold: { type: Number, default: 5 },
     /** Next sequential number for manual order codes (M-1000, M-1001, …). */
     manualOrderNextSeq: { type: Number },

@@ -1,6 +1,12 @@
 import { flextockRequest } from './client.js';
-import { buildCancelOrderPayload, buildCreateOrderPayload, flextockMerchantOrderCode } from './payloads.js';
+import {
+  buildCancelOrderPayload,
+  buildCreateOrderPayload,
+  flextockMerchantOrderCode,
+  validateCreateOrderPayload,
+} from './payloads.js';
 import { ensureFlextockProductsForOrder } from './products.service.js';
+import Settings from '../../models/Settings.js';
 import logger from '../../utils/logger.js';
 
 export async function getFlextockOrderStatus(orderCode) {
@@ -62,15 +68,15 @@ export async function createFlextockOrder(order, customer) {
   }
 
   const { variantsById } = await ensureFlextockProductsForOrder(order);
-  const payload = buildCreateOrderPayload(order, customer, variantsById);
-  if (!payload.line_items.length) {
-    const err = new Error('Flextock order needs at least one SKU');
+  const settings = await Settings.findOne({ key: 'global' })
+    .select('flextockIntegrationSource flextockVendorName')
+    .lean();
+  const payload = buildCreateOrderPayload(order, customer, variantsById, settings);
+  const validationErrors = validateCreateOrderPayload(payload);
+  if (validationErrors.length) {
+    const err = new Error(validationErrors[0]);
     err.statusCode = 400;
-    throw err;
-  }
-  if (!payload.customer_address.first_name && !payload.customer_address.last_name) {
-    const err = new Error('Flextock needs a customer first or last name');
-    err.statusCode = 400;
+    err.details = validationErrors;
     throw err;
   }
 
@@ -82,7 +88,9 @@ export async function createFlextockOrder(order, customer) {
     });
   } catch (err) {
     const msg = String(err.message || '').toLowerCase();
-    const already = msg.includes('already exists') || err.statusCode === 400 && msg.includes('already');
+    const already =
+      msg.includes('already exists')
+      || ((err.statusCode === 400 || err.upstreamStatus === 400) && msg.includes('already'));
     if (!already) throw err;
     logger.info({ orderCode: code, orderId: String(order._id) }, 'Flextock order already exists — using live status');
   }

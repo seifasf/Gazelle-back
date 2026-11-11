@@ -70,6 +70,8 @@ export async function updateSettings(req, res, next) {
       flextockUsername,
       flextockPassword,
       flextockApiKey,
+      flextockIntegrationSource,
+      flextockVendorName,
     } = req.body;
     const patch = {
       shopifyLocationId,
@@ -86,6 +88,12 @@ export async function updateSettings(req, res, next) {
     }
     if (flextockApiKey !== undefined && String(flextockApiKey).trim() !== '') {
       patch.flextockApiKey = cleanFlextockSecret(flextockApiKey) || null;
+    }
+    if (flextockIntegrationSource !== undefined) {
+      patch.flextockIntegrationSource = String(flextockIntegrationSource || '').trim() || null;
+    }
+    if (flextockVendorName !== undefined) {
+      patch.flextockVendorName = String(flextockVendorName || '').trim() || null;
     }
     const settings = await Settings.findOneAndUpdate(
       { key: 'global' },
@@ -184,11 +192,19 @@ export async function forceFlextockStatesSync(req, res, next) {
 export async function testFlextockAuth(req, res, next) {
   try {
     // Optional body lets Settings "Save & test" write creds then probe in one request.
-    const { flextockUsername, flextockPassword, flextockApiKey } = req.body || {};
+    const {
+      flextockUsername,
+      flextockPassword,
+      flextockApiKey,
+      flextockIntegrationSource,
+      flextockVendorName,
+    } = req.body || {};
     if (
       flextockUsername !== undefined
       || flextockPassword !== undefined
       || flextockApiKey !== undefined
+      || flextockIntegrationSource !== undefined
+      || flextockVendorName !== undefined
     ) {
       const patch = {};
       if (flextockUsername !== undefined) {
@@ -199,6 +215,12 @@ export async function testFlextockAuth(req, res, next) {
       }
       if (flextockApiKey !== undefined && String(flextockApiKey).trim() !== '') {
         patch.flextockApiKey = cleanFlextockSecret(flextockApiKey) || null;
+      }
+      if (flextockIntegrationSource !== undefined) {
+        patch.flextockIntegrationSource = String(flextockIntegrationSource || '').trim() || null;
+      }
+      if (flextockVendorName !== undefined) {
+        patch.flextockVendorName = String(flextockVendorName || '').trim() || null;
       }
       if (Object.keys(patch).length) {
         await Settings.findOneAndUpdate({ key: 'global' }, { $set: patch }, { upsert: true });

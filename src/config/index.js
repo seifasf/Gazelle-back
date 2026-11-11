@@ -39,6 +39,8 @@ const envSchema = z.object({
     .enum(['true', 'false'])
     .default('false')
     .transform((v) => v === 'true'),
+  /** Only used when FLEXTOCK_REQUIRES_SELF_DELIVERY=true (PDF shipment_data.courier_name_code). */
+  FLEXTOCK_SELF_COURIER_CODE: z.string().optional(),
   PAYMOB_API_KEY: z.string().optional(),
   PAYMOB_PUBLIC_KEY: z.string().optional(),
   PAYMOB_SECRET_KEY: z.string().optional(),
