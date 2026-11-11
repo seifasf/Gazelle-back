@@ -99,9 +99,18 @@ function authFailureError(data, status) {
       ? `Flextock login failed (${raw}). Check Render env FLEXTOCK_USERNAME, FLEXTOCK_PASSWORD, and FLEXTOCK_API_KEY — they must be the merchant username, password, and API key from Flextock (no extra quotes/spaces).`
       : raw
   );
-  err.statusCode = status >= 400 && status < 600 ? status : 502;
+  // Never forward Flextock 401/403 — the OMS frontend treats 401 as session expiry.
+  err.statusCode = 502;
+  err.upstreamStatus = status;
   err.payload = data;
   return err;
+}
+
+/** Map third-party HTTP codes so they never look like Gazelle JWT failures. */
+function mapUpstreamStatus(status) {
+  if (status === 401 || status === 403) return 502;
+  if (status >= 400 && status < 600) return status;
+  return 502;
 }
 
 export async function authenticateFlextock({ force = false } = {}) {
@@ -217,8 +226,14 @@ export async function flextockRequest(path, { method = 'POST', body, query, quie
     if (!quiet) {
       logger.error({ status: response.status, data, path }, 'Flextock API error');
     }
-    const err = new Error(errorMessage(data, response.status));
-    err.statusCode = response.status;
+    const raw = errorMessage(data, response.status);
+    const err = new Error(
+      response.status === 401 || response.status === 403
+        ? `Flextock API rejected the request (${raw}). Check FLEXTOCK_* credentials on Render.`
+        : raw
+    );
+    err.statusCode = mapUpstreamStatus(response.status);
+    err.upstreamStatus = response.status;
     err.payload = data;
     throw err;
   }

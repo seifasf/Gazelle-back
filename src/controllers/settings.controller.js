@@ -165,6 +165,7 @@ export async function testFlextockAuth(req, res, next) {
       { upsert: true }
     );
     if (!result.ok) {
+      // Always 502/503 — never 401 — so the OMS UI does not treat this as session expiry.
       return res.status(result.configured ? 502 : 503).json({
         error: result.error || 'Flextock auth failed',
         data: result,
