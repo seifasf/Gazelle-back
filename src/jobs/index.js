@@ -151,7 +151,7 @@ export function registerJobs(agenda) {
 
   agenda.define(JOB_NAMES.FLEXTOCK_ORDER_STATES_SYNC, async () => {
     const { isFlextockConfigured } = await import('../integrations/flextock/client.js');
-    if (!isFlextockConfigured()) return { skipped: true, reason: 'not_configured' };
+    if (!(await isFlextockConfigured())) return { skipped: true, reason: 'not_configured' };
     const { syncFlextockOrderStates } = await import('../integrations/flextock/sync.service.js');
     const result = await syncFlextockOrderStates({ limit: 80 });
     logger.info(result, 'Scheduled Flextock order-states sync finished');

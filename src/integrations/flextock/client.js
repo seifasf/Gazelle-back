@@ -1,11 +1,16 @@
 import { config } from '../../config/index.js';
+import Settings from '../../models/Settings.js';
 import logger from '../../utils/logger.js';
+import { maskSecret } from '../shopify/credentials.js';
 
 const DEFAULT_BASE = 'https://api.flextock.com';
 
 let cachedAccess = null;
 let cachedRefresh = null;
 let cachedExpMs = 0;
+/** @type {{ username: string, password: string, key: string } | null} */
+let cachedCreds = null;
+let cachedCredsAt = 0;
 
 /** Strip whitespace / wrapping quotes common when pasting into Render env UI. */
 export function cleanFlextockSecret(value) {
@@ -19,7 +24,7 @@ export function cleanFlextockSecret(value) {
   return s;
 }
 
-export function flextockCredentials() {
+function envCredentials() {
   return {
     username: cleanFlextockSecret(config.FLEXTOCK_USERNAME),
     password: cleanFlextockSecret(config.FLEXTOCK_PASSWORD),
@@ -27,7 +32,51 @@ export function flextockCredentials() {
   };
 }
 
-export function isFlextockConfigured() {
+/**
+ * Settings DB overrides env when a field is set (same pattern as Shopify tokens).
+ * Lets staff fix Flextock login from OMS Settings without a Render redeploy.
+ */
+export async function loadFlextockCredentials({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && cachedCreds && now - cachedCredsAt < 30_000) {
+    return cachedCreds;
+  }
+  const env = envCredentials();
+  let fromDb = { username: '', password: '', key: '' };
+  try {
+    const settings = await Settings.findOne({ key: 'global' })
+      .select('flextockUsername flextockPassword flextockApiKey')
+      .lean();
+    fromDb = {
+      username: cleanFlextockSecret(settings?.flextockUsername),
+      password: cleanFlextockSecret(settings?.flextockPassword),
+      key: cleanFlextockSecret(settings?.flextockApiKey),
+    };
+  } catch (err) {
+    logger.warn({ err: err.message }, 'Flextock credentials: Settings read failed — using env only');
+  }
+  cachedCreds = {
+    username: fromDb.username || env.username,
+    password: fromDb.password || env.password,
+    key: fromDb.key || env.key,
+  };
+  cachedCredsAt = now;
+  return cachedCreds;
+}
+
+/** Sync helper for tests / boot — env + in-memory cache only. */
+export function flextockCredentials() {
+  if (cachedCreds) return cachedCreds;
+  return envCredentials();
+}
+
+export async function isFlextockConfigured() {
+  const { username, password, key } = await loadFlextockCredentials();
+  return Boolean(username && password && key);
+}
+
+/** Sync: true if env or cached Settings creds are complete. */
+export function isFlextockConfiguredSync() {
   const { username, password, key } = flextockCredentials();
   return Boolean(username && password && key);
 }
@@ -36,6 +85,12 @@ export function resetFlextockAuthCache() {
   cachedAccess = null;
   cachedRefresh = null;
   cachedExpMs = 0;
+}
+
+export function resetFlextockCredentialCache() {
+  cachedCreds = null;
+  cachedCredsAt = 0;
+  resetFlextockAuthCache();
 }
 
 function apiBase() {
@@ -54,10 +109,10 @@ function jwtExpMs(token) {
   }
 }
 
-function assertConfigured() {
-  if (!isFlextockConfigured()) {
+async function assertConfigured() {
+  if (!(await isFlextockConfigured())) {
     const err = new Error(
-      'Flextock API is not configured yet. Add FLEXTOCK_USERNAME, FLEXTOCK_PASSWORD, and FLEXTOCK_API_KEY on Render, then retry.'
+      'Flextock API is not configured yet. Add merchant username, password, and API key in Settings → Flextock (or Render FLEXTOCK_*), then retry.'
     );
     err.statusCode = 503;
     throw err;
@@ -85,7 +140,7 @@ function errorMessage(data, status) {
   );
 }
 
-function authFailureError(data, status) {
+function authFailureError(data, status, username) {
   const raw = errorMessage(data, status);
   const lower = String(raw || '').toLowerCase();
   const badCreds =
@@ -94,12 +149,13 @@ function authFailureError(data, status) {
     || lower.includes('missing data')
     || status === 401
     || status === 403;
+  const who = username ? ` (tried username ${maskSecret(username)})` : '';
   const err = new Error(
     badCreds
-      ? `Flextock login failed (${raw}). Check Render env FLEXTOCK_USERNAME, FLEXTOCK_PASSWORD, and FLEXTOCK_API_KEY — they must be the merchant username, password, and API key from Flextock (no extra quotes/spaces).`
+      ? `Flextock login failed (${raw})${who}. Open Settings → Flextock and enter the merchant username, password, and API key from Flextock (same values as their portal login + API key). Do not use quotes or spaces.`
       : raw
   );
-  // Never forward Flextock 401/403 — the OMS frontend treats 401 as session expiry.
+  // Never forward Flextock 401/403 — the OMS frontend treats bare 401 as session expiry.
   err.statusCode = 502;
   err.upstreamStatus = status;
   err.payload = data;
@@ -114,13 +170,13 @@ function mapUpstreamStatus(status) {
 }
 
 export async function authenticateFlextock({ force = false } = {}) {
-  assertConfigured();
+  await assertConfigured();
   const now = Date.now();
   if (!force && cachedAccess && cachedExpMs - 30_000 > now) {
     return { access: cachedAccess, refresh: cachedRefresh };
   }
 
-  const { username, password, key } = flextockCredentials();
+  const { username, password, key } = await loadFlextockCredentials({ force: true });
   const url = `${apiBase()}/base/auth/`;
   const response = await fetch(url, {
     method: 'POST',
@@ -130,11 +186,11 @@ export async function authenticateFlextock({ force = false } = {}) {
   const data = await parseBody(response);
   if (!response.ok) {
     logger.error(
-      { status: response.status, data, path: '/base/auth/', username },
+      { status: response.status, data, path: '/base/auth/', username: maskSecret(username) },
       'Flextock auth error'
     );
     resetFlextockAuthCache();
-    throw authFailureError(data, response.status);
+    throw authFailureError(data, response.status, username);
   }
 
   const access = data.access || data.access_token;
@@ -153,15 +209,16 @@ export async function authenticateFlextock({ force = false } = {}) {
  * Live probe used by Settings / health. Does not throw for expected auth failures.
  */
 export async function testFlextockConnection() {
-  const { username, password, key } = flextockCredentials();
+  const { username, password, key } = await loadFlextockCredentials({ force: true });
   const configured = Boolean(username && password && key);
   if (!configured) {
     return {
       ok: false,
       configured: false,
       error:
-        'Missing FLEXTOCK_USERNAME, FLEXTOCK_PASSWORD, or FLEXTOCK_API_KEY on the server.',
+        'Missing Flextock username, password, or API key. Save them in Settings → Flextock (or set FLEXTOCK_* on Render).',
       username: null,
+      usernameMasked: null,
     };
   }
   try {
@@ -171,6 +228,7 @@ export async function testFlextockConnection() {
       ok: true,
       configured: true,
       username,
+      usernameMasked: maskSecret(username),
       error: null,
     };
   } catch (err) {
@@ -178,6 +236,7 @@ export async function testFlextockConnection() {
       ok: false,
       configured: true,
       username,
+      usernameMasked: maskSecret(username),
       error: err.message,
       statusCode: err.statusCode || null,
     };
@@ -188,7 +247,7 @@ export async function testFlextockConnection() {
  * Authenticated call to api.flextock.com. Retries once after a 401 by re-authing.
  */
 export async function flextockRequest(path, { method = 'POST', body, query, quiet = false } = {}) {
-  assertConfigured();
+  await assertConfigured();
   const { access } = await authenticateFlextock();
 
   let url = `${apiBase()}${path.startsWith('/') ? path : `/${path}`}`;
@@ -229,7 +288,7 @@ export async function flextockRequest(path, { method = 'POST', body, query, quie
     const raw = errorMessage(data, response.status);
     const err = new Error(
       response.status === 401 || response.status === 403
-        ? `Flextock API rejected the request (${raw}). Check FLEXTOCK_* credentials on Render.`
+        ? `Flextock API rejected the request (${raw}). Check Flextock credentials in Settings.`
         : raw
     );
     err.statusCode = mapUpstreamStatus(response.status);
@@ -244,9 +303,12 @@ export async function flextockRequest(path, { method = 'POST', body, query, quie
 export default {
   flextockRequest,
   isFlextockConfigured,
+  isFlextockConfiguredSync,
   authenticateFlextock,
   resetFlextockAuthCache,
+  resetFlextockCredentialCache,
   testFlextockConnection,
   cleanFlextockSecret,
   flextockCredentials,
+  loadFlextockCredentials,
 };

@@ -27,6 +27,10 @@ const settingsSchema = new mongoose.Schema(
     flextockLastSyncAt: Date,
     flextockConnectionHealthy: { type: Boolean, default: false },
     flextockLastError: String,
+    /** Merchant portal username / password / API key (overrides Render env when set). */
+    flextockUsername: String,
+    flextockPassword: String,
+    flextockApiKey: String,
     defaultLowStockThreshold: { type: Number, default: 5 },
     /** Next sequential number for manual order codes (M-1000, M-1001, …). */
     manualOrderNextSeq: { type: Number },

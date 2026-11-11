@@ -53,7 +53,7 @@ export async function applyFlextockStatusToOrder(order, live) {
 }
 
 export async function syncFlextockOrderStates({ limit = 80 } = {}) {
-  if (!isFlextockConfigured()) return { skipped: true, reason: 'not_configured' };
+  if (!(await isFlextockConfigured())) return { skipped: true, reason: 'not_configured' };
 
   // Always probe auth — previously we marked healthy=true even with zero orders (false green).
   const probe = await testFlextockConnection();

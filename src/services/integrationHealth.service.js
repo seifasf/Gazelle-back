@@ -64,11 +64,14 @@ export async function getIntegrationHealth() {
       pollingThresholdHours: settings?.bostaPollingThresholdHours ?? 2,
     },
     flextock: {
-      configured: isFlextockConfigured(),
+      configured: await isFlextockConfigured(),
       healthy: settings?.flextockConnectionHealthy ?? false,
       lastSyncAt: settings?.flextockLastSyncAt || null,
       lastError: settings?.flextockLastError || null,
       failedShipments: failedFlextockShipments,
+      usernameMasked: settings?.flextockUsername
+        ? `${String(settings.flextockUsername).slice(0, 2)}••••`
+        : null,
     },
     paymob: {
       configured: Boolean(config.PAYMOB_HMAC_SECRET || config.PAYMOB_API_KEY),

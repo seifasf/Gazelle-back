@@ -394,9 +394,9 @@ export async function ensureFlextockOrderForOrder(orderId, actorUserId) {
   }
   assertFlextockShipable(order);
 
-  if (!isFlextockConfigured()) {
+  if (!(await isFlextockConfigured())) {
     const err = new Error(
-      'Flextock API is not configured yet. Add FLEXTOCK_USERNAME, FLEXTOCK_PASSWORD, and FLEXTOCK_API_KEY, then retry.'
+      'Flextock API is not configured yet. Add merchant username, password, and API key in Settings → Flextock, then retry.'
     );
     err.statusCode = 503;
     throw err;
