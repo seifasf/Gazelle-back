@@ -1,6 +1,6 @@
 import Order from '../../models/Order.js';
 import Settings from '../../models/Settings.js';
-import { isFlextockConfigured } from './client.js';
+import { isFlextockConfigured, testFlextockConnection } from './client.js';
 import { getFlextockOrderStatus } from './orders.service.js';
 import { mapFlextockStatusToInternal } from './states.js';
 import * as orderService from '../../services/order.service.js';
@@ -55,6 +55,24 @@ export async function applyFlextockStatusToOrder(order, live) {
 export async function syncFlextockOrderStates({ limit = 80 } = {}) {
   if (!isFlextockConfigured()) return { skipped: true, reason: 'not_configured' };
 
+  // Always probe auth — previously we marked healthy=true even with zero orders (false green).
+  const probe = await testFlextockConnection();
+  await Settings.updateOne(
+    { key: 'global' },
+    {
+      $set: {
+        flextockLastSyncAt: new Date(),
+        flextockConnectionHealthy: Boolean(probe.ok),
+        flextockLastError: probe.ok ? null : (probe.error || 'Flextock auth failed'),
+      },
+    },
+    { upsert: true }
+  );
+  if (!probe.ok) {
+    logger.warn({ err: probe.error }, 'Flextock sync skipped — auth failed');
+    return { skipped: true, reason: 'auth_failed', error: probe.error, checked: 0, updated: 0 };
+  }
+
   const orders = await Order.find({
     shippingMethod: 'flextock',
     flextockOrderCode: { $exists: true, $ne: null },
@@ -81,13 +99,7 @@ export async function syncFlextockOrderStates({ limit = 80 } = {}) {
     }
   }
 
-  await Settings.updateOne(
-    { key: 'global' },
-    { $set: { flextockLastSyncAt: new Date(), flextockConnectionHealthy: true } },
-    { upsert: true }
-  );
-
-  return { skipped: false, checked, updated };
+  return { skipped: false, checked, updated, authOk: true };
 }
 
 export default { syncFlextockOrderStates, applyFlextockStatusToOrder };

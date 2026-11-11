@@ -7,10 +7,29 @@ let cachedAccess = null;
 let cachedRefresh = null;
 let cachedExpMs = 0;
 
+/** Strip whitespace / wrapping quotes common when pasting into Render env UI. */
+export function cleanFlextockSecret(value) {
+  let s = String(value ?? '').trim();
+  if (
+    (s.startsWith('"') && s.endsWith('"'))
+    || (s.startsWith("'") && s.endsWith("'"))
+  ) {
+    s = s.slice(1, -1).trim();
+  }
+  return s;
+}
+
+export function flextockCredentials() {
+  return {
+    username: cleanFlextockSecret(config.FLEXTOCK_USERNAME),
+    password: cleanFlextockSecret(config.FLEXTOCK_PASSWORD),
+    key: cleanFlextockSecret(config.FLEXTOCK_API_KEY),
+  };
+}
+
 export function isFlextockConfigured() {
-  return Boolean(
-    config.FLEXTOCK_USERNAME && config.FLEXTOCK_PASSWORD && config.FLEXTOCK_API_KEY
-  );
+  const { username, password, key } = flextockCredentials();
+  return Boolean(username && password && key);
 }
 
 export function resetFlextockAuthCache() {
@@ -38,7 +57,7 @@ function jwtExpMs(token) {
 function assertConfigured() {
   if (!isFlextockConfigured()) {
     const err = new Error(
-      'Flextock API is not configured yet. Add FLEXTOCK_USERNAME, FLEXTOCK_PASSWORD, and FLEXTOCK_API_KEY, then retry.'
+      'Flextock API is not configured yet. Add FLEXTOCK_USERNAME, FLEXTOCK_PASSWORD, and FLEXTOCK_API_KEY on Render, then retry.'
     );
     err.statusCode = 503;
     throw err;
@@ -66,6 +85,25 @@ function errorMessage(data, status) {
   );
 }
 
+function authFailureError(data, status) {
+  const raw = errorMessage(data, status);
+  const lower = String(raw || '').toLowerCase();
+  const badCreds =
+    lower.includes('no active account')
+    || lower.includes('credentials')
+    || lower.includes('missing data')
+    || status === 401
+    || status === 403;
+  const err = new Error(
+    badCreds
+      ? `Flextock login failed (${raw}). Check Render env FLEXTOCK_USERNAME, FLEXTOCK_PASSWORD, and FLEXTOCK_API_KEY — they must be the merchant username, password, and API key from Flextock (no extra quotes/spaces).`
+      : raw
+  );
+  err.statusCode = status >= 400 && status < 600 ? status : 502;
+  err.payload = data;
+  return err;
+}
+
 export async function authenticateFlextock({ force = false } = {}) {
   assertConfigured();
   const now = Date.now();
@@ -73,22 +111,21 @@ export async function authenticateFlextock({ force = false } = {}) {
     return { access: cachedAccess, refresh: cachedRefresh };
   }
 
+  const { username, password, key } = flextockCredentials();
   const url = `${apiBase()}/base/auth/`;
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      username: config.FLEXTOCK_USERNAME,
-      password: config.FLEXTOCK_PASSWORD,
-      key: config.FLEXTOCK_API_KEY,
-    }),
+    body: JSON.stringify({ username, password, key }),
   });
   const data = await parseBody(response);
   if (!response.ok) {
-    logger.error({ status: response.status, data, path: '/base/auth/' }, 'Flextock auth error');
-    const err = new Error(errorMessage(data, response.status));
-    err.statusCode = response.status;
-    throw err;
+    logger.error(
+      { status: response.status, data, path: '/base/auth/', username },
+      'Flextock auth error'
+    );
+    resetFlextockAuthCache();
+    throw authFailureError(data, response.status);
   }
 
   const access = data.access || data.access_token;
@@ -101,6 +138,41 @@ export async function authenticateFlextock({ force = false } = {}) {
   cachedRefresh = data.refresh || data.refresh_token || null;
   cachedExpMs = jwtExpMs(access) || now + 50 * 60 * 1000;
   return { access: cachedAccess, refresh: cachedRefresh };
+}
+
+/**
+ * Live probe used by Settings / health. Does not throw for expected auth failures.
+ */
+export async function testFlextockConnection() {
+  const { username, password, key } = flextockCredentials();
+  const configured = Boolean(username && password && key);
+  if (!configured) {
+    return {
+      ok: false,
+      configured: false,
+      error:
+        'Missing FLEXTOCK_USERNAME, FLEXTOCK_PASSWORD, or FLEXTOCK_API_KEY on the server.',
+      username: null,
+    };
+  }
+  try {
+    resetFlextockAuthCache();
+    await authenticateFlextock({ force: true });
+    return {
+      ok: true,
+      configured: true,
+      username,
+      error: null,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      configured: true,
+      username,
+      error: err.message,
+      statusCode: err.statusCode || null,
+    };
+  }
 }
 
 /**
@@ -154,4 +226,12 @@ export async function flextockRequest(path, { method = 'POST', body, query, quie
   return data;
 }
 
-export default { flextockRequest, isFlextockConfigured, authenticateFlextock, resetFlextockAuthCache };
+export default {
+  flextockRequest,
+  isFlextockConfigured,
+  authenticateFlextock,
+  resetFlextockAuthCache,
+  testFlextockConnection,
+  cleanFlextockSecret,
+  flextockCredentials,
+};

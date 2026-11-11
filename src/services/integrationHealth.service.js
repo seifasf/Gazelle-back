@@ -3,6 +3,7 @@ import WebhookReceipt from '../models/WebhookReceipt.js';
 import Order from '../models/Order.js';
 import { getShopifyStatus } from '../integrations/shopify/setup.service.js';
 import { isBostaConfigured } from '../integrations/bosta/client.js';
+import { isFlextockConfigured } from '../integrations/flextock/client.js';
 import { bostaWebhookUrl } from '../integrations/bosta/webhookPayload.js';
 import { config } from '../config/index.js';
 import { ORDERS_PLACED_FROM_YMD } from '../constants/index.js';
@@ -22,6 +23,7 @@ export async function getIntegrationHealth() {
     bostaWebhookFailed,
     paymobWebhookLast,
     failedShipments,
+    failedFlextockShipments,
     pendingVerify,
     noResponse,
     readyToShip,
@@ -32,6 +34,7 @@ export async function getIntegrationHealth() {
     WebhookReceipt.countDocuments({ source: 'bosta', error: { $exists: true, $ne: null } }),
     WebhookReceipt.findOne({ source: 'paymob' }).sort({ createdAt: -1 }).select('createdAt'),
     Order.countDocuments({ bostaShipmentStatus: 'failed', placedAt: { $gte: since } }),
+    Order.countDocuments({ flextockShipmentStatus: 'failed', placedAt: { $gte: since } }),
     Order.countDocuments({ internalStatus: 'pending_verification', placedAt: { $gte: since } }),
     Order.countDocuments({ internalStatus: 'no_response', placedAt: { $gte: since } }),
     Order.countDocuments({ internalStatus: 'verified_ready_for_shipping', placedAt: { $gte: since } }),
@@ -60,6 +63,13 @@ export async function getIntegrationHealth() {
       webhookUrl: bostaWebhookUrl(config.APP_URL),
       pollingThresholdHours: settings?.bostaPollingThresholdHours ?? 2,
     },
+    flextock: {
+      configured: isFlextockConfigured(),
+      healthy: settings?.flextockConnectionHealthy ?? false,
+      lastSyncAt: settings?.flextockLastSyncAt || null,
+      lastError: settings?.flextockLastError || null,
+      failedShipments: failedFlextockShipments,
+    },
     paymob: {
       configured: Boolean(config.PAYMOB_HMAC_SECRET || config.PAYMOB_API_KEY),
       apiConfigured: Boolean(config.PAYMOB_API_KEY),
@@ -74,6 +84,7 @@ export async function getIntegrationHealth() {
       readyToShip,
       inTransit,
       failedShipments,
+      failedFlextockShipments,
     },
   };
 }

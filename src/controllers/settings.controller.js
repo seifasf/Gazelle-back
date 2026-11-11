@@ -3,7 +3,7 @@ import BostaStatusMapping from '../models/BostaStatusMapping.js';
 import { syncCatalog } from '../integrations/shopify/sync.service.js';
 import { fetchBostaCities } from '../integrations/bosta/cities.service.js';
 import { isBostaConfigured } from '../integrations/bosta/client.js';
-import { isFlextockConfigured } from '../integrations/flextock/client.js';
+import { isFlextockConfigured, testFlextockConnection } from '../integrations/flextock/client.js';
 import { getAgenda } from '../config/agenda.js';
 import { JOB_NAMES } from '../constants/index.js';
 import { maskSecret } from '../integrations/shopify/credentials.js';
@@ -150,6 +150,32 @@ export async function forceFlextockStatesSync(req, res, next) {
   }
 }
 
+export async function testFlextockAuth(req, res, next) {
+  try {
+    const result = await testFlextockConnection();
+    await Settings.findOneAndUpdate(
+      { key: 'global' },
+      {
+        $set: {
+          flextockLastSyncAt: new Date(),
+          flextockConnectionHealthy: Boolean(result.ok),
+          flextockLastError: result.ok ? null : (result.error || 'Flextock auth failed'),
+        },
+      },
+      { upsert: true }
+    );
+    if (!result.ok) {
+      return res.status(result.configured ? 502 : 503).json({
+        error: result.error || 'Flextock auth failed',
+        data: result,
+      });
+    }
+    res.json({ data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export default {
   getSettings,
   updateSettings,
@@ -157,4 +183,5 @@ export default {
   forceShopifySync,
   forceBostaStatesSync,
   forceFlextockStatesSync,
+  testFlextockAuth,
 };

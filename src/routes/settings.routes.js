@@ -13,5 +13,6 @@ router.post('/bosta-mappings', settingsController.upsertBostaMapping);
 router.post('/shopify/sync', settingsController.forceShopifySync);
 router.post('/bosta/sync-states', settingsController.forceBostaStatesSync);
 router.post('/flextock/sync-states', settingsController.forceFlextockStatesSync);
+router.post('/flextock/test', settingsController.testFlextockAuth);
 
 export default router;

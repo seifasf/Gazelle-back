@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   flextockMerchantOrderCode,
   splitCustomerName,
+  normalizeFlextockPhone,
   flextockLineItems,
   flextockPaymentData,
   flextockCustomerAddress,
@@ -10,6 +11,7 @@ import {
   buildCancelOrderPayload,
 } from './payloads.js';
 import { mapFlextockStatusToInternal, FLEXTOCK_INTERNAL } from './states.js';
+import { cleanFlextockSecret } from './client.js';
 
 test('merchant order code strips Shopify #', () => {
   assert.equal(flextockMerchantOrderCode({ shopifyOrderName: '#45349' }), '45349');
@@ -22,6 +24,17 @@ test('splits customer name for Flextock first/last', () => {
     last_name: 'Ashraf',
   });
   assert.equal(splitCustomerName('Mona').last_name, 'Mona');
+});
+
+test('normalizes Egypt phones to local 01… form', () => {
+  assert.equal(normalizeFlextockPhone('+201144885880'), '01144885880');
+  assert.equal(normalizeFlextockPhone('201144885880'), '01144885880');
+  assert.equal(normalizeFlextockPhone('01144885880'), '01144885880');
+});
+
+test('cleans Render-pasted secrets with quotes/spaces', () => {
+  assert.equal(cleanFlextockSecret('  "abc"  '), 'abc');
+  assert.equal(cleanFlextockSecret("'xyz'"), 'xyz');
 });
 
 test('line items skip duplicate SKUs and keep promotional price', () => {
@@ -83,8 +96,10 @@ test('create-order payload uses Egypt city/area and merchant order code', () => 
   assert.equal(payload.customer_address.country, 'Egypt');
   assert.equal(payload.customer_address.city, 'Cairo');
   assert.equal(payload.customer_address.area, 'Heliopolis');
+  assert.equal(payload.customer_address.phone_number, '01000000000');
   assert.equal(payload.requires_self_delivery, false);
   assert.equal(payload.line_items[0].sku_code, 'GZ-1');
+  assert.equal(payload.line_items[0].sku_promotional_price, null);
   assert.equal(payload.payment_data[0].payment_type, 'cash_on_delivery');
 });
 

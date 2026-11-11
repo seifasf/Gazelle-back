@@ -17,6 +17,16 @@ export function splitCustomerName(fullName) {
   };
 }
 
+/** Flextock examples use local 01… numbers, not +20. */
+export function normalizeFlextockPhone(phone) {
+  let p = String(phone || '').replace(/[\s\-()]/g, '');
+  if (!p) return '';
+  if (p.startsWith('+20')) p = `0${p.slice(3)}`;
+  else if (p.startsWith('0020')) p = `0${p.slice(4)}`;
+  else if (/^20\d{9,}$/.test(p)) p = `0${p.slice(2)}`;
+  return p;
+}
+
 function ymd(date) {
   const d = date instanceof Date ? date : new Date(date || Date.now());
   if (Number.isNaN(d.getTime())) return new Date().toISOString().slice(0, 10);
@@ -47,7 +57,7 @@ export function flextockCustomerAddress(order, customer) {
     is_work_address: false,
     first_name: name.first_name,
     last_name: name.last_name,
-    phone_number: String(shipping.phone || customer?.phone || '').trim(),
+    phone_number: normalizeFlextockPhone(shipping.phone || customer?.phone),
     secondary_phone_number: '',
     note: '',
   };
@@ -86,12 +96,16 @@ export function flextockLineItems(order, variantsById = new Map()) {
     const promo = item.unitCompareAtPrice != null && Number(item.unitCompareAtPrice) > Number(item.unitSellingPrice)
       ? Number(item.unitSellingPrice)
       : null;
-    lines.push({
+    const line = {
       sku_code: sku,
       quantity: Number(item.quantity) || 1,
       sku_price: Number(item.unitCompareAtPrice || item.unitSellingPrice) || 0,
-      sku_promotional_price: promo,
-    });
+    };
+    // Guide: promotional price must be a number or null — never omit when discounted;
+    // omit the key entirely when there is no promo (null can fail some validators).
+    if (promo != null) line.sku_promotional_price = promo;
+    else line.sku_promotional_price = null;
+    lines.push(line);
   }
   return lines;
 }
@@ -188,6 +202,7 @@ export function buildReturnOrderPayload(order, customer, {
 export default {
   flextockMerchantOrderCode,
   splitCustomerName,
+  normalizeFlextockPhone,
   flextockCustomerAddress,
   flextockProductFromVariant,
   flextockLineItems,
