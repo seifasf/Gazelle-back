@@ -4,6 +4,7 @@ import {
   buildCreateOrderPayload,
   flextockMerchantOrderCode,
   validateCreateOrderPayload,
+  explainFlextockCreateError,
 } from './payloads.js';
 import { ensureFlextockProductsForOrder } from './products.service.js';
 import Settings from '../../models/Settings.js';
@@ -91,7 +92,17 @@ export async function createFlextockOrder(order, customer) {
     const already =
       msg.includes('already exists')
       || ((err.statusCode === 400 || err.upstreamStatus === 400) && msg.includes('already'));
-    if (!already) throw err;
+    if (!already) {
+      const explained = explainFlextockCreateError(err.message, payload);
+      if (explained !== err.message) {
+        const wrapped = new Error(explained);
+        wrapped.statusCode = err.statusCode || 400;
+        wrapped.upstreamStatus = err.upstreamStatus;
+        wrapped.payload = err.payload;
+        throw wrapped;
+      }
+      throw err;
+    }
     logger.info({ orderCode: code, orderId: String(order._id) }, 'Flextock order already exists — using live status');
   }
 

@@ -8,11 +8,14 @@ import {
   flextockPaymentData,
   flextockPaymentTimestamp,
   flextockProductFromVariant,
+  flextockCustomerAddress,
   buildCreateOrderPayload,
   buildCancelOrderPayload,
   buildReturnOrderPayload,
   validateCreateOrderPayload,
+  explainFlextockCreateError,
 } from './payloads.js';
+import { normalizeFlextockCity, normalizeFlextockArea } from './address.js';
 import { mapFlextockStatusToInternal, FLEXTOCK_INTERNAL } from './states.js';
 import { cleanFlextockSecret } from './client.js';
 
@@ -33,6 +36,34 @@ test('normalizes Egypt phones to local 01… form', () => {
   assert.equal(normalizeFlextockPhone('+201144885880'), '01144885880');
   assert.equal(normalizeFlextockPhone('201144885880'), '01144885880');
   assert.equal(normalizeFlextockPhone('01144885880'), '01144885880');
+});
+
+test('normalizes Flextock city/area from Arabic and lowercase', () => {
+  assert.equal(normalizeFlextockCity('cairo'), 'Cairo');
+  assert.equal(normalizeFlextockCity('القاهرة'), 'Cairo');
+  assert.equal(normalizeFlextockArea('زيتون'), 'El Zeitoun');
+  assert.equal(normalizeFlextockArea('zayton'), 'El Zeitoun');
+  assert.equal(normalizeFlextockArea('Tagamou3'), 'New Cairo');
+  const addr = flextockCustomerAddress({
+    shippingAddress: {
+      fullName: 'Amr Othman',
+      phone: '0 11 15946949',
+      city: 'cairo',
+      zone: 'زيتون',
+      line1: '32 el kareem st',
+    },
+  });
+  assert.equal(addr.city, 'Cairo');
+  assert.equal(addr.area, 'El Zeitoun');
+  assert.equal(addr.phone_number, '01115946949');
+});
+
+test('explains generic Flextock create errors as address problems', () => {
+  const msg = explainFlextockCreateError('Error in order creation.', {
+    customer_address: { city: 'Cairo', area: 'El Zeitoun' },
+  });
+  assert.match(msg, /Cairo/);
+  assert.match(msg, /El Zeitoun/);
 });
 
 test('cleans Render-pasted secrets with quotes/spaces', () => {

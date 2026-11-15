@@ -1,5 +1,10 @@
 import { config } from '../../config/index.js';
 import { omsCodCollectAmount, omsCodFeeEgp, isOrderPrepaid } from '../../utils/omsCod.js';
+import {
+  normalizeFlextockCity,
+  normalizeFlextockArea,
+  flextockAddressNeedsReview,
+} from './address.js';
 
 export function flextockMerchantOrderCode(order) {
   const name = String(order?.shopifyOrderName || '').trim();
@@ -90,13 +95,13 @@ function cleanLabel(value) {
 export function flextockCustomerAddress(order, customer) {
   const shipping = order?.shippingAddress || {};
   const name = splitCustomerName(shipping.fullName || customer?.fullName);
-  const city = String(shipping.city || '').replace(/\s+/g, ' ').trim();
-  const area = String(shipping.zone || '').replace(/\s+/g, ' ').trim() || city;
+  const city = normalizeFlextockCity(shipping.city);
+  const area = normalizeFlextockArea(shipping.zone || shipping.area, city);
   const phone = normalizeFlextockPhone(shipping.phone || customer?.phone);
   return {
     country: 'Egypt',
     city,
-    area,
+    area: area || city,
     address_line1: String(shipping.line1 || '').trim(),
     address_line2: String(shipping.line2 || '').trim() || String(shipping.line1 || '').trim(),
     building_no: String(shipping.buildingNo || shipping.building || '').trim(),
@@ -310,12 +315,33 @@ export function validateCreateOrderPayload(payload) {
   if (!addr.area) errors.push('customer_address.area is required');
   if (!addr.address_line1) errors.push('customer_address.address_line1 is required');
   if (!addr.phone_number) errors.push('customer_address.phone_number is required');
+  if (flextockAddressNeedsReview(addr.city, addr.area)) {
+    errors.push(
+      `City/area must be English Flextock names (got city “${addr.city}”, area “${addr.area}”). Open the order and set city + area, then retry.`
+    );
+  }
   if (payload?.requires_self_delivery) {
     if (!payload?.shipment_data?.courier_name_code || !payload?.shipment_data?.tracking_number) {
       errors.push('shipment_data is required when requires_self_delivery is true');
     }
   }
   return errors;
+}
+
+export function explainFlextockCreateError(rawMessage, payload) {
+  const raw = String(rawMessage || '').trim() || 'Error in order creation.';
+  const city = payload?.customer_address?.city || '';
+  const area = payload?.customer_address?.area || '';
+  const lower = raw.toLowerCase();
+  if (
+    lower === 'error in order creation.'
+    || lower === 'error in order creation'
+    || lower.includes('city')
+    || lower.includes('area')
+  ) {
+    return `Flextock rejected the address (city “${city}”, area “${area}”). Set English supported city/area on the order, then retry Send.`;
+  }
+  return raw;
 }
 
 export default {
@@ -335,4 +361,5 @@ export default {
   buildCancelOrderPayload,
   buildReturnOrderPayload,
   validateCreateOrderPayload,
+  explainFlextockCreateError,
 };
